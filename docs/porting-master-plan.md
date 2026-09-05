@@ -49,8 +49,18 @@ sotto scacco). Verificato: stesso bestmove/punteggio di prima su tutte le posizi
 (incluse 2 posizioni tattiche nuove — una con una promozione a donna vincente, `d7c8q`, bestmove
 combaciante con l'oracolo), nessuna regressione, piccola ulteriore riduzione di nodi.
 
-**Manca ancora**: Singular Extensions, multi-cut, correction history (Step 8/9 usano
-`correctionValue=0` come segnaposto), l'hindsight depth adjustment da `priorReduction`, la vera
+**CorrectionHistory FATTA** (`correction_value`/`to_corrected_static_eval`/
+`update_correction_history`, search.cpp:85-131): la valutazione statica (Step 5), il margine di
+futility (Step 9) e l'aggiornamento a fine nodo (Step 23, incluso lo smussamento di bestValue
+verso beta sui fail-high non decisivi, search.cpp:1558-1560, non ancora portato prima) usano ora
+il vero `correctionValue` — pedoni/pezzi minori/non-pedoni bianco/nero (hash-indicizzati) più
+continuation correction history a 2 livelli (ss-2, ss-4). Verificato: 62/62 test, bestmove
+identico su tutte le posizioni di test prima/dopo; punteggi leggermente diversi in alcune
+posizioni (atteso e corretto: la correction history esiste apposta per correggere la valutazione
+statica, quindi il suo effetto sul punteggio non è un segno di regressione).
+
+**Manca ancora**: Singular Extensions, multi-cut, l'hindsight depth adjustment da
+`priorReduction`, la vera
 formula di riduzione LMR (`reduction()`, dipende da una tabella `reductions[]`/`rootDelta`/
 `statScore` non ancora portati — oggi LMR resta una riduzione fissa di 1), tutta la taratura fine
 dei margini rimasti, la struttura `Worker`/`RootMove`/`Stack` completa della fonte (qui

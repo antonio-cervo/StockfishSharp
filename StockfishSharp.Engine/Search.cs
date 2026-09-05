@@ -7,8 +7,10 @@
 // (Step 9, search.cpp:994-1008), aspiration windows (iterative_deepening, search.cpp:375-441).
 //
 // Semplificazioni deliberate in questi Step, documentate dove non ovvie:
-// - correctionValue è sempre 0 (correction history non portata — Flow A5/A1, history.h): la
-//   formula del margine di futility resta quella della fonte con questo input a zero.
+// - CorrectionHistory ora portata con fedeltà (correction_value/to_corrected_static_eval/
+//   update_correction_history, search.cpp:85-131): Step 5 (valutazione statica corretta), Step 9
+//   (margine di futility) e l'aggiornamento a fine nodo (Step 23) usano tutti il vero
+//   correctionValue, non più il segnaposto a 0.
 // - "seekMate"/l'estimate di punteggio radice usata da Step 9 usa il punteggio dell'ITERAZIONE
 //   PRECEDENTE completata (non quello del root move in corso di aggiornamento nell'iterazione
 //   corrente come fa rootMoves[pvIdx].score nella fonte — richiederebbe una struttura RootMove
@@ -31,11 +33,11 @@
 // quando una mossa supera davvero alpha (search.cpp:1518-1520), non ogni volta che migliora il
 // punteggio grezzo — un nodo "fail-low puro" (nessuna mossa batte alpha) ora lascia bestMove a
 // null come nella fonte, invece di premiare arbitrariamente la prima mossa provata.
-// NON ancora portati (candidati per i prossimi Step): Singular Extensions, correction history, la
-// vera formula di riduzione LMR (reduction(), che dipende da una tabella reductions[]/rootDelta/
-// statScore non ancora portati — qui LMR resta una riduzione fissa di 1), CapturePieceToHistory,
-// ContinuationHistory/countermove, PawnHistory, LowPlyHistory, TTMoveHistory (vedi MovePick.cs),
-// Lazy SMP (multi-thread), hindsight depth adjustment da priorReduction.
+// NON ancora portati (candidati per i prossimi Step): Singular Extensions, la vera formula di
+// riduzione LMR (reduction(), che dipende da una tabella reductions[]/rootDelta/statScore non
+// ancora portati — qui LMR resta una riduzione fissa di 1), countermove, PawnHistory,
+// LowPlyHistory, TTMoveHistory (vedi MovePick.cs), Lazy SMP (multi-thread), hindsight depth
+// adjustment da priorReduction.
 
 namespace StockfishSharp.Engine;
 
@@ -82,12 +84,114 @@ public sealed class Search
     private int _rootDepth;
     private int _lastCompletedScore = -Infinity;
 
+    // CorrectionHistory, history.h:148-257 — differenze fra valutazione statica e punteggio di
+    // ricerca, per correggere la valutazione statica in Step 5. Chiave: hash di pedoni/pezzi
+    // minori/non-pedoni per colore (history.h:227-248, sizeMinus1 = CORRHIST_BASE_SIZE-1 =
+    // UINT_16_HISTORY_SIZE-1) più una continuation history a parte (ss-2/ss-4).
+    private const int CorrectionHistoryLimit = 1024; // CORRECTION_HISTORY_LIMIT, history.h:41
+    private const int CorrHistSize = 65536; // CORRHIST_BASE_SIZE, history.h:39-40
+    private readonly short[,] _pawnCorrHistory = new short[CorrHistSize, Colors.Nb];
+    private readonly short[,] _minorCorrHistory = new short[CorrHistSize, Colors.Nb];
+    private readonly short[,] _nonPawnWhiteCorrHistory = new short[CorrHistSize, Colors.Nb];
+    private readonly short[,] _nonPawnBlackCorrHistory = new short[CorrHistSize, Colors.Nb];
+    // CorrectionHistory<Continuation>, history.h:183-185 — [pezzo/casa all'ancestro ss-2 o ss-4]
+    // [pezzo/casa della mossa ss-1, valutata al nodo corrente]. Le celle mai scritte condividono
+    // il sentinella [Piece.None,A1,...] esattamente come la fonte condivide un'unica entry
+    // &continuationCorrectionHistory[NO_PIECE][0] per tutti i ply -7..-1 prima della radice.
+    private readonly short[,,,] _continuationCorrHistory = new short[PieceSlots.Nb, Squares.Nb, PieceSlots.Nb, Squares.Nb];
+
     public void Resize(int hashMb) => _tt.Resize(hashMb);
 
     public void NewGame()
     {
         _tt.Clear();
         _movePick.Clear();
+
+        // Worker::clear(), search.cpp:696-697,708-710 — pawn/minor/nonpawn a -5, continuation a
+        // +5 (segno diverso, fedele alla fonte).
+        for (int k = 0; k < CorrHistSize; k++)
+            for (int c = 0; c < Colors.Nb; c++)
+            {
+                _pawnCorrHistory[k, c] = -5;
+                _minorCorrHistory[k, c] = -5;
+                _nonPawnWhiteCorrHistory[k, c] = -5;
+                _nonPawnBlackCorrHistory[k, c] = -5;
+            }
+        for (int p1 = 0; p1 < PieceSlots.Nb; p1++)
+            for (int s1 = 0; s1 < Squares.Nb; s1++)
+                for (int p2 = 0; p2 < PieceSlots.Nb; p2++)
+                    for (int s2 = 0; s2 < Squares.Nb; s2++)
+                        _continuationCorrHistory[p1, s1, p2, s2] = 5;
+    }
+
+    /// <summary><c>correction_value</c>, search.cpp:85-101 — combina le correction history
+    /// hash-indicizzate (pedoni/pezzi minori/non-pedoni bianco/nero) con la continuation
+    /// correction history a due livelli (ss-2, ss-4), pesate come nella fonte.</summary>
+    private int CorrectionValue(Position pos, int ply)
+    {
+        Color us = pos.SideToMove;
+        Move m = _currentMoveHistory[ply + StackOffset - 1]; // (ss-1)->currentMove
+
+        int pcv = _pawnCorrHistory[pos.PawnKey & (CorrHistSize - 1), (byte)us];
+        int micv = _minorCorrHistory[pos.MinorPieceKey & (CorrHistSize - 1), (byte)us];
+        int wnpcv = _nonPawnWhiteCorrHistory[pos.NonPawnKey(Color.White) & (CorrHistSize - 1), (byte)us];
+        int bnpcv = _nonPawnBlackCorrHistory[pos.NonPawnKey(Color.Black) & (CorrHistSize - 1), (byte)us];
+
+        int cntcv;
+        if (m.IsOk)
+        {
+            Square to = m.ToSq;
+            Piece pcAtTo = pos.PieceOn(to);
+            int idx2 = ply + StackOffset - 2;
+            int idx4 = ply + StackOffset - 4;
+            int e2 = _continuationCorrHistory[(byte)_movedPieceHistory[idx2], (byte)_currentMoveHistory[idx2].ToSq, (byte)pcAtTo, (byte)to];
+            int e4 = _continuationCorrHistory[(byte)_movedPieceHistory[idx4], (byte)_currentMoveHistory[idx4].ToSq, (byte)pcAtTo, (byte)to];
+            cntcv = 8761 * (e2 + e4);
+        }
+        else
+        {
+            cntcv = 64049;
+        }
+
+        return (15341 * pcv) + (10569 * micv) + (12906 * (wnpcv + bnpcv)) + cntcv;
+    }
+
+    /// <summary><c>to_corrected_static_eval</c>, search.cpp:105-107.</summary>
+    private static int ToCorrectedStaticEval(int v, int cv) =>
+        Math.Clamp(v + (cv / 131072), Values.TbLossInMaxPly + 1, Values.TbWinInMaxPly - 1);
+
+    /// <summary><c>update_correction_history</c>, search.cpp:109-131 — chiamata a fine nodo
+    /// (Step 23) quando la mossa migliore non è una cattura e la direzione dell'errore combacia
+    /// con sopra/sotto i bound.</summary>
+    private void UpdateCorrectionHistory(Position pos, int ply, int bonus)
+    {
+        Color us = pos.SideToMove;
+        Move m = _currentMoveHistory[ply + StackOffset - 1];
+
+        const int nonPawnWeight = 186;
+        UpdateCorrHistoryEntry(ref _pawnCorrHistory[pos.PawnKey & (CorrHistSize - 1), (byte)us], bonus);
+        UpdateCorrHistoryEntry(ref _minorCorrHistory[pos.MinorPieceKey & (CorrHistSize - 1), (byte)us], bonus * 150 / 128);
+        UpdateCorrHistoryEntry(ref _nonPawnWhiteCorrHistory[pos.NonPawnKey(Color.White) & (CorrHistSize - 1), (byte)us], bonus * nonPawnWeight / 128);
+        UpdateCorrHistoryEntry(ref _nonPawnBlackCorrHistory[pos.NonPawnKey(Color.Black) & (CorrHistSize - 1), (byte)us], bonus * nonPawnWeight / 128);
+
+        if (m.IsOk)
+        {
+            Square to = m.ToSq;
+            Piece pc = pos.PieceOn(to);
+            int idx2 = ply + StackOffset - 2;
+            int idx4 = ply + StackOffset - 4;
+            UpdateCorrHistoryEntry(ref _continuationCorrHistory[(byte)_movedPieceHistory[idx2], (byte)_currentMoveHistory[idx2].ToSq, (byte)pc, (byte)to], bonus * 130 / 128);
+            UpdateCorrHistoryEntry(ref _continuationCorrHistory[(byte)_movedPieceHistory[idx4], (byte)_currentMoveHistory[idx4].ToSq, (byte)pc, (byte)to], bonus * 70 / 128);
+        }
+    }
+
+    /// <summary>Stessa formula "a gravità" di <c>StatsEntry::operator&lt;&lt;</c> usata in
+    /// MovePick.cs — qui con D=<see cref="CorrectionHistoryLimit"/>.</summary>
+    private static void UpdateCorrHistoryEntry(ref short entry, int bonus)
+    {
+        int clampedBonus = Math.Clamp(bonus, -CorrectionHistoryLimit, CorrectionHistoryLimit);
+        int val = entry;
+        entry = (short)(val + clampedBonus - (val * Math.Abs(clampedBonus) / CorrectionHistoryLimit));
     }
 
     /// <summary><c>value_to_tt</c>, search.cpp:1911: converte un punteggio di matto/tablebase da
@@ -225,6 +329,8 @@ public sealed class Search
         bool ttPv = isPvNode || (probe.Found && probe.Data.IsPv);
         bool ttCapture = probe.Found && probe.Data.Move != Move.None && pos.Capture(probe.Data.Move);
 
+        int correctionValue = CorrectionValue(pos, ply);
+
         if (!isPvNode && probe.Found && probe.Data.Depth >= depth && Values.IsValid(ttScore))
         {
             if (probe.Data.Bound == Bound.Exact) return ttScore;
@@ -232,9 +338,8 @@ public sealed class Search
             if (probe.Data.Bound == Bound.Upper && ttScore <= alpha) return ttScore;
         }
 
-        // Step 5. Valutazione statica — position.cpp non tiene una correction history (non
-        // portata), quindi "to_corrected_static_eval" qui è solo il clamp fuori dal range
-        // tablebase, con correctionValue fisso a 0 (vedi nota in testa al file).
+        // Step 5. Valutazione statica — to_corrected_static_eval applica ora la vera correction
+        // history (CorrectionValue sopra), non più un segnaposto a 0.
         int staticEval;
         int eval;
         int unadjustedStaticEval = Values.None;
@@ -246,7 +351,7 @@ public sealed class Search
         else
         {
             unadjustedStaticEval = probe.Found && Values.IsValid(probe.Data.Eval) ? probe.Data.Eval : Evaluate.StaticEval(pos);
-            staticEval = eval = Math.Clamp(unadjustedStaticEval, Values.TbLossInMaxPly + 1, Values.TbWinInMaxPly - 1);
+            staticEval = eval = ToCorrectedStaticEval(unadjustedStaticEval, correctionValue);
 
             if (Values.IsValid(ttScore)
                 && (probe.Data.Bound == (ttScore > eval ? Bound.Lower : Bound.Upper)))
@@ -281,7 +386,8 @@ public sealed class Search
                 futilityMult -= 20 * (probe.Found ? 0 : 1);
 
                 int futilityMargin = (futilityMult * depth)
-                    - (((2789 * (improving ? 1 : 0)) + (335 * (opponentWorsening ? 1 : 0))) * futilityMult / 1024);
+                    - (((2789 * (improving ? 1 : 0)) + (335 * (opponentWorsening ? 1 : 0))) * futilityMult / 1024)
+                    + (Math.Abs(correctionValue) / 198435);
 
                 if (eval - futilityMargin >= beta)
                     return ((661 * beta) + (363 * eval)) / 1024;
@@ -440,8 +546,24 @@ public sealed class Search
             }
         }
 
+        // search.cpp:1558-1560: smussa bestValue verso beta quando fallisce alto per punteggi non
+        // decisivi — evita che un singolo taglio beta "profondo poco" venga preso alla lettera.
+        if (value >= beta && !Values.IsDecisive(value) && !Values.IsDecisive(alpha))
+            value = ((value * depth) + beta) / (depth + 1);
+
         if (bestMove != null)
             _movePick.UpdateStats(pos, bestMove.Value, quietsSearched, capturesSearched, depth, probe.Data.Move, isPvNode, contRefs, inCheck);
+
+        // search.cpp:1629-1638: aggiorna la correction history solo se la mossa migliore non è una
+        // cattura e la direzione dell'errore (bestValue sopra/sotto la valutazione statica)
+        // combacia con l'esito (una bestMove trovata o un fail-low puro).
+        if (!inCheck && !(bestMove != null && pos.Capture(bestMove.Value))
+            && (value > staticEval) == (bestMove != null))
+        {
+            int chBonus = Math.Clamp((value - staticEval) * depth * (bestMove != null ? 12 : 18) / 128,
+                -CorrectionHistoryLimit / 4, CorrectionHistoryLimit / 4);
+            UpdateCorrectionHistory(pos, ply, 1061 * chBonus / 1024);
+        }
 
         var flag = value <= origAlpha ? Bound.Upper : value >= beta ? Bound.Lower : Bound.Exact;
         _tt.Save(probe.WriteIndex, pos.Key, ValueToTt(value, ply), ttPv, flag, depth, bestMove ?? Move.None, unadjustedStaticEval);
