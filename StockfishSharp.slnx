@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="StockfishSharp.Engine/StockfishSharp.Engine.csproj" />
+  <Project Path="StockfishSharp.Tests/StockfishSharp.Tests.csproj" />
+  <Project Path="StockfishSharp.Uci/StockfishSharp.Uci.csproj" />
+</Solution>
