@@ -186,55 +186,49 @@ N7: la ricerca è ancora il nucleo parziale di Flow A1 (mancano ProbCut, Singula
 aspiration windows, ecc.) — l'accordo pieno con l'oracolo è il criterio di fine progetto, non di
 questa fase, che riguarda solo l'integrazione della valutazione.
 
-### N8 — Percorso AVX512ICL (obiettivo, non extra) — 🟡 PARZIALE (accumulatore fatto)
+### N8 — Percorso AVX512 (obiettivo, non extra) — ✅ FATTO, con una scelta di design diversa dalla fonte
 
-**Fatto** (2026-09-05): `NnueAccumulator.AddWeightRowI16Avx512`/`AddWeightRowI8Avx512` — la somma
-delle righe di peso nell'accumulatore (il ciclo più caldo di N3, ripetuto per ogni feature attiva)
-via `Vector512<short>`, gated a runtime da `Avx512BW.IsSupported && Avx512F.IsSupported`. Per i
-pesi i8 (minacce/coppie pedoni): `Vector512.WidenLower`/`WidenUpper` per il sign-extend a i16 (64
-lane i8 → 2× 32 lane i16), poi somma. Niente permutazione dei pesi qui: la fonte permuta
-biases/weights solo per il trucco `packus` di `transform_perspective` (sotto, non ancora fatto) —
-la somma delle righe è associativa indipendentemente da quale registro tiene quale porzione,
-quindi bit-esatta anche senza permutazione.
+**Accumulatore** (`NnueAccumulator.AddWeightRowI16Avx512`/`AddWeightRowI8Avx512`): la somma delle
+righe di peso (il ciclo più caldo di N3, ripetuto per ogni feature attiva) via `Vector512<short>`,
+gated a runtime da `Avx512BW.IsSupported && Avx512F.IsSupported`. Per i pesi i8 (minacce/coppie
+pedoni): `Vector512.WidenLower`/`WidenUpper` per il sign-extend a i16 (64 lane i8 → 2× 32 lane
+i16), poi somma. Niente permutazione dei pesi qui: la somma delle righe è associativa
+indipendentemente da quale registro tiene quale porzione, quindi bit-esatta anche senza
+permutazione — la permutazione serve solo al trucco `packus` sotto.
 
-**Verificato**: 3 nuovi test — CPU ha AVX512BW+F su questa macchina; `AddWeightRowI16Avx512`/
-`AddWeightRowI8Avx512` bit-esatti contro le rispettive controparti scalari su 50 righe di pesi
-casuali ciascuno (`Assert.Equal` su array, non "circa uguali"); i 2 test `MaterialPsqt*` esistenti
-(verificati contro l'oracolo in N3) continuano a passare — e ora **passano già attraverso il
-percorso AVX512**, dato che questa macchina lo supporta, quindi la colonna PSQT è verificata
-contro l'oracolo anche per il percorso vettoriale, non solo per lo scalare.
+**`transform_perspective` e `AffineTransform`** (`NnueLayers.TransformPerspectiveAvx512`/
+`AffineTransformAvx512`, stesso gating): qui la **scelta è diversa dalla fonte**. NON si replica
+il bit-trick di Stockfish (packus implicito + permutazione dei pesi al caricamento,
+`PackusEpi16Order`; `maddubs_epi16`+`madd_epi16` per i prodotti int8 dei layer) — troppo delicato
+da verificare a mano, e la permutazione tocca il caricamento della rete rendendo un bug silenzioso
+ovunque. Al loro posto, stessa matematica ma meccanica diversa:
+- `transform_perspective`: `clamp` 0..255, prodotto, `/512` come nella fonte, ma il passaggio a
+  byte usa `Vector512.Narrow` **portabile** di .NET, che concatena le corsie in ordine naturale
+  (basso poi alto) invece dell'ordine intrecciato di `_mm512_packus_epi16` — stesso risultato,
+  zero permutazione da gestire.
+- `AffineTransform`: niente accumulo intermedio a i16 (nella fonte al sicuro dalla saturazione
+  solo perché i valori sono vincolati — vedi l'avvertenza in `porting-master-plan.md`); si allarga
+  input (byte) e pesi (sbyte) a int32 con due `Vector512.Widen` in cascata prima di moltiplicare —
+  un solo livello di rischio invece di due, a costo di qualche istruzione in più.
+- `ClippedReLU`/`SqrClippedReLU` restano scalari: operano su soli 32 elementi (L2/L3), il
+  contributo alle prestazioni è trascurabile rispetto alle due riduzioni larghe sopra (fino a 1024
+  elementi) — non vale il rischio di altro codice SIMD per un guadagno ininfluente.
 
-**NON ancora fatto** (resta N8): `transform_perspective` (il trucco `packus`+`mulhi`, che RICHIEDE
-la permutazione dei pesi al caricamento — `PackusEpi16Order = {0,2,4,6,1,3,5,7}`), `AffineTransform`/
-`AffineTransformSparseInput` (fc_0/fc_1/fc_2, con `m512_add_dpbusd_epi32` senza VNNI), `ClippedReLU`,
-`SqrClippedReLU`. Sono la parte più delicata (bit-trick di packing), da fare con la stessa
-metodologia di verifica a due stadi (contro lo scalare, poi contro l'oracolo).
+Conseguenza pratica: `permute_weights()`/`unpermute_weights()` della fonte non hanno equivalente
+in questo porting, e non ne avranno bisogno finché resta questa strategia. `nnz_helper.h`
+(VPCOMPRESSB per generare liste sparse di indici attivi) non serve per lo stesso motivo — non
+generiamo indici in quel formato.
 
-### N8 (dettaglio rimanente) — Percorso AVX512ICL, layer e transform_perspective
-Porting dei rami `USE_AVX512*` di `transform_perspective`, `AffineTransform`,
-`AffineTransformSparseInput` (con `nnz_helper.h`), `ClippedReLU`, `SqrClippedReLU`, via
-`System.Runtime.Intrinsics.X86.Avx512F/BW/DQ/Vbmi/Vbmi2` — stesso approccio già usato in
-`Attacks.cs` per AVX2. Include la permutazione dei pesi al caricamento
-(`PackusEpi16Order = {0,2,4,6,1,3,5,7}`), che nello scalare non serviva.
-
-Verificato empiricamente che .NET 10 espone tutto il necessario **tranne `Avx512Vnni`**: per i
-prodotti scalari int8 dei layer si porta la variante senza VNNI (`maddubs_epi16` + `madd_epi16`),
-che è già presente nel `simd.h` della fonte. Vedi `porting-master-plan.md` per la tabella
-completa dei sottoinsiemi e per l'assunzione sulla saturazione int16 che questo comporta.
-
-Selezione a **runtime** (`Avx512F.IsSupported && Avx512Vbmi2.IsSupported && ...`), non a tempo di
-compilazione come la fonte: un solo binario che usa il meglio disponibile, con lo scalare come
-fallback.
-
-**Verifica** (doppia, come per i magic bitboard):
-1. SIMD contro **lo scalare già verificato**, su molte posizioni casuali — devono dare valori
-   identici bit per bit, non "simili".
-2. SIMD contro **l'oracolo**, sulle stesse posizioni di N3/N5/N6. Qui il confronto è
-   particolarmente pulito perché è lo **stesso percorso ISA** che esegue l'oracolo (a meno di
-   VNNI).
-
-Il guadagno atteso è grande: NNUE è il percorso più caldo del motore, lo scalare sarà
-plausibilmente un ordine di grandezza più lento.
+**Verificato**: CPU con AVX512BW+F su questa macchina; `AddWeightRowI16Avx512`/`AddWeightRowI8Avx512`
+bit-esatti contro le controparti scalari su 50 righe di pesi casuali ciascuno;
+`TransformPerspectiveAvx512` bit-esatto su 50 accumulatori casuali; `AffineTransformAvx512`
+bit-esatto sulle tre forme reali dei layer (1024→32, 64→32, 128→1), input/pesi/bias casuali —
+tutti con `Assert.Equal` su array, non "circa uguali". Più: tutti i test esistenti verificati
+contro l'oracolo (`MaterialPsqt*` in N3, `Positional`/`FinalEvaluation` in N5/N6) continuano a
+passare — e ora **passano attraverso il percorso AVX512 per intero**, dato che questa macchina lo
+supporta: l'intera catena accumulatore→transform_perspective→layer→evaluate è verificata contro
+l'oracolo anche lungo il percorso vettoriale, non solo lo scalare. Nessuna regressione nei test di
+`Search`/perft/attacks (61/61 totali).
 
 ### N9 — (dopo) Aggiornamento incrementale
 `AccumulatorStack` + Finny tables + tracciamento `DirtyPiece`/`DirtyThreats` in `Position`. È

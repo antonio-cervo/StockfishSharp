@@ -67,12 +67,13 @@ N1 caricamento file → N2 indici feature → N3 accumulatore + **verifica colon
 quantizzazione → N5 layer → **verifica colonna Positional** → N6 involucro `evaluate()` → **verifica
 Final evaluation** → N7 integrazione → N8 **AVX512ICL meno VNNI** → N9 aggiornamento incrementale.
 
-**N1-N7 FATTI E VERIFICATI** (2026-09-05): motore ora gioca con la vera valutazione NNUE via UCI
-(non più il placeholder materiale+PSQT), confermato contro l'oracolo su più posizioni. Resta N8
-(percorso SIMD, per la velocità) e N9 (aggiornamento incrementale dell'accumulatore).
-
-Da leggere ancora (per N8): `nnue_accumulator.cpp` (953, rami SIMD), i 4 file dei layer (1.296,
-rami SIMD), `nnz_helper.h` (171), `network.cpp` (resto), `simd.h` (532).
+**N1-N8 FATTI E VERIFICATI** (2026-09-05): motore gioca con la vera valutazione NNUE via UCI (non
+più il placeholder materiale+PSQT), percorso AVX512 attivo su questa macchina per accumulatore e
+layer, tutto confermato contro l'oracolo. N8 usa una meccanica SIMD diversa dalla fonte per
+`transform_perspective`/`AffineTransform` (niente permutazione pesi/trucco packus/maddubs — vedi
+`nnue-porting-plan.md` per il perché) — stesso risultato numerico, verificato bit-esatto contro lo
+scalare oltre che contro l'oracolo. Resta solo N9 (aggiornamento incrementale dell'accumulatore,
+prerequisito di C1 Lazy SMP).
 
 ---
 
@@ -157,6 +158,12 @@ sequenze sono matematicamente equivalenti, ma `maddubs_epi16` satura a int16 men
 accumula in int32 senza quella saturazione intermedia. Nel primo layer i valori sono vincolati in
 modo che la saturazione non possa avvenire (per questo Stockfish si permette entrambe le
 varianti), ma se emergesse una divergenza nei layer, **questa è la prima cosa da controllare**.
+
+**Nota post-N8**: questo ragionamento su VNNI/maddubs era la pianificazione prima di scrivere
+codice. In pratica N8 (`docs/nnue-porting-plan.md`) ha preso una strada diversa e più semplice per
+`AffineTransform`: niente `maddubs_epi16` né `VPDPBUSD`, si allarga tutto a int32 con
+`Vector512.Widen` prima di moltiplicare — l'assunzione sulla saturazione qui sopra non si applica
+al nostro porting (non ha accumulo intermedio a i16), resta rilevante solo per capire l'oracolo.
 
 ---
 
