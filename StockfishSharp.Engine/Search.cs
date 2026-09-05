@@ -64,18 +64,17 @@ public sealed class Search
     private const int LmrMinDepth = 3;
     private const int LmrMinMoveIndex = 3;
 
-    // Cronologia della valutazione statica per ply, per calcolare improving/opponentWorsening —
-    // Stack::staticEval della fonte, ma qui solo l'array di interi che serve (niente
-    // continuationHistory/pv/ecc., non ancora portati). Indice = ply + 2, per poter leggere
-    // (ss-2) anche dal ply 0 — search.cpp:289-298 alloca stack[MAX_PLY+10] con lo stesso scopo.
-    private readonly int[] _staticEvalHistory = new int[Ply.MaxPly + 3];
-
-    // Mossa e pezzo mosso ad ogni ply — Stack::currentMove della fonte, stesso schema di indice
-    // (ply+2) di _staticEvalHistory, per la continuation history a un livello di lookback (vedi
-    // MovePick.UpdateStats). Move.None/Piece.None (default di Array.Clear) è il sentinella
-    // "(ss-i)->currentMove non è ok", esattamente come i ply -7..-1 nella fonte.
-    private readonly Move[] _currentMoveHistory = new Move[Ply.MaxPly + 3];
-    private readonly Piece[] _movedPieceHistory = new Piece[Ply.MaxPly + 3];
+    // Stack della fonte (search.cpp:289-298: stack[MAX_PLY+10], ss=stack+7) ridotto ai soli campi
+    // che servono qui: valutazione statica (improving/opponentWorsening), mossa/pezzo mosso/scacco
+    // del nodo/mossa-era-cattura per ply, per la continuation history (fino a ss-6). StackOffset=7
+    // come la fonte, per poter leggere (ss-6) anche dal ply 0. Sentinella "(ss-i) non esiste o non
+    // tracciata": Move.None/Piece.None (default di Array.Clear).
+    private const int StackOffset = 7;
+    private readonly int[] _staticEvalHistory = new int[Ply.MaxPly + StackOffset + 1];
+    private readonly Move[] _currentMoveHistory = new Move[Ply.MaxPly + StackOffset + 1];
+    private readonly Piece[] _movedPieceHistory = new Piece[Ply.MaxPly + StackOffset + 1];
+    private readonly bool[] _inCheckHistory = new bool[Ply.MaxPly + StackOffset + 1];
+    private readonly bool[] _captureStageHistory = new bool[Ply.MaxPly + StackOffset + 1];
 
     // Usati da Step 9 (futility pruning) per "seekMate" — vedi nota di semplificazione in testa
     // al file: qui è il punteggio/la profondità dell'ULTIMA iterazione completata, non del root
@@ -134,10 +133,11 @@ public sealed class Search
         _tt.NewSearch();
 
         Array.Clear(_staticEvalHistory);
-        _staticEvalHistory[0] = Values.None;
-        _staticEvalHistory[1] = Values.None;
+        for (int i = 0; i < StackOffset; i++) _staticEvalHistory[i] = Values.None; // (ss-7)..(ss-1)
         Array.Clear(_currentMoveHistory);
         Array.Clear(_movedPieceHistory);
+        Array.Clear(_inCheckHistory);
+        Array.Clear(_captureStageHistory);
         _lastCompletedScore = -Infinity;
 
         var result = new SearchResult();
@@ -241,7 +241,7 @@ public sealed class Search
 
         if (inCheck)
         {
-            staticEval = eval = _staticEvalHistory[ply]; // (ss-2)->staticEval
+            staticEval = eval = _staticEvalHistory[ply + StackOffset - 2]; // (ss-2)->staticEval
         }
         else
         {
@@ -256,10 +256,10 @@ public sealed class Search
                 _tt.Save(probe.WriteIndex, pos.Key, Values.None, ttPv, Bound.None, Ply.DepthNone, Move.None, unadjustedStaticEval);
         }
 
-        _staticEvalHistory[ply + 2] = staticEval;
+        _staticEvalHistory[ply + StackOffset] = staticEval;
 
-        bool improving = staticEval > _staticEvalHistory[ply]; // (ss-2)->staticEval
-        bool opponentWorsening = staticEval > -_staticEvalHistory[ply + 1]; // -(ss-1)->staticEval
+        bool improving = staticEval > _staticEvalHistory[ply + StackOffset - 2]; // (ss-2)->staticEval
+        bool opponentWorsening = staticEval > -_staticEvalHistory[ply + StackOffset - 1]; // -(ss-1)->staticEval
 
         if (!inCheck)
         {
@@ -357,7 +357,8 @@ public sealed class Search
         if (moves.Count == 0)
             return inCheck ? -(MateScore - ply) : 0;
 
-        _movePick.OrderMoves(pos, moves, ply, probe.Data.Move, _movedPieceHistory[ply + 1], _currentMoveHistory[ply + 1].ToSq);
+        var contRefs = BuildContinuationRefs(ply);
+        _movePick.OrderMoves(pos, moves, ply, probe.Data.Move, contRefs);
 
         int origAlpha = alpha;
         int value = -Infinity;
@@ -377,10 +378,13 @@ public sealed class Search
             bool givesCheck = pos.GivesCheck(m);
 
             // Stack::currentMove per la continuation history del ply successivo (MovePick, i suoi
-            // (ss-1)) — va registrata PRIMA di fare la mossa, "moved_piece" guarda la casa di
-            // partenza sulla posizione attuale.
-            _movedPieceHistory[ply + 2] = pos.MovedPiece(m);
-            _currentMoveHistory[ply + 2] = m;
+            // (ss-1)..(ss-6)) — va registrata PRIMA di fare la mossa, "moved_piece" guarda la casa
+            // di partenza sulla posizione attuale; inCheck/captureStage selezionano la tabella
+            // come in do_move, search.cpp:663-671.
+            _movedPieceHistory[ply + StackOffset] = pos.MovedPiece(m);
+            _currentMoveHistory[ply + StackOffset] = m;
+            _inCheckHistory[ply + StackOffset] = inCheck;
+            _captureStageHistory[ply + StackOffset] = captureStage;
 
             var st = new StateInfo();
             pos.DoMove(m, st, givesCheck);
@@ -437,11 +441,7 @@ public sealed class Search
         }
 
         if (bestMove != null)
-        {
-            Piece prevPiece = _movedPieceHistory[ply + 1]; // (ss-1)->currentMove
-            Square prevTo = _currentMoveHistory[ply + 1].ToSq;
-            _movePick.UpdateStats(pos, bestMove.Value, quietsSearched, capturesSearched, depth, probe.Data.Move, isPvNode, prevPiece, prevTo);
-        }
+            _movePick.UpdateStats(pos, bestMove.Value, quietsSearched, capturesSearched, depth, probe.Data.Move, isPvNode, contRefs, inCheck);
 
         var flag = value <= origAlpha ? Bound.Upper : value >= beta ? Bound.Lower : Bound.Exact;
         _tt.Save(probe.WriteIndex, pos.Key, ValueToTt(value, ply), ttPv, flag, depth, bestMove ?? Move.None, unadjustedStaticEval);
@@ -483,9 +483,9 @@ public sealed class Search
             return -(MateScore - ply);
 
         // Continuation history non tracciata in quiescenza (Quiesce non scrive
-        // _currentMoveHistory/_movedPieceHistory) — Piece.None disattiva il termine, resta solo
+        // _currentMoveHistory/_movedPieceHistory) — array vuoto disattiva il termine, resta solo
         // main history + killer/SEE come prima di questo Step.
-        _movePick.OrderMoves(pos, candidates, ply, Move.None, Piece.None, Square.A1);
+        _movePick.OrderMoves(pos, candidates, ply, Move.None, EmptyContinuationRefs);
 
         foreach (var m in candidates)
         {
@@ -499,6 +499,22 @@ public sealed class Search
         }
 
         return alpha;
+    }
+
+    private static readonly ContinuationRef[] EmptyContinuationRefs = new ContinuationRef[6];
+
+    /// <summary>Costruisce <c>(ss-1)..(ss-6)-&gt;currentMove</c> per la continuation history —
+    /// vedi MovePick.cs. Con StackOffset=7 l'indice minimo (ply=0, i=6) è 1, sempre non negativo.</summary>
+    private ContinuationRef[] BuildContinuationRefs(int ply)
+    {
+        var refs = new ContinuationRef[6];
+        for (int i = 1; i <= 6; i++)
+        {
+            int idx = ply + StackOffset - i;
+            if (_currentMoveHistory[idx].IsOk)
+                refs[i - 1] = new ContinuationRef(true, _inCheckHistory[idx], _captureStageHistory[idx], _movedPieceHistory[idx], _currentMoveHistory[idx].ToSq);
+        }
+        return refs;
     }
 
     private static bool HasNonPawnMaterial(Position pos, Color c)

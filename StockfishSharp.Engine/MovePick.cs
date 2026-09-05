@@ -1,32 +1,46 @@
-// Ancora NON un porting diretto di src/movepick.cpp (383 righe: generazione a stadi, countermove,
-// continuation history, capture history) né di src/history.h per intero — vedi
-// docs/porting-plan.md/docs/porting-master-plan.md (Flow A2). Nota di fedeltà: la fonte reale
-// (questa versione, letta in ../stockfish-upstream-reference) NON usa più le killer move
-// classiche — le ha eliminate a favore della sola history a più livelli (main+continuation+
-// capture). Le killer restano qui come euristica aggiuntiva NOSTRA (non della fonte), da
-// rivalutare/rimuovere quando arriverà la continuation history vera.
+// Ancora NON un porting diretto di src/movepick.cpp (383 righe: generazione a stadi, countermove)
+// — vedi docs/porting-plan.md/docs/porting-master-plan.md (Flow A2). Da src/history.h portate con
+// fedeltà main/capture/continuation history (sotto); mancano ancora pawn/low-ply/TT-move history.
+// Nota di fedeltà: la fonte reale (questa versione, letta in ../stockfish-upstream-reference) NON
+// usa più le killer move classiche — le ha eliminate a favore della sola history a più livelli.
+// Le killer restano qui come euristica aggiuntiva NOSTRA (non della fonte), da rivalutare/
+// rimuovere quando arriverà la generazione a stadi vera (countermove incluso).
 //
 // Portato con fedeltà: ButterflyHistory (history.h:70-78,128 — aggiornamento "a gravità"
 // StatsEntry::operator<<, D=7183) e la formula di bonus/malus di update_all_stats
 // (search.cpp:1957-1998, solo il ramo delle mosse quiete: bonus alla bestMove, malus decrescente
 // alle altre mosse quiete provate).
 //
-// ContinuationHistory PARZIALE: la fonte guarda fino a 6 ply indietro (conthist_bonuses,
-// search.cpp:2018-2019, pesi {520,390,145,251,66,209} per ss-1..ss-6) con una selezione
-// [inCheck][captureStage] a parte per ogni combinazione di ply corrente/precedente. Qui SOLO
-// ss-1 (il peso maggiore, 520), UNA sola tabella (niente selezione inCheck/captureStage), niente
-// "positiveCount"/moltiplicatore variabile (con un solo termine è sempre il primo,
-// CMHCMultipliers[0]=94) — vedi UpdateQuietHistory. Richiede Search.cs a tracciare
-// Stack::currentMove/moved_piece per ply (fatto in questo Step).
+// ContinuationHistory FEDELE per i 6 livelli di lookback (ss-1..ss-6, conthist_bonuses
+// search.cpp:2018-2022, pesi {520,390,145,251,66,209} e CMHCMultipliers
+// {94,103,110,106,119,126,121}), inclusa la selezione [inCheck][captureStage] della fonte
+// (do_move, search.cpp:663-671: la tabella dipende dallo scacco del NODO GENITORE e da se la
+// mossa lì giocata era una cattura) e il "solo i primi 2 se il nodo corrente è sotto scacco"
+// (search.cpp:2028-2029). Richiede Search.cs a tracciare currentMove/moved_piece/inCheck/
+// captureStage per ply (ContinuationRef, costruita da Search.cs e passata qui).
 //
 // CapturePieceToHistory portata con fedeltà (history.h:135, D=10692) — bonus/malus da
 // update_all_stats (search.cpp:1993-2011), usata anche in OrderMoves come termine aggiuntivo
 // (la fonte la userebbe dentro il vero MovePicker a stadi, non ancora portato).
 //
-// NON portato: ContinuationHistory per ss-2..ss-6, PawnHistory, LowPlyHistory, TTMoveHistory,
-// CorrectionHistory (vedi Search.cs).
+// NON portato: PawnHistory, LowPlyHistory, TTMoveHistory, CorrectionHistory (vedi Search.cs); in
+// OrderMoves la continuation history usa solo ss-1 (non tutti e 6 i livelli) come termine
+// d'ordinamento — la fonte la userebbe tutta dentro il vero MovePicker a stadi/reduction(), non
+// ancora portati.
 
 namespace StockfishSharp.Engine;
+
+/// <summary>Informazioni su <c>(ss-i)-&gt;currentMove</c> necessarie alla continuation history —
+/// costruita da <see cref="Search"/> per i=1..6, <see cref="IsOk"/> falso se quel ply non esiste
+/// (vicino alla radice) o la mossa lì non è stata tracciata (es. in quiescenza).</summary>
+public readonly struct ContinuationRef(bool isOk, bool inCheck, bool captureStage, Piece piece, Square to)
+{
+    public readonly bool IsOk = isOk;
+    public readonly bool InCheck = inCheck;
+    public readonly bool CaptureStage = captureStage;
+    public readonly Piece Piece = piece;
+    public readonly Square To = to;
+}
 
 public sealed class MovePick
 {
@@ -43,10 +57,14 @@ public sealed class MovePick
     // [colore][move.raw()] esattamente come la fonte.
     private readonly short[,] _mainHistory = new short[Colors.Nb, 65536];
 
-    // ContinuationHistory a un solo livello di lookback (ss-1) — vedi nota in testa al file.
-    // Indicizzata [pezzo mosso al ply precedente][sua casa di arrivo][pezzo di questa mossa][sua
-    // casa di arrivo], PieceToHistory della fonte (history.h:137-138).
-    private readonly short[,,,] _continuationHistory1 = new short[PieceSlots.Nb, Squares.Nb, PieceSlots.Nb, Squares.Nb];
+    // ContinuationHistory, history.h:137-143 — ContinuationHistoryBlock::table[2][2] della fonte:
+    // indicizzata [scacco del nodo genitore][la sua mossa era una cattura][pezzo mosso lì][sua
+    // casa di arrivo][pezzo di questa mossa][sua casa di arrivo].
+    private readonly short[,,,,,] _continuationHistory = new short[2, 2, PieceSlots.Nb, Squares.Nb, PieceSlots.Nb, Squares.Nb];
+
+    private static readonly (int Lookback, int Weight)[] ConthistBonuses =
+        [(1, 520), (2, 390), (3, 145), (4, 251), (5, 66), (6, 209)]; // search.cpp:2018-2019
+    private static readonly int[] CmhcMultipliers = [94, 103, 110, 106, 119, 126, 121]; // search.cpp:2022
 
     // CapturePieceToHistory, history.h:135 — Stats<i16,10692,PIECE_NB,SQUARE_NB,PIECE_TYPE_NB>,
     // indicizzata [pezzo che cattura][casa di arrivo][tipo del pezzo catturato].
@@ -59,13 +77,15 @@ public sealed class MovePick
             for (int m = 0; m < 65536; m++)
                 _mainHistory[c, m] = -5; // Worker::clear(), search.cpp:691 — mainHistory.fill(-5)
 
-        // search.cpp:702-704 — continuationHistory[...].fill(-586); qui una sola tabella (vedi
-        // nota in testa al file) invece delle 4 [inCheck][captureStage] della fonte.
-        for (int p1 = 0; p1 < PieceSlots.Nb; p1++)
-            for (int s1 = 0; s1 < Squares.Nb; s1++)
-                for (int p2 = 0; p2 < PieceSlots.Nb; p2++)
-                    for (int s2 = 0; s2 < Squares.Nb; s2++)
-                        _continuationHistory1[p1, s1, p2, s2] = -586;
+        // search.cpp:699-704 — continuationHistory[inCheck][capture][...].fill(-586) per le 4
+        // combinazioni.
+        for (int ic = 0; ic < 2; ic++)
+            for (int cs = 0; cs < 2; cs++)
+                for (int p1 = 0; p1 < PieceSlots.Nb; p1++)
+                    for (int s1 = 0; s1 < Squares.Nb; s1++)
+                        for (int p2 = 0; p2 < PieceSlots.Nb; p2++)
+                            for (int s2 = 0; s2 < Squares.Nb; s2++)
+                                _continuationHistory[ic, cs, p1, s1, p2, s2] = -586;
 
         for (int p = 0; p < PieceSlots.Nb; p++)
             for (int s = 0; s < Squares.Nb; s++)
@@ -101,12 +121,11 @@ public sealed class MovePick
     /// (bonus alla mossa migliore, malus via via più piccolo alle altre mosse quiete provate prima
     /// di trovarla). Chiamata una volta a fine ciclo mosse quando esiste una bestMove, non più ad
     /// ogni taglio beta come <c>RecordCutoff</c> — la fonte aggiorna le statistiche anche quando la
-    /// bestMove non causa un taglio (nodo PV pienamente esplorato). <paramref name="prevPiece"/>/
-    /// <paramref name="prevTo"/> sono <c>(ss-1)-&gt;currentMove</c> (pezzo/casa d'arrivo), per la
-    /// continuation history — <see cref="Piece.None"/> se questo nodo non ha un ply precedente
-    /// (radice) o non l'abbiamo tracciato.</summary>
+    /// bestMove non causa un taglio (nodo PV pienamente esplorato). <paramref name="contRefs"/> è
+    /// <c>(ss-1)..(ss-6)-&gt;currentMove</c> per la continuation history, <paramref
+    /// name="currentInCheck"/> lo scacco di QUESTO nodo (non del genitore).</summary>
     public void UpdateStats(Position pos, Move bestMove, List<Move> quietsSearched, List<Move> capturesSearched,
-        int depth, Move ttMove, bool isPvNode, Piece prevPiece, Square prevTo)
+        int depth, Move ttMove, bool isPvNode, ContinuationRef[] contRefs, bool currentInCheck)
     {
         int bonus = Math.Min((133 * depth) - 81, 1487) + (364 * (bestMove == ttMove ? 1 : 0));
         int malus = Math.Min((968 * depth) - 235, 2244);
@@ -116,13 +135,13 @@ public sealed class MovePick
 
         if (!pos.CaptureStage(bestMove))
         {
-            UpdateQuietHistory(pos, bestMove, bonus * 899 / 1024, prevPiece, prevTo);
+            UpdateQuietHistory(pos, bestMove, bonus * 899 / 1024, contRefs, currentInCheck);
 
             int actualMalus = malus * 1159 / 1024;
             foreach (var m in quietsSearched)
             {
                 actualMalus = actualMalus * 921 / 1024;
-                UpdateQuietHistory(pos, m, -actualMalus, prevPiece, prevTo);
+                UpdateQuietHistory(pos, m, -actualMalus, contRefs, currentInCheck);
             }
         }
         else
@@ -144,34 +163,49 @@ public sealed class MovePick
     }
 
     /// <summary><c>update_quiet_histories</c>, search.cpp:2045-2056 — qui solo main history +
-    /// continuation history a un livello (vedi nota in testa al file per low-ply/pawn history non
-    /// portate).</summary>
-    private void UpdateQuietHistory(Position pos, Move move, int bonus, Piece prevPiece, Square prevTo)
+    /// continuation history (vedi nota in testa al file per low-ply/pawn history non portate).</summary>
+    private void UpdateQuietHistory(Position pos, Move move, int bonus, ContinuationRef[] contRefs, bool currentInCheck)
     {
         Color us = pos.SideToMove;
         UpdateHistory(ref _mainHistory[(byte)us, move.Raw], bonus, MainHistoryLimit);
 
-        if (prevPiece == Piece.None) return; // (ss-1)->currentMove non è ok (radice, o non tracciata)
-
-        // update_continuation_histories, search.cpp:2017-2041: qui solo il termine ss-1 (peso 520,
-        // il maggiore dei 6) — con un solo termine "positiveCount" resta sempre 0, quindi il
-        // moltiplicatore è sempre CMHCMultipliers[0]=94. Il "+73*(i<2)" della fonte si applica
-        // (ss-1 ha i=1<2) indipendentemente dal segno del bonus.
         Piece pc = pos.MovedPiece(move);
-        int conthistBonus = (bonus * 750 / 1024 * 520 * 94 / 65536) + 73;
-        UpdateHistory(ref _continuationHistory1[(byte)prevPiece, (byte)prevTo, (byte)pc, (byte)move.ToSq], conthistBonus, PieceToHistoryLimit);
+        UpdateContinuationHistories(contRefs, currentInCheck, pc, move.ToSq, bonus * 750 / 1024);
+    }
+
+    /// <summary><c>update_continuation_histories</c>, search.cpp:2017-2041 — fedele ai 6 livelli
+    /// di lookback, "positiveCount"/moltiplicatore variabile incluso. <paramref
+    /// name="currentInCheck"/> ferma il ciclo dopo i primi 2 livelli, come nella fonte.</summary>
+    private void UpdateContinuationHistories(ContinuationRef[] contRefs, bool currentInCheck, Piece pc, Square to, int bonus)
+    {
+        int positiveCount = 0;
+
+        foreach (var (i, weight) in ConthistBonuses)
+        {
+            if (currentInCheck && i > 2) break;
+
+            var r = contRefs[i - 1];
+            if (!r.IsOk) continue;
+
+            ref short entry = ref _continuationHistory[r.InCheck ? 1 : 0, r.CaptureStage ? 1 : 0, (byte)r.Piece, (byte)r.To, (byte)pc, (byte)to];
+            if (entry > 0) positiveCount++;
+
+            int multiplier = CmhcMultipliers[positiveCount];
+            UpdateHistory(ref entry, (bonus * weight * multiplier / 65536) + (73 * (i < 2 ? 1 : 0)), PieceToHistoryLimit);
+        }
     }
 
     /// <summary>Ordina le mosse in place: mossa TT (se presente) per prima, poi catture per SEE
-    /// decrescente, poi le due killer di questo ply (euristica nostra), poi le rimanenti mosse
-    /// quiete per main history + continuation history a un livello (vedi nota in testa al file)
-    /// decrescenti. <paramref name="prevPiece"/>/<paramref name="prevTo"/> come in
-    /// <see cref="UpdateStats"/>.</summary>
-    public void OrderMoves(Position pos, List<Move> moves, int ply, Move ttMove, Piece prevPiece, Square prevTo)
+    /// decrescente (con CapturePieceToHistory come spareggio), poi le due killer di questo ply
+    /// (euristica nostra), poi le rimanenti mosse quiete per main history + continuation history
+    /// (solo ss-1, <c>contRefs[0]</c> — la fonte la userebbe tutta dentro il vero MovePicker a
+    /// stadi/reduction(), non ancora portati) decrescenti.</summary>
+    public void OrderMoves(Position pos, List<Move> moves, int ply, Move ttMove, ContinuationRef[] contRefs)
     {
         Color us = pos.SideToMove;
         Move killer0 = _killers[ply, 0];
         Move killer1 = _killers[ply, 1];
+        var ss1 = contRefs[0];
 
         int Score(Move m)
         {
@@ -192,8 +226,8 @@ public sealed class MovePick
             if (m == killer1) return 899_999;
 
             int score = _mainHistory[(byte)us, m.Raw];
-            if (prevPiece != Piece.None)
-                score += _continuationHistory1[(byte)prevPiece, (byte)prevTo, (byte)pos.MovedPiece(m), (byte)m.ToSq];
+            if (ss1.IsOk)
+                score += _continuationHistory[ss1.InCheck ? 1 : 0, ss1.CaptureStage ? 1 : 0, (byte)ss1.Piece, (byte)ss1.To, (byte)pos.MovedPiece(m), (byte)m.ToSq];
             return score;
         }
 

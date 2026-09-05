@@ -99,12 +99,21 @@ sopra sulla main history.
 **CapturePieceToHistory FATTA** (history.h:135, D=10692): bonus alla cattura migliore, malus a
 quelle scartate (search.cpp:1993-2011), usata anche come spareggio in `OrderMoves` accanto al
 guadagno SEE (termine dominante) — combinazione nostra, la fonte la userebbe dentro il vero
-MovePicker a stadi, non ancora portato. Verificato: 62/62 test, bestmove identico su tutte le
-posizioni di test prima/dopo.
+MovePicker a stadi, non ancora portato.
+
+**ContinuationHistory COMPLETA sui 6 livelli di lookback** (ss-1..ss-6, pesi
+{520,390,145,251,66,209}, moltiplicatori `CMHCMultipliers` con "positiveCount" sequenziale, e la
+selezione `[inCheck del genitore][la sua mossa era una cattura]` — 4 tabelle come `do_move`,
+search.cpp:663-671, non più una sola). Richiesto: `Search.cs` traccia ora
+`currentMove`/`moved_piece`/`inCheck`/`captureStage` per ply fino a 6 indietro (`StackOffset=7`,
+come `stack+7` della fonte). L'ordinamento (`OrderMoves`) usa solo ss-1 dei 6 (nota già presente).
+
+Verificato (per entrambi i commit): 62/62 test, bestmove identico su tutte le posizioni di test
+prima/dopo (incluse Kiwipete e le due posizioni tattiche).
 
 **Manca ancora**: generazione a stadi (la fonte non genera tutte le mosse in una volta),
-`ContinuationHistory` per ss-2..ss-6 e la selezione `[inCheck][captureStage]`, `PawnHistory`,
-`LowPlyHistory`, `TTMoveHistory`.
+`PawnHistory`, `LowPlyHistory`, `TTMoveHistory`; in `OrderMoves` solo ss-1 delle 6 continuation
+history è usata per l'ordinamento (statScore/reduction() vero, non ancora portato).
 
 ### A3 — Gestione del tempo (`timeman.h` 70 + `timeman.cpp` 144 = 214 righe)
 **Oggi**: ~15 righe dentro `Program.cs`.
