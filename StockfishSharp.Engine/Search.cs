@@ -23,11 +23,13 @@
 // commenti sui singoli punti di ricorsione. "followPV" (segue la riga principale dell'iterazione
 // precedente) non è portato: la condizione di IIR qui è quindi leggermente più ampia di quella
 // esatta della fonte.
-// NON ancora portati (candidati per i prossimi Step): ProbCut (entrambi i rami), Singular
-// Extensions, correction history, la vera formula di riduzione LMR (reduction(), che dipende da
-// una tabella reductions[]/rootDelta/statScore non ancora portati — qui LMR resta una riduzione
-// fissa di 1), continuation history/countermove in movepick (vedi MovePick.cs), Lazy SMP
-// (multi-thread), hindsight depth adjustment da priorReduction.
+// ProbCut (Step 12, la verifica vera con quiescenza + ricerca ridotta sulle catture con SEE sopra
+// soglia; Step 13, la "piccola idea" solo da TT, attiva anche sotto scacco) è ora portato.
+// NON ancora portati (candidati per i prossimi Step): Singular Extensions, correction history, la
+// vera formula di riduzione LMR (reduction(), che dipende da una tabella reductions[]/rootDelta/
+// statScore non ancora portati — qui LMR resta una riduzione fissa di 1), continuation
+// history/countermove in movepick (vedi MovePick.cs), Lazy SMP (multi-thread), hindsight depth
+// adjustment da priorReduction.
 
 namespace StockfishSharp.Engine;
 
@@ -289,7 +291,50 @@ public sealed class Search
             bool allNode = !isPvNode && !cutNode;
             if (!allNode && depth >= 6 && (!probe.Found || probe.Data.Move == Move.None))
                 depth--;
+
+            // Step 12. ProbCut — search.cpp:1054-1096: se una cattura (o promozione) "abbastanza
+            // buona" (SEE sopra la soglia probCutBeta-staticEval) regge una verifica di
+            // quiescenza e, se serve, una ricerca ridotta, il nodo genitore può essere potato: la
+            // mossa appena giocata sarebbe comunque troppo costosa per l'avversario.
+            int probCutBeta = beta + 241 - (64 * (improving ? 1 : 0));
+            if (depth >= 3 && !Values.IsDecisive(beta) && !(Values.IsValid(ttScore) && ttScore < probCutBeta))
+            {
+                int probCutDepth = depth - (improving ? 5 : 3);
+                var probCutCandidates = new List<Move>();
+                MoveGen.Generate(GenType.Captures, pos, probCutCandidates);
+
+                foreach (var m in probCutCandidates)
+                {
+                    if (!pos.Legal(m)) continue;
+                    if (!pos.SeeGe(m, probCutBeta - staticEval)) continue;
+
+                    var pcSt = new StateInfo();
+                    pos.DoMove(m, pcSt);
+
+                    int pcValue = -Quiesce(pos, -probCutBeta, -probCutBeta + 1, ply + 1);
+
+                    if (pcValue >= probCutBeta && probCutDepth > 0)
+                        pcValue = -Negamax(pos, probCutDepth, ply + 1, -probCutBeta, -probCutBeta + 1, cutNode: !cutNode);
+
+                    pos.UndoMove(m);
+
+                    if (pcValue >= probCutBeta)
+                    {
+                        _tt.Save(probe.WriteIndex, pos.Key, ValueToTt(pcValue, ply), ttPv, Bound.Lower, probCutDepth + 1, m, unadjustedStaticEval);
+                        if (!Values.IsDecisive(pcValue)) return pcValue - (probCutBeta - beta);
+                    }
+                }
+            }
         }
+
+        // Step 13. Una piccola idea di ProbCut — search.cpp:1100-1104: se la TT garantisce già un
+        // punteggio molto sopra un beta ancora più alto ("probCutBeta"), non serve nemmeno
+        // generare le mosse. A differenza dello Step 12 questo vale ANCHE sotto scacco.
+        int probCutBeta13 = beta + 428;
+        if ((probe.Data.Bound & Bound.Lower) != Bound.None && probe.Data.Depth >= depth - 4
+            && Values.IsValid(ttScore) && ttScore >= probCutBeta13
+            && !Values.IsDecisive(beta) && !Values.IsDecisive(ttScore))
+            return probCutBeta13;
 
         var moves = new List<Move>();
         MoveGen.Generate(GenType.Legal, pos, moves);
