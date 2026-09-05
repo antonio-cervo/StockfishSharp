@@ -81,4 +81,24 @@ public class SearchTests
         Assert.NotNull(result.BestMove);
         Assert.Equal(Square.A4, result.BestMove!.Value.ToSq);
     }
+
+    [Fact]
+    public void DoesNotExplodeNodeCountWithAspirationWindows()
+    {
+        // Guardia di regressione per Flow A1 (docs/porting-master-plan.md): dopo aver aggiunto
+        // aspiration windows (search.cpp:375-441) con il ciclo "fallito alto/basso -> allarga
+        // finestra e ricerca di nuovo", un bug nella condizione di uscita potrebbe far ricercare
+        // all'infinito la stessa profondità. Soglia larga apposta (non un confronto numerico
+        // preciso con la finestra piena precedente): misurato 19515 nodi cumulativi su questa
+        // posizione a profondità 6.
+        var pos = MakePosition("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        var search = new Search();
+        search.Resize(16);
+        search.NewGame();
+
+        var result = search.Search_(pos, maxDepth: 6, TimeSpan.FromSeconds(10));
+
+        Assert.Equal(6, result.Depth);
+        Assert.True(result.Nodes < 40000, $"Nodi cumulativi molto più alti del previsto: {result.Nodes}");
+    }
 }

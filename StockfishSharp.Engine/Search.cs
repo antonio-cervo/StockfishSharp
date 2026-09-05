@@ -1,11 +1,27 @@
 // Ispirato a src/search.cpp della fonte upstream (2369 righe) ma NON un porting completo — vedi
-// docs/porting-plan.md. Portati con fedeltà i concetti fondamentali (negamax con PVS, quiescenza,
-// transposition table, mate distance pruning, null-move pruning, reverse futility pruning, LMR) e
-// verificati con la stessa disciplina di ACMyChess: test di matto forzato + nessuna regressione
-// prima di considerarli acquisiti. NON ancora portati (elenco completo, tutti candidati per un
-// affinamento futuro): ProbCut (entrambi i rami), Singular Extensions, aspiration windows,
-// internal iterative reduction, futility pruning per singola mossa, razoring, multi-cut,
-// continuation history/countermove in movepick (vedi MovePick.cs), Lazy SMP (multi-thread).
+// docs/porting-plan.md e docs/porting-master-plan.md (Flow A1). Portati con fedeltà (stesse
+// costanti, stesse condizioni) i concetti fondamentali: negamax con PVS, quiescenza, transposition
+// table (ora con value_to_tt/value_from_tt per i punteggi di matto — Step "value_to_tt"/
+// "value_from_tt", search.cpp:1911-1953), mate distance pruning, null-move pruning, reverse
+// futility pruning, LMR, Razoring (Step 8, search.cpp:989-992), Futility pruning per mossa figlia
+// (Step 9, search.cpp:994-1008), aspiration windows (iterative_deepening, search.cpp:375-441).
+//
+// Semplificazioni deliberate in questi Step, documentate dove non ovvie:
+// - correctionValue è sempre 0 (correction history non portata — Flow A5/A1, history.h): la
+//   formula del margine di futility resta quella della fonte con questo input a zero.
+// - "seekMate"/l'estimate di punteggio radice usata da Step 9 usa il punteggio dell'ITERAZIONE
+//   PRECEDENTE completata (non quello del root move in corso di aggiornamento nell'iterazione
+//   corrente come fa rootMoves[pvIdx].score nella fonte — richiederebbe una struttura RootMove
+//   dedicata che qui non esiste, non facendo MultiPV/multi-thread).
+// - Le aspiration windows usano averageScore/meanSquaredScore SENZA la media mobile pesata per
+//   "effort" della fonte (search.cpp:1441-1468, richiede bookkeeping per-root-move dei nodi
+//   cercati): qui averageScore = valore dell'iterazione precedente (equivalente a peso=1 sempre,
+//   che è esattamente cosa fa la fonte alla PRIMA volta che una root move viene vista — qui è
+//   così ad ogni iterazione). Stessa formula di ampiezza/allargamento finestra della fonte.
+// NON ancora portati (candidati per i prossimi Step): ProbCut (entrambi i rami), Singular
+// Extensions, internal iterative reduction, cutNode/allNode, correction history, continuation
+// history/countermove in movepick (vedi MovePick.cs), Lazy SMP (multi-thread), hindsight
+// depth adjustment da priorReduction (richiede tracciare la riduzione LMR applicata dal genitore).
 
 namespace StockfishSharp.Engine;
 
@@ -34,6 +50,18 @@ public sealed class Search
     private const int LmrMinDepth = 3;
     private const int LmrMinMoveIndex = 3;
 
+    // Cronologia della valutazione statica per ply, per calcolare improving/opponentWorsening —
+    // Stack::staticEval della fonte, ma qui solo l'array di interi che serve (niente
+    // continuationHistory/pv/ecc., non ancora portati). Indice = ply + 2, per poter leggere
+    // (ss-2) anche dal ply 0 — search.cpp:289-298 alloca stack[MAX_PLY+10] con lo stesso scopo.
+    private readonly int[] _staticEvalHistory = new int[Ply.MaxPly + 3];
+
+    // Usati da Step 9 (futility pruning) per "seekMate" — vedi nota di semplificazione in testa
+    // al file: qui è il punteggio/la profondità dell'ULTIMA iterazione completata, non del root
+    // move in corso nell'iterazione corrente come nella fonte.
+    private int _rootDepth;
+    private int _lastCompletedScore = -Infinity;
+
     public void Resize(int hashMb) => _tt.Resize(hashMb);
 
     public void NewGame()
@@ -42,9 +70,40 @@ public sealed class Search
         _movePick.Clear();
     }
 
-    /// <summary>Iterative deepening con aspiration window semplice: ogni profondità riparte da
-    /// finestra piena (nessun restringimento sul punteggio dell'iterazione precedente per ora —
-    /// candidato per un affinamento futuro, come le altre tecniche elencate in cima al file).</summary>
+    /// <summary><c>value_to_tt</c>, search.cpp:1911: converte un punteggio di matto/tablebase da
+    /// "distanza dal nodo corrente" a "distanza dalla radice" prima di salvarlo in TT — altrimenti
+    /// una entry scritta a un ply diverso da dove viene poi letta darebbe una distanza di matto
+    /// sbagliata.</summary>
+    private static int ValueToTt(int v, int ply) =>
+        Values.IsWin(v) ? v + ply : Values.IsLoss(v) ? v - ply : v;
+
+    /// <summary><c>value_from_tt</c>, search.cpp:1919-1953: l'inverso, con la salvaguardia contro
+    /// falsi punteggi di matto/tablebase quando la regola delle 50 mosse rende quel punteggio
+    /// inaffidabile (declassato al miglior punteggio non-tablebase).</summary>
+    private static int ValueFromTt(int v, int ply, int rule50Count)
+    {
+        if (!Values.IsValid(v)) return Values.None;
+
+        if (Values.IsWin(v))
+        {
+            if (Values.IsMate(v) && MateScore - v > 100 - rule50Count) return Values.TbWinInMaxPly - 1;
+            if (Values.Tb - v > 100 - rule50Count) return Values.TbWinInMaxPly - 1;
+            return v - ply;
+        }
+
+        if (Values.IsLoss(v))
+        {
+            if (Values.IsMated(v) && MateScore + v > 100 - rule50Count) return Values.TbLossInMaxPly + 1;
+            if (Values.Tb + v > 100 - rule50Count) return Values.TbLossInMaxPly + 1;
+            return v + ply;
+        }
+
+        return v;
+    }
+
+    /// <summary>Iterative deepening con aspiration windows — <c>iterative_deepening</c>,
+    /// search.cpp:375-441 (vedi la nota di semplificazione in testa al file per
+    /// averageScore/meanSquaredScore).</summary>
     public SearchResult Search_(Position pos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -53,16 +112,53 @@ public sealed class Search
         _nodes = 0;
         _tt.NewSearch();
 
+        Array.Clear(_staticEvalHistory);
+        _staticEvalHistory[0] = Values.None;
+        _staticEvalHistory[1] = Values.None;
+        _lastCompletedScore = -Infinity;
+
         var result = new SearchResult();
+
+        int avgScore = -Infinity;
+        long meanSquaredScore = -(long)Infinity * Infinity;
 
         try
         {
             for (int depth = 1; depth <= maxDepth; depth++)
             {
-                int score = Negamax(pos, depth, 0, -Infinity, Infinity);
+                _rootDepth = depth;
+
+                int delta = 5 + (int)(Math.Abs(meanSquaredScore) / 10193);
+                int alpha = Math.Max(avgScore - delta, -Infinity);
+                int beta = Math.Min(avgScore + delta, Infinity);
+
+                int bestValue;
+                while (true)
+                {
+                    bestValue = Negamax(pos, depth, 0, alpha, beta);
+
+                    if (bestValue <= alpha)
+                    {
+                        beta = alpha;
+                        alpha = Math.Max(bestValue - delta, -Infinity);
+                    }
+                    else if (bestValue >= beta)
+                    {
+                        alpha = Math.Max(beta - delta, alpha);
+                        beta = Math.Min(bestValue + delta, Infinity);
+                    }
+                    else break;
+
+                    delta += 47 * delta / 128;
+                }
+
+                avgScore = bestValue;
+                meanSquaredScore = (long)bestValue * Math.Abs(bestValue);
+                _lastCompletedScore = bestValue;
+
                 var probe = _tt.Probe(pos.Key);
                 result.BestMove = probe.Found ? probe.Data.Move : result.BestMove;
-                result.ScoreCp = score;
+                result.ScoreCp = bestValue;
                 result.Depth = depth;
             }
         }
@@ -102,32 +198,82 @@ public sealed class Search
         bool inCheck = pos.Checkers() != 0;
 
         var probe = _tt.Probe(pos.Key);
-        if (!isPvNode && probe.Found && probe.Data.Depth >= depth)
+        int ttScore = probe.Found ? ValueFromTt(probe.Data.Value, ply, pos.Rule50Count) : Values.None;
+        bool ttPv = isPvNode || (probe.Found && probe.Data.IsPv);
+        bool ttCapture = probe.Found && probe.Data.Move != Move.None && pos.Capture(probe.Data.Move);
+
+        if (!isPvNode && probe.Found && probe.Data.Depth >= depth && Values.IsValid(ttScore))
         {
-            int ttScore = probe.Data.Value;
             if (probe.Data.Bound == Bound.Exact) return ttScore;
             if (probe.Data.Bound == Bound.Lower && ttScore >= beta) return ttScore;
             if (probe.Data.Bound == Bound.Upper && ttScore <= alpha) return ttScore;
         }
 
-        int staticEval = inCheck ? -Infinity : Evaluate.StaticEval(pos);
+        // Step 5. Valutazione statica — position.cpp non tiene una correction history (non
+        // portata), quindi "to_corrected_static_eval" qui è solo il clamp fuori dal range
+        // tablebase, con correctionValue fisso a 0 (vedi nota in testa al file).
+        int staticEval;
+        int eval;
+        int unadjustedStaticEval = Values.None;
 
-        // Reverse futility pruning: a profondità bassa, se la valutazione statica supera già beta
-        // di un margine proporzionale alla profondità residua, si taglia senza generare mosse.
-        if (!inCheck && !isPvNode && depth <= ReverseFutilityMaxDepth
-            && staticEval - ReverseFutilityMarginPerDepth * depth >= beta
-            && Math.Abs(beta) < MateScore - Ply.MaxPly)
-            return beta;
-
-        // Null-move pruning: mai sotto scacco né in nodi PV, mai con solo re+pedoni (zugzwang).
-        if (!inCheck && !isPvNode && depth >= NullMoveMinDepth && HasNonPawnMaterial(pos, pos.SideToMove))
+        if (inCheck)
         {
-            var nullSt = new StateInfo();
-            pos.DoNullMove(nullSt);
-            int nullScore = -Negamax(pos, depth - 1 - NullMoveReduction, ply + 1, -beta, -beta + 1);
-            pos.UndoNullMove();
+            staticEval = eval = _staticEvalHistory[ply]; // (ss-2)->staticEval
+        }
+        else
+        {
+            unadjustedStaticEval = probe.Found && Values.IsValid(probe.Data.Eval) ? probe.Data.Eval : Evaluate.StaticEval(pos);
+            staticEval = eval = Math.Clamp(unadjustedStaticEval, Values.TbLossInMaxPly + 1, Values.TbWinInMaxPly - 1);
 
-            if (nullScore >= beta && Math.Abs(nullScore) < MateScore - Ply.MaxPly) return beta;
+            if (Values.IsValid(ttScore)
+                && (probe.Data.Bound == (ttScore > eval ? Bound.Lower : Bound.Upper)))
+                eval = ttScore;
+
+            if (!probe.Found)
+                _tt.Save(probe.WriteIndex, pos.Key, Values.None, ttPv, Bound.None, Ply.DepthNone, Move.None, unadjustedStaticEval);
+        }
+
+        _staticEvalHistory[ply + 2] = staticEval;
+
+        bool improving = staticEval > _staticEvalHistory[ply]; // (ss-2)->staticEval
+        bool opponentWorsening = staticEval > -_staticEvalHistory[ply + 1]; // -(ss-1)->staticEval
+
+        if (!inCheck)
+        {
+            // Step 8. Razoring — search.cpp:989-992: se la valutazione statica è già molto sotto
+            // alpha (margine che cresce col quadrato della profondità), la posizione non si
+            // riprenderà: si passa direttamente alla quiescenza.
+            if (!isPvNode && eval < alpha - 482 * depth * depth)
+                return Quiesce(pos, alpha, beta, ply);
+
+            // Step 9. Futility pruning: nodo figlio — search.cpp:994-1008. La condizione sulla
+            // profondità (6 se si "cerca il matto", 19 altrimenti) non va tarata: serve a non
+            // troncare la ricerca quando un punteggio già alto suggerisce un matto vicino.
+            bool seekMate = _rootDepth >= 16 && Math.Abs(_lastCompletedScore) >= 2000;
+            if (!ttPv && depth < (seekMate ? 6 : 19) && eval >= beta
+                && (!probe.Found || probe.Data.Move == Move.None || ttCapture)
+                && !Values.IsLoss(beta) && !Values.IsWin(eval))
+            {
+                int futilityMult = Math.Min(45 + (depth * 4), 85);
+                futilityMult -= 20 * (probe.Found ? 0 : 1);
+
+                int futilityMargin = (futilityMult * depth)
+                    - (((2789 * (improving ? 1 : 0)) + (335 * (opponentWorsening ? 1 : 0))) * futilityMult / 1024);
+
+                if (eval - futilityMargin >= beta)
+                    return ((661 * beta) + (363 * eval)) / 1024;
+            }
+
+            // Null-move pruning: mai sotto scacco né in nodi PV, mai con solo re+pedoni (zugzwang).
+            if (!isPvNode && depth >= NullMoveMinDepth && HasNonPawnMaterial(pos, pos.SideToMove))
+            {
+                var nullSt = new StateInfo();
+                pos.DoNullMove(nullSt);
+                int nullScore = -Negamax(pos, depth - 1 - NullMoveReduction, ply + 1, -beta, -beta + 1);
+                pos.UndoNullMove();
+
+                if (nullScore >= beta && Math.Abs(nullScore) < MateScore - Ply.MaxPly) return beta;
+            }
         }
 
         var moves = new List<Move>();
@@ -179,7 +325,7 @@ public sealed class Search
         }
 
         var flag = value <= origAlpha ? Bound.Upper : value >= beta ? Bound.Lower : Bound.Exact;
-        _tt.Save(probe.WriteIndex, pos.Key, value, isPvNode, flag, depth, bestMove ?? Move.None, staticEval);
+        _tt.Save(probe.WriteIndex, pos.Key, ValueToTt(value, ply), ttPv, flag, depth, bestMove ?? Move.None, unadjustedStaticEval);
 
         return value;
     }

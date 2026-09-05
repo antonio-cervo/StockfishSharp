@@ -29,13 +29,25 @@ ancora stato aperto, e alcune parti già "consegnate" non sono porting veri (ved
 Queste parti **funzionano** e sono etichettate onestamente nei commenti/commit come codice
 originale, ma rispetto all'obiettivo "porting reale" sono segnaposto, non lavoro finito.
 
-### A1 — Ricerca (`search.h` 439 + `search.cpp` 2.369 = 2.808 righe)
-**Oggi**: `Search.cs`, ~200 righe scritte da me — negamax+PVS, quiescenza, TT, mate distance
-pruning, null-move, RFP, LMR base.
-**Manca**: ProbCut (entrambe le varianti), Singular Extensions, aspiration windows, internal
-iterative reduction, futility per mossa, razoring, multi-cut, correction history, tutta la
-taratura fine dei margini, la struttura `Worker`/`RootMove`/`Stack` della fonte.
-⚠️ È il file più grande del progetto. Da solo vale più di tutto quello portato finora.
+### A1 — Ricerca (`search.h` 439 + `search.cpp` 2.369 = 2.808 righe) — 🟡 IN CORSO
+
+**Fatto** (2026-09-05, vedi `docs/porting-plan.md` per il dettaglio riga per riga): negamax+PVS,
+quiescenza, TT (ora con `value_to_tt`/`value_from_tt` fedeli per i punteggi di matto), mate
+distance pruning, null-move, RFP, LMR base — più, appena aggiunti, **aspiration windows** (formula
+di ampiezza/allargamento della finestra fedele), **Razoring** (Step 8) e **Futility pruning per
+mossa figlia** (Step 9), con `improving`/`opponentWorsening` calcolati da una cronologia della
+valutazione statica per ply (equivalente minimo dello `Stack` della fonte).
+
+**Manca ancora**: ProbCut (entrambe le varianti), Singular Extensions, internal iterative
+reduction, multi-cut, correction history (Step 8/9 usano `correctionValue=0` come segnaposto),
+cutNode/allNode, l'hindsight depth adjustment da `priorReduction`, tutta la taratura fine dei
+margini rimasti, la struttura `Worker`/`RootMove`/`Stack` completa della fonte (qui minimizzata a
+quanto serve). L'aspiration window usa lo score dell'iterazione precedente al posto della media
+mobile pesata per "effort" della fonte (richiede bookkeeping per-root-move non ancora presente).
+
+⚠️ È il file più grande del progetto. Da solo vale più di tutto quello portato finora — ogni
+tecnica va aggiunta e verificata una alla volta (nessuna regressione sui test esistenti + confronto
+mosse/nodi con l'oracolo su alcune posizioni), come per N1-N8.
 
 ### A2 — Ordinamento mosse (`movepick.h` 78 + `movepick.cpp` 383 + `history.h` 261 = 722 righe)
 **Oggi**: `MovePick.cs`, ~70 righe — TT move, SEE, killer, history semplice.
