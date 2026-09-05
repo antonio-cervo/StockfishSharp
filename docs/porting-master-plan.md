@@ -96,9 +96,15 @@ Verificato: 62/62 test, bestmove identico su tutte le posizioni di test prima/do
 misto (alcune posizioni leggermente su, altre giù) — atteso a questo stadio parziale, vedi nota
 sopra sulla main history.
 
+**CapturePieceToHistory FATTA** (history.h:135, D=10692): bonus alla cattura migliore, malus a
+quelle scartate (search.cpp:1993-2011), usata anche come spareggio in `OrderMoves` accanto al
+guadagno SEE (termine dominante) — combinazione nostra, la fonte la userebbe dentro il vero
+MovePicker a stadi, non ancora portato. Verificato: 62/62 test, bestmove identico su tutte le
+posizioni di test prima/dopo.
+
 **Manca ancora**: generazione a stadi (la fonte non genera tutte le mosse in una volta),
-`CapturePieceToHistory`, `ContinuationHistory` per ss-2..ss-6 e la selezione `[inCheck]
-[captureStage]`, `PawnHistory`, `LowPlyHistory`, `TTMoveHistory`.
+`ContinuationHistory` per ss-2..ss-6 e la selezione `[inCheck][captureStage]`, `PawnHistory`,
+`LowPlyHistory`, `TTMoveHistory`.
 
 ### A3 — Gestione del tempo (`timeman.h` 70 + `timeman.cpp` 144 = 214 righe)
 **Oggi**: ~15 righe dentro `Program.cs`.

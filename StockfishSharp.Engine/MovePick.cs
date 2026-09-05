@@ -19,8 +19,12 @@
 // CMHCMultipliers[0]=94) — vedi UpdateQuietHistory. Richiede Search.cs a tracciare
 // Stack::currentMove/moved_piece per ply (fatto in questo Step).
 //
-// NON portato: CapturePieceToHistory, ContinuationHistory per ss-2..ss-6, PawnHistory,
-// LowPlyHistory, TTMoveHistory, CorrectionHistory (vedi Search.cs).
+// CapturePieceToHistory portata con fedeltà (history.h:135, D=10692) — bonus/malus da
+// update_all_stats (search.cpp:1993-2011), usata anche in OrderMoves come termine aggiuntivo
+// (la fonte la userebbe dentro il vero MovePicker a stadi, non ancora portato).
+//
+// NON portato: ContinuationHistory per ss-2..ss-6, PawnHistory, LowPlyHistory, TTMoveHistory,
+// CorrectionHistory (vedi Search.cs).
 
 namespace StockfishSharp.Engine;
 
@@ -29,6 +33,7 @@ public sealed class MovePick
     private const int MaxPly = Ply.MaxPly;
     private const int MainHistoryLimit = 7183; // ButterflyHistory D, history.h:128
     private const int PieceToHistoryLimit = 30000; // PieceToHistory D, history.h:138
+    private const int CaptureHistoryLimit = 10692; // CapturePieceToHistory D, history.h:135
 
     // Killer moves: 2 per ply, indicizzate per ply come in Stockfish (non per profondità residua)
     // — vedi nota in testa al file: euristica nostra, non della fonte reale.
@@ -42,6 +47,10 @@ public sealed class MovePick
     // Indicizzata [pezzo mosso al ply precedente][sua casa di arrivo][pezzo di questa mossa][sua
     // casa di arrivo], PieceToHistory della fonte (history.h:137-138).
     private readonly short[,,,] _continuationHistory1 = new short[PieceSlots.Nb, Squares.Nb, PieceSlots.Nb, Squares.Nb];
+
+    // CapturePieceToHistory, history.h:135 — Stats<i16,10692,PIECE_NB,SQUARE_NB,PIECE_TYPE_NB>,
+    // indicizzata [pezzo che cattura][casa di arrivo][tipo del pezzo catturato].
+    private readonly short[,,] _captureHistory = new short[PieceSlots.Nb, Squares.Nb, PieceTypes.Nb];
 
     public void Clear()
     {
@@ -57,6 +66,11 @@ public sealed class MovePick
                 for (int p2 = 0; p2 < PieceSlots.Nb; p2++)
                     for (int s2 = 0; s2 < Squares.Nb; s2++)
                         _continuationHistory1[p1, s1, p2, s2] = -586;
+
+        for (int p = 0; p < PieceSlots.Nb; p++)
+            for (int s = 0; s < Squares.Nb; s++)
+                for (int t = 0; t < PieceTypes.Nb; t++)
+                    _captureHistory[p, s, t] = -742; // Worker::clear(), search.cpp:692
     }
 
     /// <summary><c>StatsEntry::operator&lt;&lt;</c>, history.h:70-77: il bonus spinge il valore
@@ -111,9 +125,22 @@ public sealed class MovePick
                 UpdateQuietHistory(pos, m, -actualMalus, prevPiece, prevTo);
             }
         }
-        // NON portato: bonus/malus di CapturePieceToHistory quando bestMove è una cattura, e malus
-        // per le catture scartate in capturesSearched (history.h/search.cpp:1993-2011) — le
-        // catture restano ordinate solo per SEE (vedi OrderMoves).
+        else
+        {
+            // search.cpp:1995-1998 — bonus alla cattura migliore.
+            Piece movedPiece = pos.MovedPiece(bestMove);
+            PieceType capturedPiece = Types.TypeOf(pos.PieceOn(bestMove.ToSq));
+            UpdateHistory(ref _captureHistory[(byte)movedPiece, (byte)bestMove.ToSq, (byte)capturedPiece], bonus * 1427 / 1024, CaptureHistoryLimit);
+        }
+
+        // search.cpp:2005-2011 — malus per tutte le catture provate ma scartate (indipendente da
+        // se bestMove sia stata una cattura o una mossa quieta).
+        foreach (var m in capturesSearched)
+        {
+            Piece movedPiece = pos.MovedPiece(m);
+            PieceType capturedPiece = Types.TypeOf(pos.PieceOn(m.ToSq));
+            UpdateHistory(ref _captureHistory[(byte)movedPiece, (byte)m.ToSq, (byte)capturedPiece], -malus * 1489 / 1024, CaptureHistoryLimit);
+        }
     }
 
     /// <summary><c>update_quiet_histories</c>, search.cpp:2045-2056 — qui solo main history +
@@ -152,10 +179,13 @@ public sealed class MovePick
 
             if (pos.Capture(m))
             {
-                // Guadagno SEE come punteggio diretto: catture nettamente vincenti prima di quelle
-                // in pareggio/perdenti, ma sempre prima delle mosse quiete (offset fisso).
+                // Guadagno SEE come termine dominante (catture nettamente vincenti prima di quelle
+                // in pareggio/perdenti, sempre prima delle mosse quiete grazie all'offset fisso),
+                // più CapturePieceToHistory come spareggio fra catture di guadagno simile — la
+                // fonte li combinerebbe dentro il vero MovePicker a stadi, non ancora portato.
                 int gain = Values.PieceValue[(byte)pos.PieceOn(m.ToSq)] - Values.PieceValue[(byte)pos.PieceOn(m.FromSq)] / 100;
-                return 1_000_000 + gain;
+                int captureHistoryScore = _captureHistory[(byte)pos.MovedPiece(m), (byte)m.ToSq, (byte)Types.TypeOf(pos.PieceOn(m.ToSq))];
+                return 1_000_000 + gain + (captureHistoryScore / 64);
             }
 
             if (m == killer0) return 900_000;
