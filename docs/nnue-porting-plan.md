@@ -157,11 +157,15 @@ scrambling) — stesso schema già visto in N1/N3.
 stessa posizione asimmetrica di N3: combaciano esattamente al primo tentativo
 (`-0.70 -1.22 -0.98 -1.28 -1.37 -1.39 -1.36 -1.49`).
 
-### N6 — `evaluate()` finale
-Involucro di `evaluate.cpp` (già letto per intero): blend optimism/complexity, scalatura per
-materiale, damping sul contatore delle 50 mosse, clamp fuori dal range tablebase.
+### N6 — `evaluate()` finale — ✅ FATTO E VERIFICATO
+`NnueEvaluate.cs`: involucro di `evaluate.cpp` — blend optimism/complexity, scalatura per
+materiale (`non_pawn_material()` ricalcolato al volo dai conteggi pezzi, mai stato un campo
+incrementale su `Position` — non serve a perft/do_move di base), damping sul contatore delle 50
+mosse, clamp fuori dal range tablebase.
 
-**Verifica**: riga **Final evaluation** dell'oracolo.
+**Verifica FATTA** contro la riga **Final evaluation** dell'oracolo, tre posizioni (iniziale,
+mediogioco asimmetrico, finale di pedoni/torre — bucket 7/7/2 rispettivamente): combaciano
+esattamente (`+0.00`, `-2.48`, `+0.48`).
 
 ### N7 — Integrazione nel motore
 Sostituisce `Evaluate.cs` (il placeholder materiale+PSQT). Attenzione: NNUE **non** va chiamata
