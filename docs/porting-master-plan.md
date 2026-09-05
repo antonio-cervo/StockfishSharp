@@ -63,10 +63,32 @@ condizione di IIR qui è quindi leggermente più ampia di quella esatta della fo
 tecnica va aggiunta e verificata una alla volta (nessuna regressione sui test esistenti + confronto
 mosse/nodi con l'oracolo su alcune posizioni), come per N1-N8.
 
-### A2 — Ordinamento mosse (`movepick.h` 78 + `movepick.cpp` 383 + `history.h` 261 = 722 righe)
-**Oggi**: `MovePick.cs`, ~70 righe — TT move, SEE, killer, history semplice.
-**Manca**: generazione a stadi (la fonte non genera tutte le mosse in una volta), continuation
-history, countermove history, capture history, pawn history, le formule di bonus/malus.
+### A2 — Ordinamento mosse (`movepick.h` 78 + `movepick.cpp` 383 + `history.h` 261 = 722 righe) — 🟡 IN CORSO
+
+**Scoperta**: la fonte (questa versione) ha ELIMINATO le killer move classiche — ordina solo con
+history a più livelli (main+continuation+capture). Le killer restano in `MovePick.cs` come
+euristica NOSTRA aggiuntiva, non della fonte — candidate alla rimozione quando arriverà la
+continuation history vera.
+
+**Fatto**: `ButterflyHistory` (main history) con l'aggiornamento "a gravità" fedele
+(`StatsEntry::operator<<`, history.h:70-77, D=7183) e le formule di bonus/malus di
+`update_all_stats` (search.cpp:1957-1998, solo il ramo mosse quiete — capture history non
+portata). Le statistiche si aggiornano una volta a fine ciclo mosse (quando esiste una bestMove),
+non più ad ogni taglio beta. Da qui corretta anche una semantica pre-esistente di `bestMove` in
+`Search.cs`: si aggiorna solo quando una mossa supera davvero alpha, non ogni volta che migliora
+il punteggio grezzo (un nodo fail-low puro ora lascia bestMove a null come nella fonte).
+
+Verificato: 62/62 test, bestmove identico su tutte le posizioni di test prima/dopo (incluse le due
+posizioni tattiche e Kiwipete). A differenza degli Step di Flow A1 (pruning, sempre a parità di
+risultato), qui il conteggio nodi NON è garantito solo in discesa: cambiare l'ordinamento delle
+mosse senza le tecniche che ne sfruttano appieno l'informazione (LMR adattivo per statScore,
+continuation history) può aumentare i nodi in alcune posizioni/profondità pur restando corretto —
+osservato empiricamente (depth 10 da 105924 a 141169 nodi, stesso bestmove/punteggio). Atteso
+migliorare quando arriveranno i pezzi mancanti, non prima.
+
+**Manca ancora**: generazione a stadi (la fonte non genera tutte le mosse in una volta),
+`CapturePieceToHistory`, `ContinuationHistory`/countermove (richiede tracciare `currentMove` per
+ply nello Stack), `PawnHistory`, `LowPlyHistory`, `TTMoveHistory`.
 
 ### A3 — Gestione del tempo (`timeman.h` 70 + `timeman.cpp` 144 = 214 righe)
 **Oggi**: ~15 righe dentro `Program.cs`.

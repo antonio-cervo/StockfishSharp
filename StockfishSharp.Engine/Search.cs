@@ -25,11 +25,17 @@
 // esatta della fonte.
 // ProbCut (Step 12, la verifica vera con quiescenza + ricerca ridotta sulle catture con SEE sopra
 // soglia; Step 13, la "piccola idea" solo da TT, attiva anche sotto scacco) è ora portato.
+// Flow A2 (docs/porting-master-plan.md) iniziato in MovePick.cs: ButterflyHistory (main history)
+// con la formula "a gravità" fedele e i bonus/malus di update_all_stats (solo il ramo mosse
+// quiete). Da qui, corretta anche una semantica pre-esistente di bestMove: si aggiorna SOLO
+// quando una mossa supera davvero alpha (search.cpp:1518-1520), non ogni volta che migliora il
+// punteggio grezzo — un nodo "fail-low puro" (nessuna mossa batte alpha) ora lascia bestMove a
+// null come nella fonte, invece di premiare arbitrariamente la prima mossa provata.
 // NON ancora portati (candidati per i prossimi Step): Singular Extensions, correction history, la
 // vera formula di riduzione LMR (reduction(), che dipende da una tabella reductions[]/rootDelta/
-// statScore non ancora portati — qui LMR resta una riduzione fissa di 1), continuation
-// history/countermove in movepick (vedi MovePick.cs), Lazy SMP (multi-thread), hindsight depth
-// adjustment da priorReduction.
+// statScore non ancora portati — qui LMR resta una riduzione fissa di 1), CapturePieceToHistory,
+// ContinuationHistory/countermove, PawnHistory, LowPlyHistory, TTMoveHistory (vedi MovePick.cs),
+// Lazy SMP (multi-thread), hindsight depth adjustment da priorReduction.
 
 namespace StockfishSharp.Engine;
 
@@ -348,10 +354,17 @@ public sealed class Search
         int value = -Infinity;
         Move? bestMove = null;
 
+        // search.cpp:761-762/1543-1551: mosse quiete/catture provate ma non risultate la
+        // migliore, per aggiornare le loro statistiche di ordinamento a fine ciclo (Step 23).
+        var quietsSearched = new List<Move>();
+        var capturesSearched = new List<Move>();
+        const int SearchedListCapacity = 32; // SEARCHEDLIST_CAPACITY, search.cpp:73
+
         for (int i = 0; i < moves.Count; i++)
         {
             Move m = moves[i];
             bool tactical = pos.Capture(m) || m.TypeOf == MoveType.Promotion;
+            bool captureStage = pos.CaptureStage(m);
             bool givesCheck = pos.GivesCheck(m);
 
             var st = new StateInfo();
@@ -379,14 +392,37 @@ public sealed class Search
 
             pos.UndoMove(m);
 
-            if (score > value) { value = score; bestMove = m; }
-            if (value > alpha) alpha = value;
-            if (alpha >= beta)
+            // Step 22, search.cpp:1514-1541: bestMove si aggiorna SOLO quando la mossa supera
+            // davvero alpha — un fail-low puro (nessuna mossa batte alpha) lascia bestMove a null,
+            // esattamente come nella fonte (lì "inc", un fattore di parità che promuove mosse a
+            // pari punteggio, non è portato: raffinamento minore, non struttura).
+            if (score > value)
             {
-                _movePick.RecordCutoff(pos, m, ply, depth);
-                break;
+                value = score;
+                if (score > alpha)
+                {
+                    bestMove = m;
+                    alpha = score;
+                    if (alpha >= beta)
+                    {
+                        _movePick.RecordKiller(pos, m, ply);
+                        break;
+                    }
+                }
+            }
+
+            // search.cpp:1543-1551: "se la mossa è peggiore di una già provata, ricordarla per
+            // aggiornarne le statistiche dopo" — qui bestMove riflette già l'eventuale
+            // aggiornamento appena fatto sopra, quindi la mossa che ha appena causato il taglio
+            // beta (bestMove) non entra mai in queste liste (il break sopra la esclude comunque).
+            if (i + 1 <= SearchedListCapacity && m != bestMove)
+            {
+                if (captureStage) capturesSearched.Add(m); else quietsSearched.Add(m);
             }
         }
+
+        if (bestMove != null)
+            _movePick.UpdateStats(pos, bestMove.Value, quietsSearched, capturesSearched, depth, probe.Data.Move, isPvNode);
 
         var flag = value <= origAlpha ? Bound.Upper : value >= beta ? Bound.Lower : Bound.Exact;
         _tt.Save(probe.WriteIndex, pos.Key, ValueToTt(value, ply), ttPv, flag, depth, bestMove ?? Move.None, unadjustedStaticEval);
