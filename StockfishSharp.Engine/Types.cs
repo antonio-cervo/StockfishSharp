@@ -83,7 +83,12 @@ public enum Piece : byte
     BKing,
 }
 
-public static class Pieces
+/// <summary>Nome distinto da "Pieces" (invece di seguire la convenzione plurale usata per gli
+/// altri enum, es. Colors/Squares/Files) perché <see cref="Position"/> ha una famiglia di metodi
+/// di istanza chiamati proprio <c>Pieces(...)</c> — dentro quella classe un riferimento non
+/// qualificato a "Pieces" risolverebbe al gruppo di metodi, non a questa classe statica,
+/// rendendo "Pieces.Nb" ambiguo/errato.</summary>
+public static class PieceSlots
 {
     public const int Nb = 16;
 }
