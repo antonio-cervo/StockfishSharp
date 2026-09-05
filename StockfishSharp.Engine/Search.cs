@@ -18,10 +18,16 @@
 //   cercati): qui averageScore = valore dell'iterazione precedente (equivalente a peso=1 sempre,
 //   che è esattamente cosa fa la fonte alla PRIMA volta che una root move viene vista — qui è
 //   così ad ogni iterazione). Stessa formula di ampiezza/allargamento finestra della fonte.
+// cutNode è ora tracciato attraverso la ricorsione (Step 11 Internal Iterative Reduction,
+// search.cpp:1048-1052, ne dipende) con la stessa convenzione di chiamata della fonte — vedi i
+// commenti sui singoli punti di ricorsione. "followPV" (segue la riga principale dell'iterazione
+// precedente) non è portato: la condizione di IIR qui è quindi leggermente più ampia di quella
+// esatta della fonte.
 // NON ancora portati (candidati per i prossimi Step): ProbCut (entrambi i rami), Singular
-// Extensions, internal iterative reduction, cutNode/allNode, correction history, continuation
-// history/countermove in movepick (vedi MovePick.cs), Lazy SMP (multi-thread), hindsight
-// depth adjustment da priorReduction (richiede tracciare la riduzione LMR applicata dal genitore).
+// Extensions, correction history, la vera formula di riduzione LMR (reduction(), che dipende da
+// una tabella reductions[]/rootDelta/statScore non ancora portati — qui LMR resta una riduzione
+// fissa di 1), continuation history/countermove in movepick (vedi MovePick.cs), Lazy SMP
+// (multi-thread), hindsight depth adjustment da priorReduction.
 
 namespace StockfishSharp.Engine;
 
@@ -135,7 +141,7 @@ public sealed class Search
                 int bestValue;
                 while (true)
                 {
-                    bestValue = Negamax(pos, depth, 0, alpha, beta);
+                    bestValue = Negamax(pos, depth, 0, alpha, beta, cutNode: false);
 
                     if (bestValue <= alpha)
                     {
@@ -171,7 +177,7 @@ public sealed class Search
         return result;
     }
 
-    private int Negamax(Position pos, int depth, int ply, int alpha, int beta)
+    private int Negamax(Position pos, int depth, int ply, int alpha, int beta, bool cutNode)
     {
         _nodes++;
         if ((_nodes & 2047) == 0) _ct.ThrowIfCancellationRequested();
@@ -269,11 +275,20 @@ public sealed class Search
             {
                 var nullSt = new StateInfo();
                 pos.DoNullMove(nullSt);
-                int nullScore = -Negamax(pos, depth - 1 - NullMoveReduction, ply + 1, -beta, -beta + 1);
+                int nullScore = -Negamax(pos, depth - 1 - NullMoveReduction, ply + 1, -beta, -beta + 1, cutNode: false);
                 pos.UndoNullMove();
 
                 if (nullScore >= beta && Math.Abs(nullScore) < MateScore - Ply.MaxPly) return beta;
             }
+
+            // Step 11. Internal iterative reduction — search.cpp:1048-1052: a profondità
+            // sufficiente, riduce la profondità nei nodi PV/Cut senza una mossa in TT (una TT
+            // vuota qui è un segnale che questo nodo non è mai stato esplorato a sufficienza).
+            // "allNode" nella fonte è !(PvNode||cutNode); "followPV" (segue la riga principale
+            // dell'iterazione precedente) non è portato — condizione qui leggermente più ampia.
+            bool allNode = !isPvNode && !cutNode;
+            if (!allNode && depth >= 6 && (!probe.Found || probe.Data.Move == Move.None))
+                depth--;
         }
 
         var moves = new List<Move>();
@@ -297,10 +312,14 @@ public sealed class Search
             var st = new StateInfo();
             pos.DoMove(m, st, givesCheck);
 
+            // cutNode del figlio — search.cpp:1372/1387/1403/1422: la ricerca a finestra piena di
+            // "Step 20" (solo nei nodi PV, sulla prima mossa o dopo un fallimento alto) passa
+            // sempre cutNode=false; la ricerca a finestra nulla (Step 18/19) passa true quando è
+            // ridotta da LMR, altrimenti !cutNode del genitore.
             int score;
             if (i == 0)
             {
-                score = -Negamax(pos, depth - 1, ply + 1, -beta, -alpha);
+                score = -Negamax(pos, depth - 1, ply + 1, -beta, -alpha, cutNode: isPvNode ? false : !cutNode);
             }
             else
             {
@@ -308,9 +327,9 @@ public sealed class Search
                 int reduction = lmrEligible ? 1 : 0;
                 int probeDepth = Math.Max(0, depth - 1 - reduction);
 
-                score = -Negamax(pos, probeDepth, ply + 1, -alpha - 1, -alpha);
+                score = -Negamax(pos, probeDepth, ply + 1, -alpha - 1, -alpha, cutNode: lmrEligible ? true : !cutNode);
                 if (score > alpha)
-                    score = -Negamax(pos, depth - 1, ply + 1, -beta, -alpha);
+                    score = -Negamax(pos, depth - 1, ply + 1, -beta, -alpha, cutNode: false);
             }
 
             pos.UndoMove(m);

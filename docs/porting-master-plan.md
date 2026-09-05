@@ -38,12 +38,21 @@ di ampiezza/allargamento della finestra fedele), **Razoring** (Step 8) e **Futil
 mossa figlia** (Step 9), con `improving`/`opponentWorsening` calcolati da una cronologia della
 valutazione statica per ply (equivalente minimo dello `Stack` della fonte).
 
-**Manca ancora**: ProbCut (entrambe le varianti), Singular Extensions, internal iterative
-reduction, multi-cut, correction history (Step 8/9 usano `correctionValue=0` come segnaposto),
-cutNode/allNode, l'hindsight depth adjustment da `priorReduction`, tutta la taratura fine dei
-margini rimasti, la struttura `Worker`/`RootMove`/`Stack` completa della fonte (qui minimizzata a
-quanto serve). L'aspiration window usa lo score dell'iterazione precedente al posto della media
-mobile pesata per "effort" della fonte (richiede bookkeeping per-root-move non ancora presente).
+**Fatto anche**: `cutNode` ora tracciato attraverso tutta la ricorsione (stessa convenzione di
+chiamata della fonte ai punti di ricorsione — Step 18/19/20, null-move) e **Internal Iterative
+Reduction** (Step 11) sopra questa base. Verificato: stesso bestmove/punteggio di prima
+(depth 6-10, 4 posizioni incluso Kiwipete), ~4% nodi in meno a depth 10 sulla posizione iniziale.
+
+**Manca ancora**: ProbCut (entrambe le varianti, ora sbloccato da cutNode), Singular Extensions,
+multi-cut, correction history (Step 8/9 usano `correctionValue=0` come segnaposto), l'hindsight
+depth adjustment da `priorReduction`, la vera formula di riduzione LMR (`reduction()`, dipende da
+una tabella `reductions[]`/`rootDelta`/`statScore` non ancora portati — oggi LMR resta una
+riduzione fissa di 1), tutta la taratura fine dei margini rimasti, la struttura
+`Worker`/`RootMove`/`Stack` completa della fonte (qui minimizzata a quanto serve). L'aspiration
+window usa lo score dell'iterazione precedente al posto della media mobile pesata per "effort"
+della fonte (richiede bookkeeping per-root-move non ancora presente). `followPV` (segue la riga
+principale dell'iterazione precedente) non è portato — la condizione di IIR qui è quindi
+leggermente più ampia di quella esatta della fonte.
 
 ⚠️ È il file più grande del progetto. Da solo vale più di tutto quello portato finora — ogni
 tecnica va aggiunta e verificata una alla volta (nessuna regressione sui test esistenti + confronto
