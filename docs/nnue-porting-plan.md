@@ -186,7 +186,31 @@ N7: la ricerca è ancora il nucleo parziale di Flow A1 (mancano ProbCut, Singula
 aspiration windows, ecc.) — l'accordo pieno con l'oracolo è il criterio di fine progetto, non di
 questa fase, che riguarda solo l'integrazione della valutazione.
 
-### N8 — Percorso AVX512ICL (obiettivo, non extra)
+### N8 — Percorso AVX512ICL (obiettivo, non extra) — 🟡 PARZIALE (accumulatore fatto)
+
+**Fatto** (2026-09-05): `NnueAccumulator.AddWeightRowI16Avx512`/`AddWeightRowI8Avx512` — la somma
+delle righe di peso nell'accumulatore (il ciclo più caldo di N3, ripetuto per ogni feature attiva)
+via `Vector512<short>`, gated a runtime da `Avx512BW.IsSupported && Avx512F.IsSupported`. Per i
+pesi i8 (minacce/coppie pedoni): `Vector512.WidenLower`/`WidenUpper` per il sign-extend a i16 (64
+lane i8 → 2× 32 lane i16), poi somma. Niente permutazione dei pesi qui: la fonte permuta
+biases/weights solo per il trucco `packus` di `transform_perspective` (sotto, non ancora fatto) —
+la somma delle righe è associativa indipendentemente da quale registro tiene quale porzione,
+quindi bit-esatta anche senza permutazione.
+
+**Verificato**: 3 nuovi test — CPU ha AVX512BW+F su questa macchina; `AddWeightRowI16Avx512`/
+`AddWeightRowI8Avx512` bit-esatti contro le rispettive controparti scalari su 50 righe di pesi
+casuali ciascuno (`Assert.Equal` su array, non "circa uguali"); i 2 test `MaterialPsqt*` esistenti
+(verificati contro l'oracolo in N3) continuano a passare — e ora **passano già attraverso il
+percorso AVX512**, dato che questa macchina lo supporta, quindi la colonna PSQT è verificata
+contro l'oracolo anche per il percorso vettoriale, non solo per lo scalare.
+
+**NON ancora fatto** (resta N8): `transform_perspective` (il trucco `packus`+`mulhi`, che RICHIEDE
+la permutazione dei pesi al caricamento — `PackusEpi16Order = {0,2,4,6,1,3,5,7}`), `AffineTransform`/
+`AffineTransformSparseInput` (fc_0/fc_1/fc_2, con `m512_add_dpbusd_epi32` senza VNNI), `ClippedReLU`,
+`SqrClippedReLU`. Sono la parte più delicata (bit-trick di packing), da fare con la stessa
+metodologia di verifica a due stadi (contro lo scalare, poi contro l'oracolo).
+
+### N8 (dettaglio rimanente) — Percorso AVX512ICL, layer e transform_perspective
 Porting dei rami `USE_AVX512*` di `transform_perspective`, `AffineTransform`,
 `AffineTransformSparseInput` (con `nnz_helper.h`), `ClippedReLU`, `SqrClippedReLU`, via
 `System.Runtime.Intrinsics.X86.Avx512F/BW/DQ/Vbmi/Vbmi2` — stesso approccio già usato in

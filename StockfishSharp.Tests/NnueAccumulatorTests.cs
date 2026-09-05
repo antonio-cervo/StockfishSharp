@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using StockfishSharp.Engine;
 using StockfishSharp.Engine.Nnue;
 using Xunit;
@@ -58,6 +59,66 @@ public class NnueAccumulatorTests
         for (int bucket = 0; bucket < NnueArchitecture.LayerStacks; bucket++)
         {
             Assert.Equal(0, acc.MaterialPsqt(pos.SideToMove, bucket));
+        }
+    }
+
+    [Fact]
+    public void Avx512AvailableOnThisMachine()
+    {
+        // N8 (docs/nnue-porting-plan.md): questa macchina ha AVX512BW+F, quindi
+        // NnueAccumulator.ComputeFromScratch usa già il percorso AVX512 per davvero — se questo
+        // test dovesse fallire su una macchina diversa, gli altri test sopra staranno comunque
+        // usando (correttamente) il fallback scalare.
+        Assert.True(NnueAccumulator.UsingAvx512, "Attesa CPU con AVX512BW+F su questa macchina di sviluppo/CI.");
+    }
+
+    [Fact]
+    public void Avx512I16RowMatchesScalarBitExactOnRandomWeights()
+    {
+        var rng = new Random(12345);
+        for (int trial = 0; trial < 50; trial++)
+        {
+            var weights = new short[NnueArchitecture.L1];
+            for (int j = 0; j < weights.Length; j++) weights[j] = (short)rng.Next(short.MinValue, short.MaxValue + 1);
+
+            var accScalar = new short[NnueArchitecture.L1];
+            var accAvx512 = new short[NnueArchitecture.L1];
+            for (int j = 0; j < accScalar.Length; j++)
+            {
+                short seed = (short)rng.Next(short.MinValue, short.MaxValue + 1);
+                accScalar[j] = seed;
+                accAvx512[j] = seed;
+            }
+
+            NnueAccumulator.AddWeightRowI16Scalar(accScalar, weights, 0);
+            NnueAccumulator.AddWeightRowI16Avx512(accAvx512, weights, 0);
+
+            Assert.Equal(accScalar, accAvx512);
+        }
+    }
+
+    [Fact]
+    public void Avx512I8RowMatchesScalarBitExactOnRandomWeights()
+    {
+        var rng = new Random(67890);
+        for (int trial = 0; trial < 50; trial++)
+        {
+            var weights = new sbyte[NnueArchitecture.L1];
+            rng.NextBytes(MemoryMarshal.AsBytes(weights.AsSpan()));
+
+            var accScalar = new short[NnueArchitecture.L1];
+            var accAvx512 = new short[NnueArchitecture.L1];
+            for (int j = 0; j < accScalar.Length; j++)
+            {
+                short seed = (short)rng.Next(short.MinValue, short.MaxValue + 1);
+                accScalar[j] = seed;
+                accAvx512[j] = seed;
+            }
+
+            NnueAccumulator.AddWeightRowI8Scalar(accScalar, weights, 0);
+            NnueAccumulator.AddWeightRowI8Avx512(accAvx512, weights, 0);
+
+            Assert.Equal(accScalar, accAvx512);
         }
     }
 }
