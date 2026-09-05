@@ -135,18 +135,27 @@ Per il confronto in "pedoni" è servito portare anche `win_rate_params`/`to_cp` 
 `WinRateModel.cs` — la normalizzazione NON è una divisione fissa per 100 come ipotizzato
 inizialmente, dipende dal materiale in campo (modello WDL).
 
-### N4 — `transform_perspective`
-Quantizzazione a byte: clamp 0..255 a coppie, prodotto, `/512`. 1024 byte in uscita.
+### N4 — `transform_perspective` — ✅ FATTO
+Quantizzazione a byte: clamp 0..255 a coppie, prodotto, `/512`. 1024 byte in uscita (512 per
+prospettiva, propria prima poi avversaria — `perspectives[2] = {stm, ~stm}`).
 
-**Verifica**: indiretta (entra in N5), ma è il pezzo più semplice e meglio isolato.
+**Verifica**: indiretta via N5 (vedi sotto) — combacia.
 
-### N5 — Forward pass dei layer
-`NnueLayers.cs`: `fc_0` (1024→32, ramo scalare della versione "sparse input"), `sqr_clipped_relu`
-+ `clipped_relu` → concatenazione 64, `fc_1` (64→32), attivazioni → concatenazione 128, `fc_2`
-(128→1), più la **skip connection** (`fc_0_out[30] - fc_0_out[31]`) e la scalatura finale
-`(fwdOut * 600 * 16) / (128 * 64 * 2)`.
+### N5 — Forward pass dei layer — ✅ FATTO E VERIFICATO
+`NnueLayers.cs`: `fc_0` (1024→32, ramo scalare della versione "sparse input" — nello scalare è
+IDENTICO alla `AffineTransform` normale, stessa funzione `affine_transform_non_ssse3` nella fonte),
+`sqr_clipped_relu` + `clipped_relu` → concatenazione 64, `fc_1` (64→32), attivazioni →
+concatenazione 128, `fc_2` (128→1), più la **skip connection** (`fc_0_out[30] - fc_0_out[31]`,
+sull'uscita GREZZA i32 di fc_0, non quella attivata) e la scalatura finale
+`(fwdOut * 600 * 16) / (128 * 64 * 2)` in aritmetica a 64 bit.
 
-**Verifica**: la colonna **Positional (Layers)** dell'oracolo, tutti e 8 i bucket.
+Layout dei pesi confermato leggendo `affine_transform.h`/`affine_transform_sparse_input.h`:
+`weights[outIdx*inputDim + inIdx]`, identità nella lettura (nessuna macro `USE_*` = nessuno
+scrambling) — stesso schema già visto in N1/N3.
+
+**Verifica FATTA** contro l'oracolo, colonna **Positional (Layers)**, tutti e 8 i bucket, sulla
+stessa posizione asimmetrica di N3: combaciano esattamente al primo tentativo
+(`-0.70 -1.22 -0.98 -1.28 -1.37 -1.39 -1.36 -1.49`).
 
 ### N6 — `evaluate()` finale
 Involucro di `evaluate.cpp` (già letto per intero): blend optimism/complexity, scalatura per
