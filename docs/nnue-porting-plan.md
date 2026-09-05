@@ -26,23 +26,39 @@ Documento di pianificazione scritto **prima** di scrivere codice, come per le al
 ## Scoperta che riduce molto lo scope
 
 Gran parte delle righe di quei file è **codice SIMD** (AVX2/AVX512/NEON/RVV/LASX/wasm). Ogni
-funzione ha un ramo scalare di riferimento (`#else`) molto più corto e leggibile. Portiamo **solo
-lo scalare**, come già fatto altrove nel progetto (correttezza prima, velocità dopo).
+funzione ha anche un ramo scalare di riferimento (`#else`) molto più corto e leggibile.
 
-Due conseguenze importanti:
+**Portiamo entrambi: prima lo scalare, poi AVX2** — stesso schema già usato con successo per i
+magic bitboard in `Attacks.cs` (dove il percorso AVX2 è verificato sia contro la forza bruta sia
+contro il percorso classico). L'ordine non è negoziabile per un motivo pratico: se si scrive
+prima l'AVX2 e il risultato è sbagliato, non si distingue un errore di comprensione
+dell'algoritmo da un errore di intrinseche. Con lo scalare già verificato contro l'oracolo,
+l'AVX2 ha un secondo riferimento indipendente contro cui essere controllato.
+
+Lo scalare **resta in pianta stabile** nel codice, non è codice usa-e-getta: serve da fallback su
+CPU senza AVX2 e da oracolo nei test.
+
+Due conseguenze di partire dallo scalare:
 
 1. **`permute_weights()` è un no-op nello scalare**: `PackusEpi16Order` vale `{0,1,2,3,4,5,6,7}`
-   (identità) quando non ci sono vettori — la permutazione dei pesi si può saltare del tutto.
+   (identità) quando non ci sono vettori. ⚠️ Ma con AVX2 diventa `{0,2,1,3,4,6,5,7}`: la
+   permutazione dei pesi **va implementata** per il percorso AVX2. Facendo selezione a runtime
+   (non a tempo di compilazione come la fonte), la scelta naturale è permutare **al caricamento**
+   in base a `Avx2.IsSupported`.
 2. **`transform_perspective` scalare è 8 righe**: per ogni `j` in 0..511, `clamp(acc[j],0,255) *
    clamp(acc[j+512],0,255) / 512` → un byte. Due prospettive × 512 = 1024 input per i layer.
+   La versione AVX2 fa lo stesso con il trucco `packus`+`mulhi` descritto nel commento della
+   fonte (shift a sinistra di 7 + `mulhi` = divisione per 512 con il segno preservato).
 
 ## Cosa NON portiamo (per ora, deliberatamente)
 
 - **Aggiornamento incrementale dell'accumulatore** (`AccumulatorStack`, `forward/backward_update_
   incremental`) e le **Finny tables** (`AccumulatorCaches`): sono ottimizzazioni di velocità.
   Ricalcoliamo l'accumulatore da zero a ogni valutazione. Richiederebbero anche il tracciamento
-  `DirtyPiece`/`DirtyThreats` in `Position`, deliberatamente saltato nella Fase 1.
-- **Tutti i percorsi SIMD** e le varianti per CPU non-x86.
+  `DirtyPiece`/`DirtyThreats` in `Position`, deliberatamente saltato nella Fase 1. Rimandato a
+  N9, non abbandonato.
+- **I percorsi SIMD non-AVX2**: AVX512, NEON (ARM), RVV (RISC-V), LASX/LSX (LoongArch), wasm.
+  AVX2 invece **lo portiamo** (fase N8), perché è quello che ha la macchina di destinazione.
 - `trace_evaluate`, `save()`, memoria condivisa fra thread, `NumaPolicy`.
 
 ## L'oracolo di verifica
@@ -129,18 +145,38 @@ fa Stockfish.
 **Verifica**: partita end-to-end via UCI; confronto delle mosse scelte con l'oracolo a profondità
 fissa bassa su posizioni tattiche note.
 
-### N8 — (dopo, opzionale) Prestazioni
-Aggiornamento incrementale dell'accumulatore + Finny tables + eventualmente SIMD via
-`System.Runtime.Intrinsics` (come già fatto per i magic bitboard AVX2). Solo dopo che N1-N7 sono
-verificati: senza aggiornamento incrementale il motore sarà **corretto ma lento**.
+### N8 — Percorso AVX2 (obiettivo, non extra)
+Porting dei rami AVX2 di `transform_perspective`, `AffineTransform`,
+`AffineTransformSparseInput` (con `nnz_helper.h`), `ClippedReLU`, `SqrClippedReLU`, via
+`System.Runtime.Intrinsics.X86.Avx2` — stesso approccio già usato in `Attacks.cs`. Include la
+permutazione dei pesi al caricamento (`PackusEpi16Order = {0,2,1,3,4,6,5,7}`), che nello scalare
+non serviva.
+
+Selezione a **runtime** (`Avx2.IsSupported`), non a tempo di compilazione come la fonte: un solo
+binario che usa il meglio disponibile, con lo scalare come fallback.
+
+**Verifica** (doppia, come per i magic bitboard):
+1. AVX2 contro **lo scalare già verificato**, su molte posizioni casuali — devono dare valori
+   identici bit per bit, non "simili".
+2. AVX2 contro **l'oracolo**, sulle stesse posizioni di N3/N5/N6.
+
+Il guadagno atteso è grande: NNUE è il percorso più caldo del motore, lo scalare sarà
+plausibilmente un ordine di grandezza più lento.
+
+### N9 — (dopo) Aggiornamento incrementale
+`AccumulatorStack` + Finny tables + tracciamento `DirtyPiece`/`DirtyThreats` in `Position`. È
+l'altra metà delle prestazioni: senza, ogni nodo ricalcola l'accumulatore da zero. Da fare solo
+quando N1-N8 sono verificati e stabili.
 
 ## Ordine di lavoro consigliato
 
-1. Leggere `nnue_accumulator.cpp` (solo i rami scalari e il layout dei pesi) → risolve l'unica
-   incognita vera rimasta (N3).
-2. Leggere i 4 file dei layer (solo rami scalari) → sono corti una volta tolto il SIMD.
+1. Leggere `nnue_accumulator.cpp` (rami scalari + layout dei pesi) → risolve l'unica incognita
+   vera rimasta (N3).
+2. Leggere i 4 file dei layer (rami scalari) → sono corti una volta tolto il SIMD.
 3. Implementare N1 e verificarlo (caricamento + EOF esatto) prima di scrivere qualunque matematica.
 4. N2 → N3 → verifica colonna PSQT.
 5. N4 → N5 → verifica colonna Positional.
 6. N6 → verifica Final evaluation.
 7. N7 → integrazione e partita reale.
+8. **N8 → AVX2**, verificato contro lo scalare (che resta come fallback e come oracolo nei test).
+9. N9 → aggiornamento incrementale, quando tutto il resto è stabile.
