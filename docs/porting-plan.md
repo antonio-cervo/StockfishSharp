@@ -67,12 +67,37 @@ FEN come eccezione (`PositionSetException`) invece di `std::optional<PositionSet
 restituito; parametri template `Color Us`/`GenType Type` (specializzazione a tempo di compilazione
 in C++) diventati parametri normali con branch a runtime.
 
-**Prossimo passo**: Fase 2, ricerca — `tt.h`/`tt.cpp` (transposition table), `movepick.h`/`movepick.cpp`
-(ordinamento mosse: history, killer, countermove, continuation history), `search.h`/`search.cpp`
-(negamax con tutte le potature/estensioni). Prima però vale la pena rinforzare Fase 1: aggiungere
-`see_ge` (serve a movepick) e magari qualche profondità di perft più alta sulle posizioni più
-economiche (serve prima ottimizzare `List&lt;Move&gt;` -> array preallocato, il perft attuale non è
-pensato per velocità).
+### Fase 2 — Ricerca (core) + Fase 3 — UCI minimo — **FATTE, con scope rivisto**
+
+Scoperto leggendo le fonti: `evaluate.cpp` moderno (105 righe) è ormai solo un sottile involucro
+attorno a NNUE — non esiste più una "valutazione classica" separata da portare. La Fase 3
+originariamente pianificata ("eval classica") non corrisponde a niente di reale in questa
+versione; rinominata/assorbita in una valutazione temporanea (vedi sotto). `search.cpp` inoltre è
+2369 righe (quasi il doppio della stima iniziale) — portarlo per intero con OGNI tecnica di
+potatura sarebbe un progetto a sé; qui è stato portato un NUCLEO funzionante e verificato, non il
+totale.
+
+| Sorgente / scopo | File C# | Stato |
+|---|---|---|
+| `tt.h` + `tt.cpp` | `StockfishSharp.Engine/TranspositionTable.cs` | ✅ portato fedelmente (cluster da 3, bitfield impacchettati, invecchiamento) — no NUMA/huge-page, non rilevanti in C# |
+| `see_ge` (in `position.cpp`) | `Position.SeeGe` | ✅ portato fedelmente |
+| valutazione statica | `StockfishSharp.Engine/Evaluate.cs` | ⚠️ **NON un porting** — placeholder originale (materiale + PSQT standard) in attesa della Fase NNUE, che sostituirà questo file per intero |
+| `movepick.h` + `movepick.cpp` | `StockfishSharp.Engine/MovePick.cs` | ⚠️ **NON un porting diretto** — ordinamento più semplice (TT move, SEE, killer, history) dello stesso spirito ma senza continuation history/countermove/capture history della fonte reale |
+| `search.h` + `search.cpp` | `StockfishSharp.Engine/Search.cs` | ⚠️ **nucleo ispirato alla fonte, non porting completo** — negamax+PVS, quiescenza, TT, mate distance pruning, null-move pruning, reverse futility pruning, LMR base. NON portati: ProbCut, Singular Extensions, aspiration windows, IIR, futility per mossa, razoring, multi-cut, Lazy SMP |
+| `timeman.h` + `timeman.cpp` | inline in `StockfishSharp.Uci/Program.cs` (`HandleGo`) | ⚠️ gestione tempo semplice originale, non porting |
+| `uci.h/cpp` + `ucioption.h/cpp` (~1500 righe insieme) | `StockfishSharp.Uci/Program.cs` | ⚠️ **layer minimo, non porting** — uci/isready/ucinewgame/position/go/setoption Hash/quit, sufficiente a giocare una partita reale via GUI/lichess-bot |
+
+**Verificato**: 39/39 test (i 35 di prima + 4 nuovi su Search: matto in 1, matto in 2, nessun crash
+sulla posizione iniziale a profondità 5, sceglie una cattura vincente su una torre indifesa
+invece di mosse neutre). **Test end-to-end manuale via UCI reale**: il motore risponde a
+`uci`/`isready`/`position`/`go movetime N` e gioca mosse d'apertura sensate (1.e4, poi 2.Cf3 dopo
+1...e5) — un motore realmente giocabile via protocollo UCI, collegabile a lichess-bot o a
+qualunque GUI, seppure ancora debole (valutazione placeholder, nucleo di ricerca parziale).
+
+**Prossimo passo**: rinforzare la ricerca (ProbCut/Singular Extensions/aspiration windows, gli
+stessi Step numerati già portati come ADATTAMENTI nel motore di ACMyChess questa sessione, qui da
+portare FEDELMENTE), oppure passare a NNUE per sostituire la valutazione placeholder — le due
+direzioni sono indipendenti, decidere in base a cosa dà più soddisfazione vedere funzionare prima.
 
 ### Fase 2 — Ricerca: `Search::Worker`, transposition table, move ordering — non iniziata
 

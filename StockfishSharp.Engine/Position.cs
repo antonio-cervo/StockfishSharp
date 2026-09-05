@@ -875,6 +875,86 @@ public sealed class Position
         _sideToMove = Types.Opposite(_sideToMove);
     }
 
+    /// <summary>Static Exchange Evaluation: vero se il guadagno netto di materiale della mossa m
+    /// (una sequenza di catture/ricatture sulla stessa casa) è almeno <paramref name="threshold"/>
+    /// — <c>Position::see_ge</c>, position.cpp:1389-1492. Usata per l'ordinamento delle mosse
+    /// (Fase 2): scarta/ordina le catture in base a se "conviene" giocarle, senza dover eseguire
+    /// davvero l'intera sequenza di catture sulla scacchiera.</summary>
+    public bool SeeGe(Move m, int threshold = 0)
+    {
+        if (m.TypeOf != MoveType.Normal) return 0 >= threshold;
+
+        Square from = m.FromSq, to = m.ToSq;
+
+        int swap = Values.PieceValue[(byte)PieceOn(to)] - threshold;
+        if (swap < 0) return false;
+
+        swap = Values.PieceValue[(byte)PieceOn(from)] - swap;
+        if (swap <= 0) return true;
+
+        Color stm = _sideToMove;
+        ulong occupied = Pieces() ^ Bitboards.SquareBB(from) ^ Bitboards.SquareBB(to);
+        ulong attackers = AttackersTo(to, occupied);
+        int res = 1;
+
+        while (true)
+        {
+            stm = Types.Opposite(stm);
+            attackers &= occupied;
+
+            ulong stmAttackers = attackers & Pieces(stm);
+            if (stmAttackers == 0) break;
+
+            // Non permettere a un pezzo inchiodato di "attaccare" finché l'inchiodante è ancora
+            // sulla sua casa originale.
+            if ((Pinners(Types.Opposite(stm)) & occupied) != 0)
+            {
+                stmAttackers &= ~BlockersForKing(stm);
+                if (stmAttackers == 0) break;
+            }
+
+            res ^= 1;
+
+            ulong bb;
+            if ((bb = stmAttackers & Pieces(PieceType.Pawn)) != 0)
+            {
+                if ((swap = Values.Pawn - swap) < res) break;
+                occupied ^= Bitboards.LeastSignificantSquareBB(bb);
+                attackers |= Attacks.AttacksBb(PieceType.Bishop, to, occupied) & Pieces(PieceType.Bishop, PieceType.Queen);
+            }
+            else if ((bb = stmAttackers & Pieces(PieceType.Knight)) != 0)
+            {
+                if ((swap = Values.Knight - swap) < res) break;
+                occupied ^= Bitboards.LeastSignificantSquareBB(bb);
+            }
+            else if ((bb = stmAttackers & Pieces(PieceType.Bishop)) != 0)
+            {
+                if ((swap = Values.Bishop - swap) < res) break;
+                occupied ^= Bitboards.LeastSignificantSquareBB(bb);
+                attackers |= Attacks.AttacksBb(PieceType.Bishop, to, occupied) & Pieces(PieceType.Bishop, PieceType.Queen);
+            }
+            else if ((bb = stmAttackers & Pieces(PieceType.Rook)) != 0)
+            {
+                if ((swap = Values.Rook - swap) < res) break;
+                occupied ^= Bitboards.LeastSignificantSquareBB(bb);
+                attackers |= Attacks.AttacksBb(PieceType.Rook, to, occupied) & Pieces(PieceType.Rook, PieceType.Queen);
+            }
+            else if ((bb = stmAttackers & Pieces(PieceType.Queen)) != 0)
+            {
+                swap = Values.Queen - swap;
+                occupied ^= Bitboards.LeastSignificantSquareBB(bb);
+                var (bishopAttacks, rookAttacks) = BothAttacksBb(to, occupied);
+                attackers |= (bishopAttacks & Pieces(PieceType.Bishop, PieceType.Queen)) | (rookAttacks & Pieces(PieceType.Rook, PieceType.Queen));
+            }
+            else // Re: se dopo aver "catturato" col re l'avversario ha ancora attaccanti, si inverte il risultato
+            {
+                return (attackers & ~Pieces(stm)) != 0 ? res == 0 : res != 0;
+            }
+        }
+
+        return res != 0;
+    }
+
     /// <summary>Esegue/disfa un arrocco — <c>Position::do_castling&lt;Do&gt;</c>,
     /// position.cpp:1311-1339. Rimuove entrambi i pezzi prima di riposizionarli (le case possono
     /// sovrapporsi in Chess960, es. la torre già sulla casa di arrivo del re).</summary>
