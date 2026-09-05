@@ -2,3 +2,11 @@ bin/
 obj/
 *.user
 .vs/
+
+# Asset esterni scaricati, non parte del porting stesso — l'eseguibile ufficiale usato come
+# oracolo di verifica (contiene anche l'albero sorgenti/wiki, inclusi per conformita' GPL nella
+# release stessa) e i pesi della rete NNUE. Grossi (svariate centinaia di MB in tutto) e
+# riscaricabili in qualunque momento con gli URL citati in docs/nnue-porting-plan.md.
+stockfish-reference-binary/
+nnue-networks/
+*.zip
