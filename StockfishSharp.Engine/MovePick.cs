@@ -23,10 +23,19 @@
 // update_all_stats (search.cpp:1993-2011), usata anche in OrderMoves come termine aggiuntivo
 // (la fonte la userebbe dentro il vero MovePicker a stadi, non ancora portato).
 //
-// NON portato: PawnHistory, LowPlyHistory, TTMoveHistory, CorrectionHistory (vedi Search.cs); in
-// OrderMoves la continuation history usa solo ss-1 (non tutti e 6 i livelli) come termine
-// d'ordinamento — la fonte la userebbe tutta dentro il vero MovePicker a stadi/reduction(), non
-// ancora portati.
+// LowPlyHistory portata con fedeltà (history.h:130-132, D=7183 come main history, LOW_PLY_
+// HISTORY_SIZE=5): a differenza delle altre si azzera (fill 102) a OGNI ricerca
+// (iterative_deepening, search.cpp:326), non a ogni nuova partita — vedi ResetForSearch, chiamata
+// da Search.Search_. Usata anche in OrderMoves (termine aggiuntivo per ply<5).
+//
+// TTMoveHistory portata con fedeltà (history.h:196, D=8192): un solo contatore globale, bonus
+// quando la mossa migliore combacia con quella di TT (search.cpp:1574-1575). Non ancora usata in
+// nessuna formula (la fonte la usa nel margine di futility Step 9 e nella riduzione LMR, entrambi
+// non ancora a questo livello di dettaglio) — aggiornata comunque per essere pronta.
+//
+// NON portato: PawnHistory, CorrectionHistory (vedi Search.cs, ora fatta); in OrderMoves la
+// continuation history usa solo ss-1 (non tutti e 6 i livelli) come termine d'ordinamento — la
+// fonte la userebbe tutta dentro il vero MovePicker a stadi/reduction(), non ancora portati.
 
 namespace StockfishSharp.Engine;
 
@@ -70,6 +79,16 @@ public sealed class MovePick
     // indicizzata [pezzo che cattura][casa di arrivo][tipo del pezzo catturato].
     private readonly short[,,] _captureHistory = new short[PieceSlots.Nb, Squares.Nb, PieceTypes.Nb];
 
+    // LowPlyHistory, history.h:130-132 — Stats<i16,7183,LOW_PLY_HISTORY_SIZE,UINT_16_HISTORY_SIZE>,
+    // indicizzata [ply][move.raw()]; azzerata per ogni ricerca, non per ogni partita (vedi nota in
+    // testa al file).
+    private const int LowPlyHistorySize = 5;
+    private readonly short[,] _lowPlyHistory = new short[LowPlyHistorySize, 65536];
+
+    // TTMoveHistory, history.h:196 — StatsEntry<i16,8192> singolo, non indicizzato.
+    private const int TtMoveHistoryLimit = 8192;
+    private short _ttMoveHistory;
+
     public void Clear()
     {
         Array.Clear(_killers);
@@ -91,6 +110,17 @@ public sealed class MovePick
             for (int s = 0; s < Squares.Nb; s++)
                 for (int t = 0; t < PieceTypes.Nb; t++)
                     _captureHistory[p, s, t] = -742; // Worker::clear(), search.cpp:692
+
+        _ttMoveHistory = 0; // Worker::clear(), search.cpp:706
+    }
+
+    /// <summary><c>lowPlyHistory.fill(102)</c>, iterative_deepening, search.cpp:326 — a differenza
+    /// delle altre history questa si azzera a OGNI ricerca, non a ogni nuova partita.</summary>
+    public void ResetForSearch()
+    {
+        for (int p = 0; p < LowPlyHistorySize; p++)
+            for (int m = 0; m < 65536; m++)
+                _lowPlyHistory[p, m] = 102;
     }
 
     /// <summary><c>StatsEntry::operator&lt;&lt;</c>, history.h:70-77: il bonus spinge il valore
@@ -124,7 +154,7 @@ public sealed class MovePick
     /// bestMove non causa un taglio (nodo PV pienamente esplorato). <paramref name="contRefs"/> è
     /// <c>(ss-1)..(ss-6)-&gt;currentMove</c> per la continuation history, <paramref
     /// name="currentInCheck"/> lo scacco di QUESTO nodo (non del genitore).</summary>
-    public void UpdateStats(Position pos, Move bestMove, List<Move> quietsSearched, List<Move> capturesSearched,
+    public void UpdateStats(Position pos, int ply, Move bestMove, List<Move> quietsSearched, List<Move> capturesSearched,
         int depth, Move ttMove, bool isPvNode, ContinuationRef[] contRefs, bool currentInCheck)
     {
         int bonus = Math.Min((133 * depth) - 81, 1487) + (364 * (bestMove == ttMove ? 1 : 0));
@@ -135,13 +165,13 @@ public sealed class MovePick
 
         if (!pos.CaptureStage(bestMove))
         {
-            UpdateQuietHistory(pos, bestMove, bonus * 899 / 1024, contRefs, currentInCheck);
+            UpdateQuietHistory(pos, ply, bestMove, bonus * 899 / 1024, contRefs, currentInCheck);
 
             int actualMalus = malus * 1159 / 1024;
             foreach (var m in quietsSearched)
             {
                 actualMalus = actualMalus * 921 / 1024;
-                UpdateQuietHistory(pos, m, -actualMalus, contRefs, currentInCheck);
+                UpdateQuietHistory(pos, ply, m, -actualMalus, contRefs, currentInCheck);
             }
         }
         else
@@ -160,14 +190,23 @@ public sealed class MovePick
             PieceType capturedPiece = Types.TypeOf(pos.PieceOn(m.ToSq));
             UpdateHistory(ref _captureHistory[(byte)movedPiece, (byte)m.ToSq, (byte)capturedPiece], -malus * 1489 / 1024, CaptureHistoryLimit);
         }
+
+        // search.cpp:1574-1575 — bonus/malus a TTMoveHistory quando la bestMove combacia o no con
+        // la mossa di TT (solo nei nodi non-PV).
+        if (!isPvNode)
+            UpdateHistory(ref _ttMoveHistory, bestMove == ttMove ? 918 : -747, TtMoveHistoryLimit);
     }
 
-    /// <summary><c>update_quiet_histories</c>, search.cpp:2045-2056 — qui solo main history +
-    /// continuation history (vedi nota in testa al file per low-ply/pawn history non portate).</summary>
-    private void UpdateQuietHistory(Position pos, Move move, int bonus, ContinuationRef[] contRefs, bool currentInCheck)
+    /// <summary><c>update_quiet_histories</c>, search.cpp:2045-2056 — main history, low-ply
+    /// history (solo ply&lt;5) e continuation history (vedi nota in testa al file per pawn
+    /// history non portata).</summary>
+    private void UpdateQuietHistory(Position pos, int ply, Move move, int bonus, ContinuationRef[] contRefs, bool currentInCheck)
     {
         Color us = pos.SideToMove;
         UpdateHistory(ref _mainHistory[(byte)us, move.Raw], bonus, MainHistoryLimit);
+
+        if (ply < LowPlyHistorySize)
+            UpdateHistory(ref _lowPlyHistory[ply, move.Raw], bonus * 712 / 1024, MainHistoryLimit);
 
         Piece pc = pos.MovedPiece(move);
         UpdateContinuationHistories(contRefs, currentInCheck, pc, move.ToSq, bonus * 750 / 1024);
@@ -226,6 +265,8 @@ public sealed class MovePick
             if (m == killer1) return 899_999;
 
             int score = _mainHistory[(byte)us, m.Raw];
+            if (ply < LowPlyHistorySize)
+                score += _lowPlyHistory[ply, m.Raw];
             if (ss1.IsOk)
                 score += _continuationHistory[ss1.InCheck ? 1 : 0, ss1.CaptureStage ? 1 : 0, (byte)ss1.Piece, (byte)ss1.To, (byte)pos.MovedPiece(m), (byte)m.ToSq];
             return score;

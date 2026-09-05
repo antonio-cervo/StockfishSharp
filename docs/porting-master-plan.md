@@ -121,9 +121,16 @@ come `stack+7` della fonte). L'ordinamento (`OrderMoves`) usa solo ss-1 dei 6 (n
 Verificato (per entrambi i commit): 62/62 test, bestmove identico su tutte le posizioni di test
 prima/dopo (incluse Kiwipete e le due posizioni tattiche).
 
+**LowPlyHistory e TTMoveHistory FATTE**: LowPlyHistory (history.h:130-132, D=7183, 5 ply) si
+azzera a ogni ricerca (non a ogni partita, `ResetForSearch`, come `iterative_deepening`,
+search.cpp:326) e partecipa all'ordinamento per i primi 5 ply; TTMoveHistory (history.h:196,
+D=8192) è un contatore globale aggiornato ma non ancora usato in nessuna formula (la fonte la usa
+in punti non ancora portati). Verificato: 62/62 test, bestmove identico su tutte le posizioni di
+test prima/dopo.
+
 **Manca ancora**: generazione a stadi (la fonte non genera tutte le mosse in una volta),
-`PawnHistory`, `LowPlyHistory`, `TTMoveHistory`; in `OrderMoves` solo ss-1 delle 6 continuation
-history è usata per l'ordinamento (statScore/reduction() vero, non ancora portato).
+`PawnHistory`; in `OrderMoves` solo ss-1 delle 6 continuation history è usata per l'ordinamento
+(statScore/reduction() vero, non ancora portato).
 
 ### A3 — Gestione del tempo (`timeman.h` 70 + `timeman.cpp` 144 = 214 righe)
 **Oggi**: ~15 righe dentro `Program.cs`.

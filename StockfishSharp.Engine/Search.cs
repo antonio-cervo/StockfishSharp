@@ -235,6 +235,7 @@ public sealed class Search
         _ct = cts.Token;
         _nodes = 0;
         _tt.NewSearch();
+        _movePick.ResetForSearch(); // lowPlyHistory.fill(102), search.cpp:326
 
         Array.Clear(_staticEvalHistory);
         for (int i = 0; i < StackOffset; i++) _staticEvalHistory[i] = Values.None; // (ss-7)..(ss-1)
@@ -552,7 +553,7 @@ public sealed class Search
             value = ((value * depth) + beta) / (depth + 1);
 
         if (bestMove != null)
-            _movePick.UpdateStats(pos, bestMove.Value, quietsSearched, capturesSearched, depth, probe.Data.Move, isPvNode, contRefs, inCheck);
+            _movePick.UpdateStats(pos, ply, bestMove.Value, quietsSearched, capturesSearched, depth, probe.Data.Move, isPvNode, contRefs, inCheck);
 
         // search.cpp:1629-1638: aggiorna la correction history solo se la mossa migliore non è una
         // cattura e la direzione dell'errore (bestValue sopra/sotto la valutazione statica)
