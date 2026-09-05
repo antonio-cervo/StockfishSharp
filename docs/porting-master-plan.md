@@ -65,10 +65,14 @@ Piano di dettaglio in `nnue-porting-plan.md` (fasi N1-N9). Riassunto:
 
 N1 caricamento file → N2 indici feature → N3 accumulatore + **verifica colonna PSQT** → N4
 quantizzazione → N5 layer → **verifica colonna Positional** → N6 involucro `evaluate()` → **verifica
-Final evaluation** → N7 integrazione → N8 **AVX2** → N9 aggiornamento incrementale.
+Final evaluation** → N7 integrazione → N8 **AVX512ICL meno VNNI** → N9 aggiornamento incrementale.
 
-Da leggere ancora: `nnue_accumulator.cpp` (953), i 4 file dei layer (1.296), `nnz_helper.h` (171),
-`network.cpp` (resto), `simd.h` (532, solo come riferimento per le intrinseche).
+**N1-N7 FATTI E VERIFICATI** (2026-09-05): motore ora gioca con la vera valutazione NNUE via UCI
+(non più il placeholder materiale+PSQT), confermato contro l'oracolo su più posizioni. Resta N8
+(percorso SIMD, per la velocità) e N9 (aggiornamento incrementale dell'accumulatore).
+
+Da leggere ancora (per N8): `nnue_accumulator.cpp` (953, rami SIMD), i 4 file dei layer (1.296,
+rami SIMD), `nnz_helper.h` (171), `network.cpp` (resto), `simd.h` (532).
 
 ---
 

@@ -1,14 +1,19 @@
-// NON un porting: la fonte reale (evaluate.cpp, 105 righe) è ormai solo un sottile involucro
-// attorno a NNUE (rete neurale) — non esiste più una valutazione "classica" da tradurre. Questo
-// file è codice originale, scritto apposta per avere una valutazione statica funzionante PRIMA
-// che arrivi la Fase NNUE (che sostituirà interamente questo file): materiale + tabelle
-// posizione-per-pezzo standard, sufficiente per rendere testabile la ricerca (Fase 2) senza
-// aspettare il porting di NNUE (~3.400 righe, fase a sé nel piano).
+// Il placeholder originale (materiale + tabelle posizione-per-pezzo, sotto) resta come fallback
+// quando nessuna rete NNUE è caricata (es. i test esistenti di Search, che non hanno bisogno del
+// file da ~100MB e traggono vantaggio dalla velocità del placeholder). Quando NnueNetwork è
+// impostato (fatto da StockfishSharp.Uci all'avvio, N7 del piano NNUE — vedi
+// docs/nnue-porting-plan.md), StaticEval delega a Nnue.NnueEvaluate, il vero porting di
+// evaluate.cpp. Il chiamante deve garantire "non sotto scacco" (assert(!pos.checkers()) nella
+// fonte) — già vero per entrambi i punti di chiamata in Search.cs, che gestiscono lo scacco a
+// parte prima di arrivare qui.
 
 namespace StockfishSharp.Engine;
 
 public static class Evaluate
 {
+    public static Nnue.NnueNetwork? NnueNetwork { get; set; }
+
+
     // Valori standard di manuale (centipedoni), non dalla fonte Stockfish (che con NNUE non ha
     // più bisogno di valori di materiale statici per la valutazione stessa — li usa solo altrove,
     // es. per calibrare margini di ricerca).
@@ -97,6 +102,9 @@ public static class Evaluate
     /// negamax (positivo = meglio per chi deve muovere).</summary>
     public static int StaticEval(Position pos)
     {
+        if (NnueNetwork != null)
+            return Nnue.NnueEvaluate.Evaluate(NnueNetwork, pos);
+
         int score = 0;
         for (var s = Square.A1; s <= Square.H8; s++)
         {

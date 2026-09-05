@@ -167,13 +167,24 @@ mosse, clamp fuori dal range tablebase.
 mediogioco asimmetrico, finale di pedoni/torre — bucket 7/7/2 rispettivamente): combaciano
 esattamente (`+0.00`, `-2.48`, `+0.48`).
 
-### N7 — Integrazione nel motore
-Sostituisce `Evaluate.cs` (il placeholder materiale+PSQT). Attenzione: NNUE **non** va chiamata
-sotto scacco (`assert(!pos.checkers())` nella fonte) — serve il fallback nella quiescenza, come
-fa Stockfish.
+### N7 — Integrazione nel motore — ✅ FATTO E VERIFICATO
+`Evaluate.StaticEval` delega a `Nnue.NnueEvaluate` quando `Evaluate.NnueNetwork` è impostato
+(fatto da `StockfishSharp.Uci/Program.cs` all'avvio, se il file `.nnue` è presente — altrimenti
+resta il placeholder materiale+PSQT). Il placeholder non è stato rimosso: resta fallback per i
+test di `Search` (che non caricano la rete da ~100MB) e per l'eventuale caso "rete non trovata".
+Il vincolo "NNUE non va chiamata sotto scacco" (`assert(!pos.checkers())` nella fonte) è già
+rispettato: entrambi i punti di chiamata in `Search.cs` (riga 113, 194) usano un ternario
+`inCheck ? ... : Evaluate.StaticEval(pos)` che non valuta il ramo NNUE quando in scacco.
 
-**Verifica**: partita end-to-end via UCI; confronto delle mosse scelte con l'oracolo a profondità
-fissa bassa su posizioni tattiche note.
+**Verificato**: 54/54 test (nessuna regressione). **Partita end-to-end via UCI reale** con la rete
+caricata: `info string NNUE evaluation using nn-1a298aa575a0.nnue`, poi mosse sensate su tre
+posizioni (apertura, dopo 1.e4 e5, un mediogioco). **Confronto con l'oracolo** (stesso eseguibile
+Stockfish 19 di riferimento, stessa profondità fissa): posizione iniziale a depth 6 → `e2e4`
+combacia; dopo 1.e4 e5 a depth 5 → `g1f3` combacia; terza posizione (mediogioco) a depth 8 →
+diverge (`b1c3` contro `a2a3` dell'oracolo). La divergenza sulla terza è attesa e non è un bug di
+N7: la ricerca è ancora il nucleo parziale di Flow A1 (mancano ProbCut, Singular Extensions,
+aspiration windows, ecc.) — l'accordo pieno con l'oracolo è il criterio di fine progetto, non di
+questa fase, che riguarda solo l'integrazione della valutazione.
 
 ### N8 — Percorso AVX512ICL (obiettivo, non extra)
 Porting dei rami `USE_AVX512*` di `transform_perspective`, `AffineTransform`,

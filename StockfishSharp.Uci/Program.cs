@@ -10,6 +10,22 @@ using File = StockfishSharp.Engine.File;
 Attacks.EnsureInitialized();
 Position.Init();
 
+// Percorso della rete di default, non ancora configurabile via UCI (l'opzione "EvalFile" fa
+// parte di ucioption.cpp, non ancora portato — Flow A "debito" in docs/porting-master-plan.md).
+// Se il file non c'è (~100MB, gitignored — vedi docs/nnue-porting-plan.md per l'URL), si continua
+// con il placeholder materiale+PSQT invece di rifiutarsi di avviarsi come fa la fonte reale: qui
+// serve poter lavorare anche senza il file scaricato.
+const string DefaultNetworkPath = @"D:\Antcer\Documenti\ProgettiVS\StockfishSharp\nnue-networks\nn-1a298aa575a0.nnue";
+if (System.IO.File.Exists(DefaultNetworkPath))
+{
+    Evaluate.NnueNetwork = StockfishSharp.Engine.Nnue.NnueNetwork.Load(DefaultNetworkPath);
+    Console.WriteLine($"info string NNUE evaluation using {System.IO.Path.GetFileName(DefaultNetworkPath)}");
+}
+else
+{
+    Console.WriteLine("info string NNUE network not found, using placeholder material+PSQT evaluation");
+}
+
 var position = new Position();
 position.Set("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", isChess960: false);
 
