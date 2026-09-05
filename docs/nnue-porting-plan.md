@@ -28,12 +28,17 @@ Documento di pianificazione scritto **prima** di scrivere codice, come per le al
 Gran parte delle righe di quei file è **codice SIMD** (AVX2/AVX512/NEON/RVV/LASX/wasm). Ogni
 funzione ha anche un ramo scalare di riferimento (`#else`) molto più corto e leggibile.
 
-**Portiamo entrambi: prima lo scalare, poi AVX2** — stesso schema già usato con successo per i
-magic bitboard in `Attacks.cs` (dove il percorso AVX2 è verificato sia contro la forza bruta sia
+**Portiamo entrambi: prima lo scalare, poi AVX512ICL** — stesso schema già usato con successo per
+i magic bitboard in `Attacks.cs` (dove il percorso AVX2 è verificato sia contro la forza bruta sia
 contro il percorso classico). L'ordine non è negoziabile per un motivo pratico: se si scrive
-prima l'AVX2 e il risultato è sbagliato, non si distingue un errore di comprensione
-dell'algoritmo da un errore di intrinseche. Con lo scalare già verificato contro l'oracolo,
-l'AVX2 ha un secondo riferimento indipendente contro cui essere controllato.
+prima il SIMD e il risultato è sbagliato, non si distingue un errore di comprensione
+dell'algoritmo da un errore di intrinseche. Con lo scalare già verificato contro l'oracolo, il
+percorso SIMD ha un secondo riferimento indipendente contro cui essere controllato.
+
+Il bersaglio SIMD è **AVX512ICL** (non AVX2): è quello che la CPU di questa macchina supporta ed
+è lo stesso percorso che esegue l'oracolo — vedi `porting-master-plan.md` per la verifica
+empirica di quali sottoinsiemi .NET 10 espone davvero, e per l'unica limitazione trovata
+(`Avx512Vnni` non esiste in .NET: si usa la variante `maddubs`+`madd` che Stockfish ha già).
 
 Lo scalare **resta in pianta stabile** nel codice, non è codice usa-e-getta: serve da fallback su
 CPU senza AVX2 e da oracolo nei test.
@@ -41,13 +46,13 @@ CPU senza AVX2 e da oracolo nei test.
 Due conseguenze di partire dallo scalare:
 
 1. **`permute_weights()` è un no-op nello scalare**: `PackusEpi16Order` vale `{0,1,2,3,4,5,6,7}`
-   (identità) quando non ci sono vettori. ⚠️ Ma con AVX2 diventa `{0,2,1,3,4,6,5,7}`: la
-   permutazione dei pesi **va implementata** per il percorso AVX2. Facendo selezione a runtime
+   (identità) quando non ci sono vettori. ⚠️ Ma con AVX512 diventa `{0,2,4,6,1,3,5,7}`: la
+   permutazione dei pesi **va implementata** per il percorso SIMD. Facendo selezione a runtime
    (non a tempo di compilazione come la fonte), la scelta naturale è permutare **al caricamento**
-   in base a `Avx2.IsSupported`.
+   in base al percorso scelto.
 2. **`transform_perspective` scalare è 8 righe**: per ogni `j` in 0..511, `clamp(acc[j],0,255) *
    clamp(acc[j+512],0,255) / 512` → un byte. Due prospettive × 512 = 1024 input per i layer.
-   La versione AVX2 fa lo stesso con il trucco `packus`+`mulhi` descritto nel commento della
+   La versione SIMD fa lo stesso con il trucco `packus`+`mulhi` descritto nel commento della
    fonte (shift a sinistra di 7 + `mulhi` = divisione per 512 con il segno preservato).
 
 ## Cosa NON portiamo (per ora, deliberatamente)
@@ -57,8 +62,10 @@ Due conseguenze di partire dallo scalare:
   Ricalcoliamo l'accumulatore da zero a ogni valutazione. Richiederebbero anche il tracciamento
   `DirtyPiece`/`DirtyThreats` in `Position`, deliberatamente saltato nella Fase 1. Rimandato a
   N9, non abbandonato.
-- **I percorsi SIMD non-AVX2**: AVX512, NEON (ARM), RVV (RISC-V), LASX/LSX (LoongArch), wasm.
-  AVX2 invece **lo portiamo** (fase N8), perché è quello che ha la macchina di destinazione.
+- **I percorsi SIMD non-x86**: NEON (ARM), RVV (RISC-V), LASX/LSX (LoongArch), wasm. E anche
+  AVX2, che diventa superfluo: la macchina di destinazione ha AVX512ICL, che è quello che
+  portiamo in N8. (Se un domani servisse girare su una CPU solo-AVX2, il fallback è lo scalare —
+  corretto ma lento — oppure si aggiunge il livello AVX2 allora.)
 - `trace_evaluate`, `save()`, memoria condivisa fra thread, `NumaPolicy`.
 
 ## L'oracolo di verifica
@@ -145,20 +152,28 @@ fa Stockfish.
 **Verifica**: partita end-to-end via UCI; confronto delle mosse scelte con l'oracolo a profondità
 fissa bassa su posizioni tattiche note.
 
-### N8 — Percorso AVX2 (obiettivo, non extra)
-Porting dei rami AVX2 di `transform_perspective`, `AffineTransform`,
+### N8 — Percorso AVX512ICL (obiettivo, non extra)
+Porting dei rami `USE_AVX512*` di `transform_perspective`, `AffineTransform`,
 `AffineTransformSparseInput` (con `nnz_helper.h`), `ClippedReLU`, `SqrClippedReLU`, via
-`System.Runtime.Intrinsics.X86.Avx2` — stesso approccio già usato in `Attacks.cs`. Include la
-permutazione dei pesi al caricamento (`PackusEpi16Order = {0,2,1,3,4,6,5,7}`), che nello scalare
-non serviva.
+`System.Runtime.Intrinsics.X86.Avx512F/BW/DQ/Vbmi/Vbmi2` — stesso approccio già usato in
+`Attacks.cs` per AVX2. Include la permutazione dei pesi al caricamento
+(`PackusEpi16Order = {0,2,4,6,1,3,5,7}`), che nello scalare non serviva.
 
-Selezione a **runtime** (`Avx2.IsSupported`), non a tempo di compilazione come la fonte: un solo
-binario che usa il meglio disponibile, con lo scalare come fallback.
+Verificato empiricamente che .NET 10 espone tutto il necessario **tranne `Avx512Vnni`**: per i
+prodotti scalari int8 dei layer si porta la variante senza VNNI (`maddubs_epi16` + `madd_epi16`),
+che è già presente nel `simd.h` della fonte. Vedi `porting-master-plan.md` per la tabella
+completa dei sottoinsiemi e per l'assunzione sulla saturazione int16 che questo comporta.
+
+Selezione a **runtime** (`Avx512F.IsSupported && Avx512Vbmi2.IsSupported && ...`), non a tempo di
+compilazione come la fonte: un solo binario che usa il meglio disponibile, con lo scalare come
+fallback.
 
 **Verifica** (doppia, come per i magic bitboard):
-1. AVX2 contro **lo scalare già verificato**, su molte posizioni casuali — devono dare valori
+1. SIMD contro **lo scalare già verificato**, su molte posizioni casuali — devono dare valori
    identici bit per bit, non "simili".
-2. AVX2 contro **l'oracolo**, sulle stesse posizioni di N3/N5/N6.
+2. SIMD contro **l'oracolo**, sulle stesse posizioni di N3/N5/N6. Qui il confronto è
+   particolarmente pulito perché è lo **stesso percorso ISA** che esegue l'oracolo (a meno di
+   VNNI).
 
 Il guadagno atteso è grande: NNUE è il percorso più caldo del motore, lo scalare sarà
 plausibilmente un ordine di grandezza più lento.
@@ -178,5 +193,6 @@ quando N1-N8 sono verificati e stabili.
 5. N4 → N5 → verifica colonna Positional.
 6. N6 → verifica Final evaluation.
 7. N7 → integrazione e partita reale.
-8. **N8 → AVX2**, verificato contro lo scalare (che resta come fallback e come oracolo nei test).
+8. **N8 → AVX512ICL**, verificato contro lo scalare (che resta come fallback e come oracolo nei
+   test).
 9. N9 → aggiornamento incrementale, quando tutto il resto è stabile.
