@@ -96,6 +96,57 @@ public class AttacksTests
         }
     }
 
+    [Fact]
+    public void Avx2AvailableOnThisMachine()
+    {
+        // Non un requisito del porting (c'è il fallback classico) — ma su QUESTA macchina deve
+        // essere vero, altrimenti il confronto sotto non starebbe testando il percorso AVX2 per
+        // davvero.
+        Assert.True(Attacks.UsingAvx2, "Attesa CPU con AVX2 su questa macchina di sviluppo/CI.");
+    }
+
+    [Theory]
+    [InlineData(PieceType.Rook)]
+    [InlineData(PieceType.Bishop)]
+    public void Avx2PathMatchesBruteForceOnRandomOccupancies(PieceType pt)
+    {
+        Assert.True(Attacks.UsingAvx2);
+        var rng = new Random(67890);
+        for (var s = Square.A1; s <= Square.H8; s++)
+        {
+            for (int trial = 0; trial < 200; trial++)
+            {
+                ulong occupied = (ulong)rng.NextInt64() & (ulong)rng.NextInt64();
+                ulong expected = BruteForceSlidingAttack(pt, s, occupied);
+                var (bishop, rook) = Attacks.BothAttacksBbAvx2(s, occupied);
+                ulong actual = pt == PieceType.Rook ? rook : bishop;
+                Assert.Equal(expected, actual);
+            }
+        }
+    }
+
+    [Fact]
+    public void Avx2PathMatchesClassicMagicPathExactly()
+    {
+        // Le due implementazioni (AVX2 e magic bitboard classici) sono codice completamente
+        // indipendente per lo stesso identico algoritmo concettuale — se il porting AVX2 avesse
+        // un bug, questo confronto lo troverebbe anche in occupazioni che il solo confronto con
+        // BruteForceSlidingAttack potrebbe non coprire allo stesso modo.
+        var rng = new Random(13579);
+        for (var s = Square.A1; s <= Square.H8; s++)
+        {
+            for (int trial = 0; trial < 200; trial++)
+            {
+                ulong occupied = (ulong)rng.NextInt64() & (ulong)rng.NextInt64();
+                var (avx2Bishop, avx2Rook) = Attacks.BothAttacksBbAvx2(s, occupied);
+                ulong classicBishop = Attacks.MagicAttacksBb(PieceType.Bishop, s, occupied);
+                ulong classicRook = Attacks.MagicAttacksBb(PieceType.Rook, s, occupied);
+                Assert.Equal(classicBishop, avx2Bishop);
+                Assert.Equal(classicRook, avx2Rook);
+            }
+        }
+    }
+
     /// <summary>Ricalcolo indipendente delle sliding attacks (non passa per Attacks/Magic), usato
     /// SOLO per verificare il porting sopra — se copiasse la stessa implementazione non
     /// proverebbe nulla.</summary>

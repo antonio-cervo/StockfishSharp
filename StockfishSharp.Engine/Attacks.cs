@@ -1,13 +1,18 @@
 // Corrisponde a src/attacks.h + src/attacks.cpp della fonte upstream. Vedi Types.cs per la nota
 // generale sul porting.
 //
-// La fonte reale sceglie tra tre implementazioni delle sliding attacks a seconda della CPU
-// (hyperbola quintessence su ARM, la variante AVX2 "dual hyperbola quintessence" su x86 moderni,
-// o i classici "fancy magic bitboard" precalcolati altrove) — qui portiamo SOLO la terza, quella
-// classica indipendente dalla piattaforma: stesso algoritmo usato da decenni di motori scacchistici,
-// niente intrinsechi SIMD da replicare, e più facile da verificare riga per riga. Portiamo anche
-// solo il ramo a 64 bit (Is64Bit è sempre vero su .NET moderno): il ramo a 32 bit della fonte
-// (attacks.cpp:156-159, index() a due metà) non ha equivalente qui.
+// La fonte reale sceglie tra tre implementazioni delle sliding attacks a seconda della CPU:
+// hyperbola quintessence su ARM (non portata, specifica di quella piattaforma), la variante AVX2
+// "dual hyperbola quintessence" su x86 moderni, e i classici "fancy magic bitboard" come fallback
+// generico. Qui portiamo le ultime DUE, con selezione a runtime (Avx2.IsSupported) invece che a
+// tempo di compilazione come nella fonte — stesso spirito (usa il meglio disponibile sulla CPU
+// target) ma senza bisogno di build separate. Portiamo anche solo il ramo a 64 bit (Is64Bit è
+// sempre vero su .NET moderno): il ramo a 32 bit della fonte (attacks.cpp:156-159, index() a due
+// metà) non ha equivalente qui.
+
+using System.Numerics;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace StockfishSharp.Engine;
 
@@ -30,6 +35,13 @@ public sealed class Magic
 
 public static class Attacks
 {
+    /// <summary>Attacchi di torre/alfiere SEMPRE via il percorso magic bitboard classico,
+    /// indipendentemente da <see cref="UsingAvx2"/> — usato dal fallback quando l'hardware non ha
+    /// AVX2 e dai test che confrontano i due percorsi indipendenti fra loro.</summary>
+    public static ulong MagicAttacksBb(PieceType pt, Square s, ulong occupied) =>
+        Magics[(byte)s, pt - PieceType.Bishop].AttacksBb(occupied);
+
+
     // magics[square][pieceType - Bishop] — Bishop=0, Rook=1, stessa indicizzazione della fonte.
     private static readonly Magic[,] Magics = new Magic[Squares.Nb, 2];
 
@@ -42,10 +54,27 @@ public static class Attacks
 
     private static bool _initialized;
 
+    // --- Dati per la variante AVX2 "dual hyperbola quintessence" — attacks.h:89-141,
+    // attacks.cpp:67-97 (make_dual_magics). Vedi BothAttacksBbAvx2 sotto per l'algoritmo.
+    private static Vector256<ulong>[] _dualMasks = [];
+    private static ulong[] _dualR = [];
+    private static ulong[] _dualRr = [];
+    private static int[] _dualShift = [];
+    private static byte[,] _rankAttacksLookup = new byte[Files.Nb, 64];
+
+    /// <summary>Vero se questo processo usa davvero il percorso AVX2 (hardware disponibile) —
+    /// esposto per diagnostica/test, così si può verificare a runtime quale dei due percorsi è
+    /// stato scelto senza doverlo dedurre indirettamente.</summary>
+    public static bool UsingAvx2 { get; private set; }
+
     /// <summary>Genera magic bitboard e tabelle derivate — chiamato una sola volta, come
     /// <c>Attacks::init()</c> nella fonte (invocato all'avvio del programma, main.cpp). Qui è
     /// idempotente e thread-safe tramite lock, cosi' non serve un punto di ingresso esplicito
-    /// separato: la prima chiamata a una qualunque funzione di questa classe lo attiva.</summary>
+    /// separato: la prima chiamata a una qualunque funzione di questa classe lo attiva. A
+    /// differenza della fonte (che sceglie il percorso a tempo di compilazione), qui si generano
+    /// SEMPRE entrambe le tabelle (magic classici + dati AVX2): il costo di inizializzazione
+    /// (poche centinaia di microsecondi) è trascurabile, ed evita due percorsi di codice diversi
+    /// da testare a seconda di come è stato compilato l'assembly.</summary>
     private static readonly object InitLock = new();
 
     public static void EnsureInitialized()
@@ -58,8 +87,111 @@ public static class Attacks
             InitMagics(PieceType.Bishop);
             InitPseudoAttacks();
             InitLineBetweenRayPass();
+            InitDualMagics();
+            UsingAvx2 = Avx2.IsSupported;
             _initialized = true;
         }
+    }
+
+    /// <summary>Maschera di linea (senza includere la casa di partenza) in due direzioni opposte
+    /// — <c>line_mask</c>, attacks.cpp:39-51. Usata SOLO per i dati AVX2 sotto: le maschere dei
+    /// magic bitboard classici (<see cref="InitMagics"/>) restano quelle della fonte (attacchi a
+    /// scacchiera vuota meno i bordi), un calcolo diverso per un algoritmo diverso.</summary>
+    private static ulong LineMask(Square sq, Direction d1, Direction d2)
+    {
+        ulong mask = 0;
+        foreach (var d in new[] { d1, d2 })
+        {
+            Square s = sq;
+            while (true)
+            {
+                ulong dest = SafeDestination(s, (sbyte)d);
+                if (dest == 0) break;
+                mask |= dest;
+                s = Types.AddDirection(s, d);
+            }
+        }
+
+        return mask;
+    }
+
+    private static void InitDualMagics()
+    {
+        // RankAttacks[file][occ6]: attacco di torre lungo la sola traversa, indicizzato dai 6 bit
+        // "interni" dell'occupazione (le case di bordo A/H non influenzano mai se l'attacco arriva
+        // fino al bordo) — attacks.cpp:72-78. Il cast a byte scarta deliberatamente la componente
+        // verticale che sliding_attack(ROOK, ...) produrrebbe insieme a quella orizzontale (la
+        // torre "virtuale" è sulla traversa 1, quindi quella componente cade tutta oltre l'ottavo
+        // bit) — stesso trucco della fonte, non un troncamento accidentale.
+        for (int file = 0; file < Files.Nb; file++)
+            for (int occ6 = 0; occ6 < 64; occ6++)
+                _rankAttacksLookup[file, occ6] = (byte)SlidingAttack(PieceType.Rook, (Square)file, (ulong)occ6 << 1);
+
+        _dualMasks = new Vector256<ulong>[Squares.Nb];
+        _dualR = new ulong[Squares.Nb];
+        _dualRr = new ulong[Squares.Nb];
+        _dualShift = new int[Squares.Nb];
+
+        for (var s = Square.A1; s <= Square.H8; s++)
+        {
+            ulong maskFile = LineMask(s, Direction.North, Direction.South);
+            ulong maskDiag = LineMask(s, Direction.NorthEast, Direction.SouthWest);
+            const ulong maskNone = 0; // corsia inutilizzata, solo per riempire il quarto lane SIMD — attacks.h:93
+            ulong maskAntidiag = LineMask(s, Direction.NorthWest, Direction.SouthEast);
+
+            _dualMasks[(byte)s] = Vector256.Create(maskFile, maskDiag, maskNone, maskAntidiag);
+            _dualR[(byte)s] = Bitboards.SquareBB(s) * 2;
+            _dualRr[(byte)s] = Bitboards.SquareBB((Square)(63 - (byte)s)) * 2;
+            _dualShift[(byte)s] = 8 * (byte)Types.RankOf(s);
+        }
+    }
+
+    // Maschera di shuffle per invertire l'ordine dei byte DENTRO ciascuna corsia da 64 bit di un
+    // Vector256<byte> (quattro inversioni indipendenti in una sola istruzione AVX2) — equivalente
+    // a chiamare BinaryPrimitives.ReverseEndianness su ognuno dei 4 ulong della corsia, ma in
+    // parallelo. Diversa dalla maschera della fonte (attacks.cpp: la lambda "bswap" dentro
+    // both_attacks_bb): quella inverte gli interi 16 byte di ciascuna metà da 128 bit, scambiando
+    // DELIBERATAMENTE le due corsie da 64 bit adiacenti (file<->diag, none<->antidiag) — un
+    // trucco per ottenere le quattro inversioni indipendenti con un solo shuffle sfruttando il
+    // fatto che l'operazione viene applicata due volte (lo scambio si annulla). Qui si preferisce
+    // la versione più diretta (nessuno scambio, ogni corsia inverte solo se stessa): stesso
+    // risultato matematico, verificato via test, più facile da controllare a occhio.
+    private static readonly Vector256<byte> ByteSwapEachLaneMask = Vector256.Create<byte>(
+        [7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8,
+         7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8]);
+
+    private static Vector256<ulong> ByteSwapEachLane(Vector256<ulong> v) =>
+        Avx2.Shuffle(v.AsByte(), ByteSwapEachLaneMask).AsUInt64();
+
+    /// <summary>Attacchi di alfiere e torre calcolati insieme via AVX2 — <c>DualMagic::
+    /// both_attacks_bb</c>, attacks.h:109-137. Hyperbola Quintessence su quattro corsie in
+    /// parallelo (file, diagonale, [inutilizzata], antidiagonale): la formula per corsia è
+    /// <c>((o - r) ^ rev(rev(o) - rr)) &amp; mask</c>, con "o" l'occupazione ristretta alla
+    /// maschera di quella corsia; le componenti diagonale+antidiagonale sommate danno l'alfiere,
+    /// la componente file sommata (OR, mai sovrapposizione) all'attacco di traversa da tabella dà
+    /// la torre. <see cref="EnsureInitialized"/> deve essere già stata chiamata (nessun controllo
+    /// qui, stesso pattern del resto della classe: percorso caldo, chiamato per ogni nodo di
+    /// ricerca una volta che Position/MoveGen esisteranno).</summary>
+    public static (ulong Bishop, ulong Rook) BothAttacksBbAvx2(Square s, ulong occupied)
+    {
+        var mask = _dualMasks[(byte)s];
+        var o = mask & Vector256.Create(occupied);
+
+        var fwd = o - Vector256.Create(_dualR[(byte)s]);
+        var rev = ByteSwapEachLane(ByteSwapEachLane(o) - Vector256.Create(_dualRr[(byte)s]));
+
+        var result = (fwd ^ rev) & mask;
+
+        ulong fileAttacks = result.GetElement(0);
+        ulong diagAttacks = result.GetElement(1);
+        ulong antidiagAttacks = result.GetElement(3);
+
+        int shift = _dualShift[(byte)s];
+        int file = (byte)Types.FileOf(s);
+        int occ6 = (int)((occupied >> (shift + 1)) & 0x3F);
+        ulong rankAttacks = (ulong)_rankAttacksLookup[file, occ6] << shift;
+
+        return (diagAttacks | antidiagAttacks, fileAttacks | rankAttacks);
     }
 
     /// <summary>Bitboard del quadrato di arrivo per un passo dato dal quadrato s, o vuoto se il
@@ -258,16 +390,23 @@ public static class Attacks
     public static ulong PawnAttacksBb(Square s, Color c) => PseudoAttacksTable[(byte)c, (byte)s];
 
     /// <summary>Attacchi reali dato lo stato di occupazione — <c>attacks_bb&lt;Pt&gt;(Square,
-    /// Bitboard)</c>, attacks.h:286-317 (solo il ramo "fancy magic" classico, vedi nota in cima
-    /// al file).</summary>
+    /// Bitboard)</c>, attacks.h:286-317. Sceglie fra i due percorsi portati (AVX2 se disponibile
+    /// sull'hardware corrente, altrimenti i magic bitboard classici) — <see cref="UsingAvx2"/>.</summary>
     public static ulong AttacksBb(PieceType pt, Square s, ulong occupied)
     {
         switch (pt)
         {
             case PieceType.Bishop:
+                return UsingAvx2 ? BothAttacksBbAvx2(s, occupied).Bishop : MagicAttacksBb(pt, s, occupied);
             case PieceType.Rook:
-                return Magics[(byte)s, pt - PieceType.Bishop].AttacksBb(occupied);
+                return UsingAvx2 ? BothAttacksBbAvx2(s, occupied).Rook : MagicAttacksBb(pt, s, occupied);
             case PieceType.Queen:
+                if (UsingAvx2)
+                {
+                    var (bishop, rook) = BothAttacksBbAvx2(s, occupied);
+                    return bishop | rook;
+                }
+
                 return AttacksBb(PieceType.Bishop, s, occupied) | AttacksBb(PieceType.Rook, s, occupied);
             default:
                 return PseudoAttacksTable[(byte)pt, (byte)s];
