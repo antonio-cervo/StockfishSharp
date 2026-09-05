@@ -86,9 +86,19 @@ continuation history) può aumentare i nodi in alcune posizioni/profondità pur 
 osservato empiricamente (depth 10 da 105924 a 141169 nodi, stesso bestmove/punteggio). Atteso
 migliorare quando arriveranno i pezzi mancanti, non prima.
 
+**ContinuationHistory PARZIALE**: aggiunta la cronologia `Stack::currentMove`/`moved_piece` per ply
+in `Search.cs` (stesso schema di indice di `_staticEvalHistory`), e su questa base un solo livello
+di lookback (ss-1, il peso maggiore dei 6 della fonte — 520 su {520,390,145,251,66,209}), con una
+sola tabella invece delle 4 `[inCheck][captureStage]` della fonte. Usata sia per l'aggiornamento
+(`UpdateStats`) sia per l'ordinamento (`OrderMoves`).
+
+Verificato: 62/62 test, bestmove identico su tutte le posizioni di test prima/dopo. Conteggio nodi
+misto (alcune posizioni leggermente su, altre giù) — atteso a questo stadio parziale, vedi nota
+sopra sulla main history.
+
 **Manca ancora**: generazione a stadi (la fonte non genera tutte le mosse in una volta),
-`CapturePieceToHistory`, `ContinuationHistory`/countermove (richiede tracciare `currentMove` per
-ply nello Stack), `PawnHistory`, `LowPlyHistory`, `TTMoveHistory`.
+`CapturePieceToHistory`, `ContinuationHistory` per ss-2..ss-6 e la selezione `[inCheck]
+[captureStage]`, `PawnHistory`, `LowPlyHistory`, `TTMoveHistory`.
 
 ### A3 — Gestione del tempo (`timeman.h` 70 + `timeman.cpp` 144 = 214 righe)
 **Oggi**: ~15 righe dentro `Program.cs`.
