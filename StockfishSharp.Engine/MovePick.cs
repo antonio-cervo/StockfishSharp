@@ -33,9 +33,15 @@
 // nessuna formula (la fonte la usa nel margine di futility Step 9 e nella riduzione LMR, entrambi
 // non ancora a questo livello di dettaglio) — aggiornata comunque per essere pronta.
 //
-// NON portato: PawnHistory, CorrectionHistory (vedi Search.cs, ora fatta); in OrderMoves la
-// continuation history usa solo ss-1 (non tutti e 6 i livelli) come termine d'ordinamento — la
-// fonte la userebbe tutta dentro il vero MovePicker a stadi/reduction(), non ancora portati.
+// PawnHistory portata PARZIALMENTE (history.h:146, D=8192, chiave = zobrist dei pedoni & 8191):
+// solo il punto di aggiornamento in update_quiet_histories (search.cpp:2056-2057). Gli altri due
+// usi della fonte — bonus di ordinamento da differenza di valutazione statica (search.cpp:978-986)
+// e bonus al "countermove" quieto su fail-low puro (search.cpp:1578-1601) — non sono ancora
+// portati, perché le tecniche a cui appartengono non lo sono.
+//
+// NON portato: CorrectionHistory è in Search.cs (fatta); in OrderMoves la continuation history
+// usa solo ss-1 (non tutti e 6 i livelli) come termine d'ordinamento — la fonte la userebbe tutta
+// dentro il vero MovePicker a stadi/reduction(), non ancora portati.
 
 namespace StockfishSharp.Engine;
 
@@ -89,6 +95,16 @@ public sealed class MovePick
     private const int TtMoveHistoryLimit = 8192;
     private short _ttMoveHistory;
 
+    // PawnHistory, history.h:146, 38 — DynStats<AtomicStats<i16,8192,PIECE_NB,SQUARE_NB>,
+    // PAWN_HISTORY_BASE_SIZE(8192)>, indicizzata [zobrist dei pedoni & 8191][pezzo][casa]. Qui
+    // solo il punto di aggiornamento in update_quiet_histories (search.cpp:2056-2057) — gli altri
+    // due usi della fonte (bonus di ordinamento da differenza di valutazione statica, bonus al
+    // "countermove" quieto su fail-low puro) non sono ancora portati (le tecniche a cui
+    // appartengono non lo sono).
+    private const int PawnHistorySize = 8192;
+    private const int PawnHistoryLimit = 8192; // AtomicStats<i16,8192,...> D, history.h:146
+    private readonly short[,,] _pawnHistory = new short[PawnHistorySize, PieceSlots.Nb, Squares.Nb];
+
     public void Clear()
     {
         Array.Clear(_killers);
@@ -112,6 +128,11 @@ public sealed class MovePick
                     _captureHistory[p, s, t] = -742; // Worker::clear(), search.cpp:692
 
         _ttMoveHistory = 0; // Worker::clear(), search.cpp:706
+
+        for (int k = 0; k < PawnHistorySize; k++)
+            for (int p = 0; p < PieceSlots.Nb; p++)
+                for (int s = 0; s < Squares.Nb; s++)
+                    _pawnHistory[k, p, s] = -1338; // clear_range(-1338, ...), search.cpp:697
     }
 
     /// <summary><c>lowPlyHistory.fill(102)</c>, iterative_deepening, search.cpp:326 — a differenza
@@ -210,6 +231,10 @@ public sealed class MovePick
 
         Piece pc = pos.MovedPiece(move);
         UpdateContinuationHistories(contRefs, currentInCheck, pc, move.ToSq, bonus * 750 / 1024);
+
+        // search.cpp:2056-2057 — scala diversamente un bonus (raro, "bonus > -4") da un malus.
+        UpdateHistory(ref _pawnHistory[pos.PawnKey & (PawnHistorySize - 1), (byte)pc, (byte)move.ToSq],
+            bonus * (bonus > -4 ? 1104 : 459) / 1024, PawnHistoryLimit);
     }
 
     /// <summary><c>update_continuation_histories</c>, search.cpp:2017-2041 — fedele ai 6 livelli
@@ -264,11 +289,12 @@ public sealed class MovePick
             if (m == killer0) return 900_000;
             if (m == killer1) return 899_999;
 
-            int score = _mainHistory[(byte)us, m.Raw];
+            Piece pc = pos.MovedPiece(m);
+            int score = _mainHistory[(byte)us, m.Raw] + _pawnHistory[pos.PawnKey & (PawnHistorySize - 1), (byte)pc, (byte)m.ToSq];
             if (ply < LowPlyHistorySize)
                 score += _lowPlyHistory[ply, m.Raw];
             if (ss1.IsOk)
-                score += _continuationHistory[ss1.InCheck ? 1 : 0, ss1.CaptureStage ? 1 : 0, (byte)ss1.Piece, (byte)ss1.To, (byte)pos.MovedPiece(m), (byte)m.ToSq];
+                score += _continuationHistory[ss1.InCheck ? 1 : 0, ss1.CaptureStage ? 1 : 0, (byte)ss1.Piece, (byte)ss1.To, (byte)pc, (byte)m.ToSq];
             return score;
         }
 

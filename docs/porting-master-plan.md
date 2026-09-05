@@ -128,8 +128,17 @@ D=8192) è un contatore globale aggiornato ma non ancora usato in nessuna formul
 in punti non ancora portati). Verificato: 62/62 test, bestmove identico su tutte le posizioni di
 test prima/dopo.
 
-**Manca ancora**: generazione a stadi (la fonte non genera tutte le mosse in una volta),
-`PawnHistory`; in `OrderMoves` solo ss-1 delle 6 continuation history è usata per l'ordinamento
+**PawnHistory FATTA PARZIALMENTE** (history.h:146, D=8192, chiave = zobrist dei pedoni & 8191):
+portato il punto di aggiornamento in `update_quiet_histories` (search.cpp:2056-2057); gli altri
+due usi della fonte (bonus di ordinamento da differenza di valutazione statica, bonus al
+"countermove" quieto su fail-low puro) restano non portati perché le tecniche a cui appartengono
+non lo sono. Verificato: 62/62 test, bestmove identico su tutte le posizioni di test prima/dopo;
+nodi in calo su alcune posizioni (depth 10 startpos: 98585, meglio della baseline pre-history
+105924 — il sistema di history comincia a ripagare ora che è quasi completo).
+
+**Tutte le history di `history.h` sono ora almeno parzialmente portate.** Flow A2 resta aperto per:
+generazione a stadi (la fonte non genera tutte le mosse in una volta), i due usi mancanti di
+PawnHistory, e in `OrderMoves` solo ss-1 delle 6 continuation history è usata per l'ordinamento
 (statScore/reduction() vero, non ancora portato).
 
 ### A3 — Gestione del tempo (`timeman.h` 70 + `timeman.cpp` 144 = 214 righe)
