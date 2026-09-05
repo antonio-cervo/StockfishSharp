@@ -114,16 +114,26 @@ fonte sono `constexpr` (offset cumulativi, LUT di compressione from/to).
 **Verifica**: tutti gli indici < `Dimensions` del rispettivo insieme; conteggi coerenti su
 posizioni note; nessun duplicato dove la fonte esclude i duplicati (`semi_excluded`).
 
-### N3 — Accumulatore (ricalcolo da zero) + PSQT
+### N3 — Accumulatore (ricalcolo da zero) + PSQT — ✅ FATTO E VERIFICATO
 `NnueAccumulator.cs`: parte dai bias, somma la riga di peso di ogni feature attiva (i16 per PSQ,
 **i8** per threat/pawn-pair), e in parallelo accumula i valori PSQT (i32) per gli 8 bucket.
+Layout confermato leggendo `nnue_accumulator.cpp` (funzioni `apply_psq_features`/`apply_psqt`):
+`weights[featureIdx * 1024 + j]` e `psqtWeights[featureIdx * 8 + bucket]` — esattamente come
+scritto in `NnueNetwork.cs` durante N1, nessuna trasposizione.
 
-⚠️ Da risolvere leggendo `nnue_accumulator.cpp`: l'**ordine esatto di indicizzazione** delle
-righe di peso (`weights[idx * 1024 + j]` o trasposto?) e l'ordine dei due array PSQT, che hanno
-convenzioni scritte in modo diverso nel sorgente.
+Nota su `permute_weights()` (nnue_feature_transformer.h): la fonte permuta biases/weights/
+threatAndPpWeights al caricamento SOLO quando compilata con SIMD (`PackusEpi16Order` non-identità
+con AVX512/AVX2). Nel nostro percorso scalare l'ordine resta l'identità — la permutazione è un
+dettaglio di layout per i trick SIMD (`packus`), matematicamente reversibile e ininfluente sul
+risultato finale: non va replicata finché non si porta N8 (AVX512ICL), dove weights e accumulatore
+andranno permutati in modo coerente fra loro.
 
-**Verifica**: la colonna **Material (PSQT)** dell'oracolo, per tutti e 8 i bucket, su un set di
-posizioni di prova. Se combacia, indici + pesi + accumulazione sono giusti.
+**Verifica FATTA** contro l'eseguibile ufficiale (comando `eval`), colonna **Material (PSQT)**,
+tutti e 8 i bucket: posizione iniziale (tutti 0.00, per simmetria) e una posizione asimmetrica
+(Kiwipete-style) — combaciano esattamente (`+1.71 -0.06 -0.23 -0.42 -0.46 -0.48 -0.53 -0.49`).
+Per il confronto in "pedoni" è servito portare anche `win_rate_params`/`to_cp` (uci.cpp) in
+`WinRateModel.cs` — la normalizzazione NON è una divisione fissa per 100 come ipotizzato
+inizialmente, dipende dal materiale in campo (modello WDL).
 
 ### N4 — `transform_perspective`
 Quantizzazione a byte: clamp 0..255 a coppie, prodotto, `/512`. 1024 byte in uscita.
