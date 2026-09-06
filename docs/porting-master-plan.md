@@ -442,9 +442,62 @@ correttezza.
 
 ## Flusso C — Il resto
 
-### C1 — Threading (`thread.h`/`thread.cpp`, 464+ righe)
-Lazy SMP. Prerequisito N9 (accumulatore per-thread) ora FATTO — sbloccato. Oggi il motore resta a
-thread singolo.
+### C1 — Threading (`thread.h`/`thread.cpp`, 464+ righe) — ✅ FATTO 2026-09-06
+
+Lazy SMP portato in `SearchThreadPool.cs` (nome scelto per non collidere con
+`System.Threading.ThreadPool`). Non portata l'infrastruttura NUMA/huge-page/thread nativi C++
+(`OptionalThreadToNumaNodeBinder`, `idle_loop` a condition variable, allocazione allineata) — è
+gestita direttamente da `System.Threading.Tasks`, non fa parte dell'algoritmo.
+
+**Cosa condividono davvero i thread nella fonte**: solo la transposition table
+(`Search::SharedState` la passa per riferimento a ogni `Worker`, thread.h:194-204) — history,
+MovePick, `AccumulatorStack` restano sempre privati per thread. La TT (array di `struct`, non
+riferimenti) è già sicura per costruzione: letture/scritture concorrenti su elementi diversi non
+hanno problemi, e su un elemento condiviso al più producono un mismatch di chiave scartato al
+prossimo probe — la stessa tolleranza "quasi lockless" della fonte (`tt.h`/`tt.cpp`).
+
+**Bug reale trovato e corretto durante la verifica**: `tt.new_search()` (search.cpp:191-216) è
+chiamato **una sola volta dal thread principale**, PRIMA di avviare gli helper
+(`threads.start_searching()` arriva dopo, riga 216) — i thread non principali (righe 196-199)
+saltano dritti a `iterative_deepening()` e non lo chiamano mai. Il primo porting di `Search.Search_`
+lo chiamava incondizionatamente a ogni chiamata, quindi con N thread del pool ognuno incrementava
+concorrentemente `_generation` (un `byte` non atomico condiviso in `TranspositionTable`) — una
+corsa che confondeva l'invecchiamento della TT e la inquinava progressivamente con voci non
+correttamente scadute. Sintomo osservato: un `bench 16 4 8` (51 posizioni, 4 thread) che rallentava
+progressivamente fino quasi a bloccarsi (20/51 in 90s). **Diagnosi sbagliata iniziale**: sospettato
+un esaurimento del `ThreadPool` .NET condiviso da troppi `Task.Run` ripetuti — la correzione a
+`Task.Factory.StartNew(..., TaskCreationOptions.LongRunning)` non ha risolto nulla (stesso identico
+sintomo, 21/51 in 90s), il che ha smentito quell'ipotesi. La causa vera è stata trovata rileggendo
+`search.cpp` riga per riga. Fix: `Search.Search_` ha ora un parametro `callNewSearch = true` (i
+chiamanti a thread singolo restano invariati); `SearchThreadPool.Search_` chiama `_tt.NewSearch()`
+una volta sola (equivalente al ruolo di "thread principale" prima di `threads.start_searching()`)
+e passa `callNewSearch: false` a TUTTI i worker del pool, main incluso. Con la correzione, lo stesso
+bench passa da "quasi bloccato" a 2,8s totali.
+
+**Differenza reale fra main e helper**: NON diversificano la profondità per indice di thread
+(tecnica di versioni più vecchie di Stockfish, non presente in questa) — gli helper ignorano
+`limits.depth` e continuano fino a `MAX_PLY` finché il tempo non scade o il thread principale
+imposta lo stop (search.cpp:333-334), replicato con un `CancellationTokenSource` collegato,
+cancellato non appena il thread principale (indice 0) termina.
+
+**Semplificazione deliberata in `get_best_thread`** (thread.cpp:357-408): la fonte vota sulla
+`RootMove` completa (pv/inexactLower/inexactUpper) di ogni thread — struttura non ancora presente in
+questo porting (RootMoves complete sono anche prerequisito di MultiPV, Flow A4). Usato
+`SearchResult.BestMove`/`.ScoreCp` come proxy di `rootMoves[0].pv[0]`/`.score` (la nostra ricerca
+completa sempre l'ultima iterazione a finestra piena, quindi "IsInexact" è sempre falso per
+costruzione) e `SearchResult.Depth` come proxy della lunghezza del PV per lo spareggio finale. La
+formula di voto stessa (punteggio − minimo + 14, preferenza al mate più corto/lungo quando
+decisivo) è portata fedele.
+
+**Per-thread `Position`**: ogni worker riceve una propria copia via `Set(Fen(), chess960)` più
+`Position.SetRootState(rootPos.State)` — quest'ultima aggiunta perché `Previous`/`PliesFromNull`/
+`CapturedPiece` non sono derivabili da una stringa FEN (replica la tecnica di
+`ThreadPool::start_thinking`, thread.cpp:332-346, di condividere la vera catena `StateInfo`
+storica fra le `Position` clonate per thread).
+
+**Verifica**: bit-esatto a `Threads=1` (invariato: stesso identico bench pre-C1, 507992 nodi);
+`dotnet test` 99/99; bench 1/2/4/8 thread — nodi/sec cresce (227k → 337k → 549k → 861k, non
+lineare: atteso, Lazy SMP non garantisce scaling lineare nemmeno nella fonte reale).
 
 ### C2 — Tablebase Syzygy (`syzygy/`, 2.053 righe) — porting VERO, non un extra
 Mai aperto. Fa parte della fonte reale a tutti gli effetti: `tbprobe.h`+`.cpp` è integrato
@@ -580,7 +633,7 @@ al nostro porting (non ha accumulo intermedio a i16), resta rilevante solo per c
    fra il mio segnaposto e la fonte vera è più grande in forza di gioco.
 4. **A2 (move ordering)** — strettamente legato ad A1, conviene farli vicini.
 5. **A5** (`DirtyThreats`) → **N9** (accumulatore incrementale) → **C1** (Lazy SMP): sono in
-   catena, in quest'ordine.
+   catena, in quest'ordine — ✅ FATTA tutta la catena.
 6. **A3, A4** (tempo, UCI) — meno urgenti: le versioni attuali funzionano, il divario è in
    completezza di funzioni, non in forza.
 7. **C2** (Syzygy, porting vero di `tbprobe.cpp`), **C3** (utilità) — alla fine.

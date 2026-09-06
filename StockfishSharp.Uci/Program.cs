@@ -46,7 +46,8 @@ bool isChess960 = false;
 var position = new Position();
 position.Set("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", isChess960);
 
-var search = new Search();
+var search = new SearchThreadPool();
+search.SetThreadCount(1);
 search.Resize(16);
 search.NewGame();
 var timeManagement = new TimeManagement();
@@ -143,6 +144,7 @@ while (Console.ReadLine() is { } line)
             Console.WriteLine("id name StockfishSharp (porting in corso)");
             Console.WriteLine("id author Antonio Cervo, porting da Stockfish (GPLv3)");
             Console.WriteLine("option name Hash type spin default 16 min 1 max 4096");
+            Console.WriteLine($"option name Threads type spin default 1 min 1 max {Environment.ProcessorCount}");
             Console.WriteLine("option name UCI_Chess960 type check default false");
             Console.WriteLine("uciok");
             break;
@@ -229,6 +231,14 @@ void HandleSetOption(string[] toks)
 
     if (string.Equals(name, "Hash", StringComparison.OrdinalIgnoreCase) && int.TryParse(value, out int mb))
         search.Resize(mb);
+    else if (string.Equals(name, "Threads", StringComparison.OrdinalIgnoreCase) && int.TryParse(value, out int threads))
+    {
+        // Ricrea il pool (C1, Lazy SMP) — mai durante una ricerca attiva per protocollo, ma
+        // StopSearch() per sicurezza in ogni caso.
+        StopSearch();
+        search.SetThreadCount(threads);
+        search.NewGame();
+    }
     else if (string.Equals(name, "UCI_Chess960", StringComparison.OrdinalIgnoreCase) && bool.TryParse(value, out bool chess960))
         isChess960 = chess960;
 }
@@ -399,10 +409,10 @@ void HandleGo(string[] toks)
 // Comando "bench" — corrisponde a UCIEngine::bench (uci.cpp:248-312) + Benchmark::setup_bench
 // (benchmark.cpp:395-447), con scope ridotto al nostro motore: solo "limitType" depth/movetime
 // (non eval/nodes/perft, tecniche non applicabili o non portate qui), solo "fenFile" default (non
-// un file esterno o "current"), "threads" accettato per compatibilità di sintassi ma ignorato
-// (motore sempre a thread singolo — Lazy SMP non ancora portato, Flow C). Esegue le ricerche in
-// modo SINCRONO (a differenza di "go", che gira in background) perché qui serve il risultato di
-// ogni posizione prima di passare alla successiva, esattamente come nella fonte.
+// un file esterno o "current"). "threads" ora onorato davvero (C1, Lazy SMP FATTO) invece di
+// essere accettato solo per compatibilità di sintassi. Esegue le ricerche in modo SINCRONO (a
+// differenza di "go", che gira in background) perché qui serve il risultato di ogni posizione
+// prima di passare alla successiva, esattamente come nella fonte.
 void HandleBench(string[] toks)
 {
     string ttSize = toks.Length > 1 ? toks[1] : "16";
@@ -411,8 +421,8 @@ void HandleBench(string[] toks)
     string fenFile = toks.Length > 4 ? toks[4] : "default";
     string limitType = toks.Length > 5 ? toks[5] : "depth";
 
-    if (threadsArg != "1")
-        Console.Error.WriteLine($"info string bench: 'threads' ignorato ({threadsArg} richiesti, motore sempre a thread singolo)");
+    if (int.TryParse(threadsArg, out int benchThreads) && benchThreads > 0)
+        search.SetThreadCount(benchThreads);
     if (fenFile != "default")
     {
         Console.Error.WriteLine($"info string bench: 'fenFile' non supportato ({fenFile}), uso 'default'");

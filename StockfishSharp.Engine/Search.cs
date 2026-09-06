@@ -88,8 +88,20 @@ public sealed class SearchResult
 
 public sealed class Search
 {
-    private readonly TranspositionTable _tt = new();
+    private readonly TranspositionTable _tt;
     private readonly MovePick _movePick = new();
+
+    /// <summary>Le history/MovePick/AccumulatorStack di ogni istanza restano sempre private (come
+    /// i campi non condivisi di <c>Search::Worker</c> nella fonte); <paramref name="sharedTt"/>
+    /// (facoltativa) permette a più istanze di condividere la STESSA transposition table — il
+    /// prerequisito per <c>SearchThreadPool</c> (C1, Lazy SMP): la TT è l'UNICA cosa che i thread
+    /// della fonte condividono davvero (thread.h: <c>Search::SharedState</c> la passa per
+    /// riferimento a ogni Worker). Senza argomento, il comportamento resta quello di sempre (TT
+    /// privata, uso a thread singolo).</summary>
+    public Search(TranspositionTable? sharedTt = null)
+    {
+        _tt = sharedTt ?? new TranspositionTable();
+    }
     // N9 — accumulatore NNUE aggiornato in modo incrementale invece di ricalcolato da zero a ogni
     // Evaluate.StaticEval; sincronizzato con la ricerca via Push()/Pop() attorno a ogni DoMove/
     // UndoMove REALE (mai per il null-move, search.cpp:674-679/686: nessun pezzo si muove, quindi
@@ -348,13 +360,19 @@ public sealed class Search
     /// <summary>Iterative deepening con aspiration windows — <c>iterative_deepening</c>,
     /// search.cpp:375-441 (vedi la nota di semplificazione in testa al file per
     /// averageScore/meanSquaredScore).</summary>
-    public SearchResult Search_(Position pos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default)
+    // callNewSearch: false quando il chiamante è un pool multi-thread (SearchThreadPool), che
+    // replica "is_mainthread()" della fonte (search.cpp:191-204) — SOLO il thread principale
+    // chiama tt.new_search(), una volta, PRIMA di avviare gli helper (threads.start_searching()
+    // arriva dopo, riga 216); gli helper (righe 196-199) vanno dritti a iterative_deepening()
+    // senza mai chiamarlo. Un incremento di _generation per thread romperebbe l'invecchiamento
+    // della TT condivisa (byte non atomico, corsa tra thread).
+    public SearchResult Search_(Position pos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default, bool callNewSearch = true)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeLimit);
         _ct = cts.Token;
         _nodes = 0;
-        _tt.NewSearch();
+        if (callNewSearch) _tt.NewSearch();
         _movePick.ResetForSearch(); // lowPlyHistory.fill(102), search.cpp:326
         _accumulatorStack.Reset(); // AccumulatorStack::reset, nnue_accumulator.cpp:71-77
 

@@ -539,6 +539,16 @@ public sealed class Position
 
     public StateInfo State => _st;
 
+    /// <summary>Sostituisce lo StateInfo corrente — usato SOLO da <c>SearchThreadPool</c> (C1,
+    /// Lazy SMP) per condividere la catena storica reale (<c>Previous</c>, necessaria per
+    /// rilevare patte per ripetizione durante la ricerca) fra le copie per-thread della posizione
+    /// radice: <c>Set(Fen(), ...)</c> crea uno StateInfo pulito che non può derivare
+    /// <c>Previous</c>/<c>PliesFromNull</c>/<c>CapturedPiece</c> da una stringa FEN, esattamente
+    /// come nella fonte (<c>ThreadPool::start_thinking</c>, thread.cpp:332-346: "there are some
+    /// StateInfo fields that cannot be deduced from a fen string, so set() clears them and they
+    /// are set from setupStates->back() later").</summary>
+    public void SetRootState(StateInfo st) => _st = st;
+
     // --- Modifica della scacchiera — position.h:381-421. Il parametro NNUE "dts" (facoltativo,
     // null di default e per tutti i chiamanti finora) è ora presente — vedi UpdatePieceThreats
     // sopra e DirtyThreat.cs; "dp" (DirtyPiece, per l'accumulatore incrementale N9) resta ancora
