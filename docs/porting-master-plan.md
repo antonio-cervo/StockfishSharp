@@ -93,12 +93,12 @@ combinate sembrano già buone, un ply in meno. **Flow A1 è ora COMPLETO** per q
 tecniche di search.cpp applicabili a thread singolo (resta solo Lazy SMP, Flow C). Ulteriore
 miglioramento sul caveat: la posizione di prova resta stabile su `d7c8q` a depth 7-12 (prima 7-10).
 
-**Manca ancora**: tutta la taratura fine dei margini rimasti, la struttura
-`Worker`/`RootMove`/`Stack` completa della fonte (qui minimizzata a quanto serve). L'aspiration
-window usa lo score dell'iterazione precedente al posto della media mobile pesata per "effort"
-della fonte (richiede bookkeeping per-root-move non ancora presente). `followPV` (segue la riga
-principale dell'iterazione precedente) non è portato — la condizione di IIR e dello Step 15 qui è
-quindi leggermente più ampia di quella esatta della fonte.
+**Manca ancora**: tutta la taratura fine dei margini rimasti, la struttura `Worker`/`Stack`
+completa della fonte (qui minimizzata a quanto serve) — `RootMove`/`RootMoves` sono invece ORA
+PORTATE con fedeltà, vedi la sezione "RootMove/RootMoves" più sotto: l'aspiration window usa la
+vera media mobile pesata per "effort", non più lo score grezzo dell'iterazione precedente.
+`followPV` (segue la riga principale dell'iterazione precedente) non è portato — la condizione di
+IIR e dello Step 15 qui è quindi leggermente più ampia di quella esatta della fonte.
 
 ⚠️ È il file più grande del progetto. Da solo vale più di tutto quello portato finora — ogni
 tecnica va aggiunta e verificata una alla volta (nessuna regressione sui test esistenti + confronto
@@ -536,6 +536,12 @@ nodi, nessun effetto quando disattivato), `tbhits` cresce coerentemente col card
 configurato. **Flusso C2 completo.** I file di dati fino a 5 pezzi sono già disponibili in
 `../ACMyChess/Syzygy/` (vedi [[acmychess-tablebase-plan]]).
 
+**Nota post-RootMoves (2026-09-06)**: con `Search::RootMoves` ora portate con fedeltà (vedi
+sezione dedicata più sotto), `TB9` resta comunque su `TbRootMove` come sostituto minimo — wired su
+`RootMove.TbRank`/`.TbScore` sarebbe ora possibile (i campi esistono già, sempre a 0) ma
+richiederebbe portare anche `Tablebases::rank_root_moves` per intero (thread.cpp:323, chiamato da
+`start_thinking` prima di ogni ricerca): non fatto oggi, resta un pezzo separato.
+
 ### C3 — Utilità (`misc`, `memory`, `score`, `numa`, `tune`, `universal/`, ~1.500 righe)
 Portate finora solo le briciole che servivano (`PRNG` dentro `Attacks.cs`).
 
@@ -666,6 +672,64 @@ al nostro porting (non ha accumulo intermedio a i16), resta rilevante solo per c
 7. **C2** (Syzygy, porting vero di `tbprobe.cpp`), **C3** (utilità) — alla fine.
 8. **D1** (libro di aperture) — ✅ FATTO, ultimo pezzo richiesto esplicitamente dall'utente come
    traguardo finale (non porting: Stockfish non ne ha uno).
+
+## RootMove/RootMoves (search.h:135-168) — ✅ FATTO 2026-09-06
+
+Portate con fedeltà in `StockfishSharp.Engine/RootMove.cs` + il ciclo radice di `Negamax`
+(`Search.cs`), sostituendo il campo interinale `_rootBestMove` (introdotto il giorno prima come
+fix minimo del bug dell'arrocco/bestmove illegale sul bot dal vivo, [[stockfishsharp-porting-project]])
+con la vera struttura della fonte. Motivazione: `_rootBestMove` risolveva solo "qual è la mossa
+migliore", non l'intera famiglia di problemi che dipendono da `RootMoves` (PV multi-mossa,
+optimism, aspiration window pesata per effort, base per MultiPV/tablebase-root-ranking futuri) —
+esattamente il tipo di "impalcatura pratica mai riconciliata con la fonte" che la policy
+[[feedback-stockfishsharp-no-practical-code]] vieta di lasciare in giro.
+
+**Cosa è cambiato**:
+- Una `RootMove` per ogni mossa legale della posizione radice, ricreata a ogni `Search_`
+  (`ThreadPool::start_thinking`, thread.cpp:309-321, senza il filtro "searchmoves").
+- Il "TT move" usato da TUTTO il nodo radice (ordinamento di MovePicker, `ttCapture`, IIR, sconti
+  di riduzione, Singular Extensions, `UpdateStats`) è ora sempre `rootMoves[pvIdx].pv[0]`
+  (search.cpp:820), non più una ri-sonda diretta della TT — **questo ha corretto due bug di
+  fedeltà scoperti durante il porting, non solo aggiunto la struttura**:
+  1. **IIR poteva attivarsi alla radice** quando la TT reale non aveva ancora un'entry utile,
+     anche se la mossa radice migliore nota era perfettamente valida — la fonte non lo fa mai
+     (ttData.move alla radice non è mai vuoto). Ora impossibile per costruzione.
+  2. **Step 9 (futility pruning) usava una condizione più larga del dovuto**
+     (`!probe.Found || probe.Data.Move==None || ttCapture` invece del semplice `!ttData.move ||
+     ttCapture` della fonte) — semplificata e resa esatta insieme all'introduzione di `ttMove`.
+- **Step 20 (search.cpp:1414-1420) aggiunto**: estensione a profondità 1 quando si sta per tuffarsi
+  in quiescenza con la stessa mossa già vista in TT a una profondità utile — mancava del tutto
+  prima d'oggi, scoperta durante l'audit riga-per-riga per introdurre `ttMove`.
+- **TT write durante Singular Extensions corretta**: la fonte non scrive MAI in TT quando
+  `excludedMove` è impostato (search.cpp:1621, bound calcolato escludendo una mossa non è
+  rappresentativo) — il porting lo faceva incondizionatamente. Bug pre-esistente, scoperto e
+  corretto nello stesso passaggio (stessa riga della fonte che introduce il gate `pvIdx`).
+- PV multi-mossa reale (`ss->pv`/`PVMoves::update`, search.h:95-104) tramite un buffer per-ply
+  riutilizzato (`_pvBuf`, stesso pattern di riuso di `_currentMoveHistory` ecc.) — prima
+  `SearchResult` esponeva solo il bestmove singolo, ora `result.Pv` è la riga intera e
+  `info depth ...` la stampa (`pv m1 m2 m3 ...`), più `seldepth`.
+- Aspiration window e `optimism` (search.cpp:376-383,1901-1904) ora derivati dalla vera media
+  mobile pesata per "effort" di `rootMoves[0]` (formula esponenziale, search.cpp:1446-1468), non
+  più dal punteggio grezzo dell'iterazione precedente — `Evaluate.StaticEval` ha un nuovo parametro
+  `optimism` per questo, passato ai 3 punti che chiamano la valutazione statica dentro `Negamax`.
+- `seekMate` (Step 9/16) legge ora `rootMoves[pvIdx].score` come nella fonte, non più
+  un'approssimazione dall'ultima iterazione completata.
+- Guardia aggiunta per nessuna mossa legale alla radice (`start_searching`, search.cpp:207-213):
+  prima avrebbe fatto un `IndexOutOfRange` su `rootMoves[0].pv[0]`, ora ritorna subito
+  (`bestmove 0000`, punteggio di matto/patta) — trovato scrivendo il codice, poi confermato dal
+  bench reale (2 delle 51 posizioni di default sono matto/stallo).
+
+**Deliberatamente non fatto oggi** (dichiarato esplicitamente, non dimenticato): il ciclo MultiPV
+(search.cpp:360-503, qui `multiPV` resta fissato a 1 — `_pvIdx` è sempre 0), Skill Level, il filtro
+"searchmoves", `Tablebases::rank_root_moves` (TB9 resta su `TbRootMove`, vedi nota in Flusso C2),
+`bestMoveChanges`/`totBestMoveChanges` (accumulato fedelmente ma non consumato: la gestione tempo
+adattiva reale che lo userebbe resta un pezzo separato non portato).
+
+**Verifica**: `dotnet test` 109/109 (nessuna regressione); bench 1 thread e 4 thread (Lazy SMP) su
+tutte le 51 posizioni di default, nessuna eccezione, PV plausibili su ogni posizione incluse le 2
+di matto/stallo; verifica manuale UCI su posizioni fuori libro (matto in 1 con torre, endgame con
+promozione, mediogioco con arrocco già avvenuto) — bestmove e PV legali e coerenti col materiale/
+tattica della posizione.
 
 ## Come si misura la fine
 

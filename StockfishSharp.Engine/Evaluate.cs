@@ -102,11 +102,15 @@ public static class Evaluate
     /// negamax (positivo = meglio per chi deve muovere). <paramref name="accStack"/> (facoltativo,
     /// N9): se fornito e una rete NNUE è caricata, l'accumulatore viene aggiornato in modo
     /// incrementale invece di essere ricalcolato da zero a ogni chiamata — passato solo dalla
-    /// ricerca vera (Search.cs), che tiene lo stack sincronizzato con DoMove/UndoMove.</summary>
-    public static int StaticEval(Position pos, Nnue.AccumulatorStack? accStack = null)
+    /// ricerca vera (Search.cs), che tiene lo stack sincronizzato con DoMove/UndoMove.
+    /// <paramref name="optimism"/> — <c>Search::Worker::evaluate</c>, search.cpp:1901-1904:
+    /// <c>optimism[pos.side_to_move()]</c>, derivato dal punteggio medio della mossa radice
+    /// corrente (vedi Search.cs, campo _rootOptimism) — zero di default per i chiamanti che non
+    /// fanno parte della ricerca vera (es. "eval" da linea di comando, test).</summary>
+    public static int StaticEval(Position pos, Nnue.AccumulatorStack? accStack = null, int optimism = 0)
     {
         if (NnueNetwork != null)
-            return Nnue.NnueEvaluate.Evaluate(NnueNetwork, pos, accStack: accStack);
+            return Nnue.NnueEvaluate.Evaluate(NnueNetwork, pos, optimism, accStack);
 
         int score = 0;
         for (var s = Square.A1; s <= Square.H8; s++)

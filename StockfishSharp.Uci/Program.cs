@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using StockfishSharp.Engine;
 using StockfishSharp.Engine.Tablebases;
 using StockfishSharp.Uci;
@@ -425,7 +426,7 @@ void HandleGo(string[] toks)
     searchTask = Task.Run(() =>
     {
         var result = search.Search_(pos, depth, budget, ct);
-        Console.WriteLine($"info depth {result.Depth} score cp {result.ScoreCp} nodes {result.Nodes} tbhits {result.TbHits}");
+        Console.WriteLine($"info depth {result.Depth} seldepth {result.SelDepth} score cp {result.ScoreCp} nodes {result.Nodes} tbhits {result.TbHits} pv {FormatPv(result.Pv)}");
 
         // Matto/stallo: la TT salva Move.None come bestMove (Search.cs, "bestMove ?? Move.None"),
         // quindi result.BestMove.HasValue è vero anche qui — senza questo controllo aggiuntivo
@@ -491,7 +492,7 @@ void HandleBench(string[] toks)
             : search.Search_(position, int.TryParse(limit, out int d) ? d : 13, TimeSpan.FromHours(1), CancellationToken.None);
 
         totalNodes += result.Nodes;
-        Console.WriteLine($"info depth {result.Depth} score cp {result.ScoreCp} nodes {result.Nodes} tbhits {result.TbHits}");
+        Console.WriteLine($"info depth {result.Depth} seldepth {result.SelDepth} score cp {result.ScoreCp} nodes {result.Nodes} tbhits {result.TbHits} pv {FormatPv(result.Pv)}");
         Console.WriteLine(result.BestMove is { } bm && bm != Move.None ? $"bestmove {MoveToUci(bm)}" : "bestmove 0000");
     }
 
@@ -532,6 +533,12 @@ string MoveToUci(Move m)
 
     return s;
 }
+
+// Formatta la riga "pv" di "info depth ..." — SearchResult.Pv è ora la vera continuazione
+// (RootMove.Pv, search.h:165) invece del solo bestmove: una sola mossa quando il porting
+// del PV multi-mossa non era ancora fatto è ora il caso raro (fail-high/basso senza tempo per il
+// re-search a finestra piena), non più la norma.
+string FormatPv(List<Move> pv) => string.Join(' ', pv.Select(MoveToUci));
 
 string SquareToString(Square s) => $"{(char)('a' + (byte)Types.FileOf(s))}{(char)('1' + (byte)Types.RankOf(s))}";
 

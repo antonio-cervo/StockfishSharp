@@ -189,6 +189,8 @@ public sealed class SearchThreadPool
         return new SearchResult
         {
             BestMove = best.BestMove,
+            Pv = best.Pv,
+            SelDepth = best.SelDepth,
             ScoreCp = best.ScoreCp,
             Depth = best.Depth,
             Nodes = results.Sum(r => r.Nodes), // Threads::nodes_searched, thread.cpp — somma su tutti i thread
