@@ -32,6 +32,7 @@ position.Set("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", isChess
 var search = new Search();
 search.Resize(16);
 search.NewGame();
+var timeManagement = new TimeManagement();
 int maxDepth = 30;
 
 while (Console.ReadLine() is { } line)
@@ -54,6 +55,7 @@ while (Console.ReadLine() is { } line)
 
         case "ucinewgame":
             search.NewGame();
+            timeManagement.NewGame();
             break;
 
         case "setoption":
@@ -185,11 +187,12 @@ void HandleGo(string[] toks)
         Color us = position.SideToMove;
         long? myTime = us == Color.White ? GetLong("wtime") : GetLong("btime");
         long myInc = (us == Color.White ? GetLong("winc") : GetLong("binc")) ?? 0;
+        int movesToGo = (int)(GetLong("movestogo") ?? 0);
 
         if (myTime.HasValue)
         {
-            double optimumMs = Math.Clamp(myTime.Value / 30.0 + myInc * 0.5, 50, Math.Max(50, myTime.Value - 200));
-            budget = TimeSpan.FromMilliseconds(optimumMs);
+            timeManagement.Init(myTime.Value, myInc, movesToGo, position.GamePly);
+            budget = TimeSpan.FromMilliseconds(timeManagement.OptimumTime);
         }
         else
         {

@@ -172,9 +172,23 @@ generazione a stadi (la fonte non genera tutte le mosse in una volta), i due usi
 PawnHistory, e in `OrderMoves` solo ss-1 delle 6 continuation history è usata per l'ordinamento
 (statScore/reduction() vero, non ancora portato).
 
-### A3 — Gestione del tempo (`timeman.h` 70 + `timeman.cpp` 144 = 214 righe)
-**Oggi**: ~15 righe dentro `Program.cs`.
-**Manca**: il modello a due livelli optimum/maximum, `nodestime`, ponder, move overhead.
+### A3 — Gestione del tempo (`timeman.h` 70 + `timeman.cpp` 144 = 214 righe) — ✅ FATTO
+
+`StockfishSharp.Engine/TimeManagement.cs`: porting fedele di `TimeManagement::init`
+(timeman.cpp:46-142) — modello a due livelli optimum/maximum, entrambe le modalità "x basetime +
+z incremento" e "x mosse in y secondi", `originalTimeAdjust` calcolato una volta per partita,
+move overhead (default 10ms come la fonte), ponder (bonus +25% sul tempo). Wired in
+`StockfishSharp.Uci/Program.cs`, sostituisce l'euristica ad-hoc `tempo/30+inc*0.5` di prima.
+
+**NON portato** (deliberatamente, poco rilevanti per questo motore): `nodestime`/"nodes as time"
+(nessuno lo usa in pratica), la logica di estensione dinamica del budget durante la ricerca in
+base ai cambi di best-move (`Worker::check_time`, un'altra parte di Flow A4/UCI non ancora
+portata) — qui il budget calcolato da `Init` è usato direttamente come limite fisso della ricerca.
+
+Verificato: 66/66 test (4 nuovi su `TimeManagement`: optimum&le;maximum, più tempo disponibile
+dà più budget, nessun orologio dà budget illimitato, modalità "x mosse in y secondi" resta entro
+il tempo rimasto). Sanity check via UCI con `wtime`/`btime`/`winc` realistici: tempi per mossa
+plausibili (~10s su un orologio 5+0 a centropartita).
 
 ### A4 — Livello UCI (`uci.cpp` 704 + `ucioption.cpp` 213 + `engine.cpp` + `benchmark.cpp` ≈ 1.600)
 **Oggi**: ~180 righe in `Program.cs` — i comandi minimi per giocare.
