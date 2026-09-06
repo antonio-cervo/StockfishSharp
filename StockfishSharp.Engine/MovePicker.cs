@@ -14,6 +14,12 @@
 // A differenza della fonte, che genera le mosse pseudo-legali e lascia al chiamante (search.cpp)
 // il filtro pos.legal(move), anche qui NextMove() restituisce mosse pseudo-legali: il filtro va
 // fatto nel chiamante, esattamente come nella fonte.
+//
+// Differenza pratica (non di fedeltà): la fonte tiene "moves[MAX_MOVES]" sullo STACK C++, quindi a
+// costo zero di allocazione a ogni nodo. Qui i tre buffer (moves/values/genBuffer) sono passati dal
+// chiamante (Search, un buffer per livello di profondità, riusato fra tutti i nodi a quel ply)
+// invece di essere allocati `new` a ogni MovePicker — altrimenti ogni nodo della ricerca
+// allocherebbe ~1.5KB sull'heap, pressione notevole sul GC su un motore che visita milioni di nodi.
 
 namespace StockfishSharp.Engine;
 
@@ -45,13 +51,19 @@ public sealed class MovePicker
 
     // ExtMove moves[MAX_MOVES] della fonte diventa qui due array paralleli (mossa/valore) indicati
     // per indice invece che per puntatore — stessa aritmetica di cur/endCur/endBadCaptures/
-    // endCaptures/endGenerated, solo come interi invece che puntatori.
-    private readonly Move[] _moves = new Move[Ply.MaxMoves];
-    private readonly int[] _values = new int[Ply.MaxMoves];
+    // endCaptures/endGenerated, solo come interi invece che puntatori. Passati dal chiamante (vedi
+    // nota sopra), non allocati qui.
+    private readonly Move[] _moves;
+    private readonly int[] _values;
+    private readonly List<Move> _genBuffer;
     private int _cur, _endCur, _endBadCaptures, _endCaptures, _endGenerated;
 
-    /// <summary>Costruttore per ricerca principale e quiescenza — movepick.cpp:153-177.</summary>
-    public MovePicker(Position pos, MovePick hist, Move ttMove, int depth, int ply, ContinuationRef[] contRefs)
+    /// <summary>Costruttore per ricerca principale e quiescenza — movepick.cpp:153-177.
+    /// <paramref name="movesBuf"/>/<paramref name="valuesBuf"/> (dimensione <see
+    /// cref="Ply.MaxMoves"/>) e <paramref name="genBuffer"/> sono buffer riusati dal chiamante per
+    /// livello di profondità — vedi nota in testa al file.</summary>
+    public MovePicker(Position pos, MovePick hist, Move ttMove, int depth, int ply, ContinuationRef[] contRefs,
+        Move[] movesBuf, int[] valuesBuf, List<Move> genBuffer)
     {
         _pos = pos;
         _hist = hist;
@@ -59,6 +71,9 @@ public sealed class MovePicker
         _depth = depth;
         _ply = ply;
         Array.Copy(contRefs, _contRefs, 6);
+        _moves = movesBuf;
+        _values = valuesBuf;
+        _genBuffer = genBuffer;
 
         bool ttOk = ttMove != Move.None && pos.PseudoLegal(ttMove);
         _stage = pos.Checkers() != 0
@@ -68,12 +83,16 @@ public sealed class MovePicker
 
     /// <summary>Costruttore per ProbCut — movepick.cpp:181-189: genera solo catture con SEE almeno
     /// pari alla soglia data.</summary>
-    public MovePicker(Position pos, MovePick hist, Move ttMove, int threshold)
+    public MovePicker(Position pos, MovePick hist, Move ttMove, int threshold,
+        Move[] movesBuf, int[] valuesBuf, List<Move> genBuffer)
     {
         _pos = pos;
         _hist = hist;
         _ttMove = ttMove;
         _threshold = threshold;
+        _moves = movesBuf;
+        _values = valuesBuf;
+        _genBuffer = genBuffer;
 
         bool ttOk = ttMove != Move.None && pos.CaptureStage(ttMove) && pos.PseudoLegal(ttMove);
         _stage = Stage.ProbcutTt + (ttOk ? 0 : 1);
@@ -236,11 +255,11 @@ public sealed class MovePicker
     /// azzera: lo fa il chiamante prima, come <c>cur = endBadCaptures = moves</c> nella fonte).</summary>
     private int ScoreCaptures()
     {
-        var ml = new List<Move>();
-        MoveGen.Generate(GenType.Captures, _pos, ml);
+        _genBuffer.Clear();
+        MoveGen.Generate(GenType.Captures, _pos, _genBuffer);
 
         int it = _cur;
-        foreach (var m in ml)
+        foreach (var m in _genBuffer)
         {
             Square to = m.ToSq;
             Piece pc = _pos.MovedPiece(m);
@@ -275,11 +294,11 @@ public sealed class MovePicker
         threatByLesser[(byte)PieceType.Rook] = minorThreat;
         threatByLesser[(byte)PieceType.Queen] = _pos.AttacksBy(PieceType.Rook, them) | minorThreat;
 
-        var ml = new List<Move>();
-        MoveGen.Generate(GenType.Quiets, _pos, ml);
+        _genBuffer.Clear();
+        MoveGen.Generate(GenType.Quiets, _pos, _genBuffer);
 
         int it = _cur;
-        foreach (var m in ml)
+        foreach (var m in _genBuffer)
         {
             Square from = m.FromSq;
             Square to = m.ToSq;
@@ -316,11 +335,11 @@ public sealed class MovePicker
     private int ScoreEvasions()
     {
         Color us = _pos.SideToMove;
-        var ml = new List<Move>();
-        MoveGen.Generate(GenType.Evasions, _pos, ml);
+        _genBuffer.Clear();
+        MoveGen.Generate(GenType.Evasions, _pos, _genBuffer);
 
         int it = _cur;
-        foreach (var m in ml)
+        foreach (var m in _genBuffer)
         {
             Square to = m.ToSq;
             Piece pc = _pos.MovedPiece(m);

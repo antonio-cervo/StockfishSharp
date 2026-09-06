@@ -127,6 +127,36 @@ public sealed class Search
     // riduzione LMR.
     private readonly int[] _cutoffCntHistory = new int[Ply.MaxPly + StackOffset + 3];
 
+    // Buffer di MovePicker riusati per livello di profondità (uno per ply, mai per due nodi
+    // contemporaneamente attivi allo stesso ply: Negamax(depth<=0) delega SEMPRE a Quiesce prima di
+    // costruire il proprio MovePicker, quindi i due non si sovrappongono mai sullo stesso ply) —
+    // evita che ogni nodo della ricerca allochi ~1.5KB sull'heap (vedi nota in testa a
+    // MovePicker.cs), a differenza della fonte dove "moves[MAX_MOVES]" vive sullo stack C++.
+    private readonly Move[][] _mpMoveBufs = BuildPerPlyMoveBufs();
+    private readonly int[][] _mpValueBufs = BuildPerPlyValueBufs();
+    private readonly List<Move>[] _mpGenBufs = BuildPerPlyGenBufs();
+
+    private static Move[][] BuildPerPlyMoveBufs()
+    {
+        var bufs = new Move[Ply.MaxPly + 1][];
+        for (int i = 0; i < bufs.Length; i++) bufs[i] = new Move[Ply.MaxMoves];
+        return bufs;
+    }
+
+    private static int[][] BuildPerPlyValueBufs()
+    {
+        var bufs = new int[Ply.MaxPly + 1][];
+        for (int i = 0; i < bufs.Length; i++) bufs[i] = new int[Ply.MaxMoves];
+        return bufs;
+    }
+
+    private static List<Move>[] BuildPerPlyGenBufs()
+    {
+        var bufs = new List<Move>[Ply.MaxPly + 1];
+        for (int i = 0; i < bufs.Length; i++) bufs[i] = new List<Move>(Ply.MaxMoves);
+        return bufs;
+    }
+
     // reductions[], search.cpp:712-713 — tabella logaritmica precalcolata, usata da Reduction().
     private static readonly int[] Reductions = BuildReductions();
     private static int[] BuildReductions()
@@ -573,7 +603,11 @@ public sealed class Search
             if (depth >= 3 && !Values.IsDecisive(beta) && !(Values.IsValid(ttScore) && ttScore < probCutBeta))
             {
                 int probCutDepth = depth - (improving ? 5 : 3);
-                var probCutCandidates = new List<Move>();
+                // Riusa il buffer per-ply di MovePicker (non ancora costruito a questo punto del
+                // nodo) invece di allocare una lista nuova — stessa ottimizzazione di
+                // MovePicker.cs, vedi nota lì.
+                var probCutCandidates = _mpGenBufs[ply];
+                probCutCandidates.Clear();
                 MoveGen.Generate(GenType.Captures, pos, probCutCandidates);
 
                 foreach (var pcMove in probCutCandidates)
@@ -610,7 +644,8 @@ public sealed class Search
             return probCutBeta13;
 
         var contRefs = BuildContinuationRefs(ply);
-        var mp = new MovePicker(pos, _movePick, probe.Data.Move, depth, ply, contRefs);
+        var mp = new MovePicker(pos, _movePick, probe.Data.Move, depth, ply, contRefs,
+            _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
 
         int origAlpha = alpha;
         int value = -Infinity;
@@ -961,7 +996,8 @@ public sealed class Search
         // Continuation history non tracciata in quiescenza (Quiesce non scrive
         // _currentMoveHistory/_movedPieceHistory) — contRefs vuoti disattiva il termine nella
         // formula di score, come già prima di questo Step.
-        var mp = new MovePicker(pos, _movePick, Move.None, Ply.DepthQs, ply, EmptyContinuationRefs);
+        var mp = new MovePicker(pos, _movePick, Move.None, Ply.DepthQs, ply, EmptyContinuationRefs,
+            _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
 
         int moveCount = 0;
         Move m;

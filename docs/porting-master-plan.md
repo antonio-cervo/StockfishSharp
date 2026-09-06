@@ -197,8 +197,22 @@ identico). Nodi/sec sono PEGGIORATI in questo passaggio (es. `d7c8q`: 2,29M nodi
 allocazioni `List<Move>` fresche ad ogni stadio dentro `MovePicker` (una per CAPTURE_INIT, una per
 QUIET_INIT/EVASION_INIT, per ogni nodo), non ammortizzate come nella fonte (che scrive
 direttamente in un buffer `moves[MAX_MOVES]` sullo stack senza allocare). Correttezza confermata,
-prestazioni no — riutilizzare buffer invece di allocare è l'ottimizzazione naturale successiva, non
-fatta qui per restare dentro lo scopo di questo Step (generazione a stadi, non le sue prestazioni).
+prestazioni no — riutilizzare buffer invece di allocare è l'ottimizzazione naturale successiva.
+
+**Ottimizzazione allocazioni FATTA**: i due array `moves`/`values` e il buffer di generazione
+temporaneo di `MovePicker` (prima allocati `new` a ogni istanza, cioè a ogni nodo) sono ora passati
+dal chiamante (`Search`) — un buffer per livello di profondità, riusato fra tutti i nodi allo
+stesso ply (mai due nodi attivi contemporaneamente allo stesso ply: `Negamax(depth&lt;=0)` delega
+sempre a `Quiesce` prima di costruire il proprio `MovePicker`). Stesso trattamento per la lista
+temporanea del ciclo ProbCut (Step 12), che ora riusa il buffer del proprio ply invece di allocare.
+Verificato: 69/69 test; `bench 16 1 8` con `git stash` prima/dopo — **nodi IDENTICI su tutte le 51
+posizioni** (507.992 totali in entrambi i casi), quindi bestmove necessariamente identico
+ovunque (l'ottimizzazione tocca solo l'allocazione di memoria, non la logica). Nota onesta: il
+guadagno di nodi/secondo non è risultato misurabile in questo bench (~162-170k nodi/sec in
+entrambe le versioni, differenza entro il rumore fra le esecuzioni) — il costo dominante a questa
+scala è altrove (valutazione NNUE, generazione mosse pseudo-legali), non la pressione GC dei
+buffer eliminati. La minore pressione sul garbage collector resta comunque un beneficio reale (meno
+cicli di raccolta su run più lunghe/con hash grandi), solo non quantificabile con questo test.
 
 **Bonus da differenza di valutazione statica FATTO** ("use static evaluation difference to improve
 quiet move ordering", search.cpp:978-986): non collegato a un taglio o a `bestMove` — a ogni nodo
