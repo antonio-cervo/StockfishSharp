@@ -10,3 +10,7 @@ obj/
 stockfish-reference-binary/
 nnue-networks/
 *.zip
+
+# Libro di aperture Polyglot (.bin di terze parti, D1 — vedi docs/porting-master-plan.md) — non
+# ridistribuito nel repo, stessa convenzione di ACMyChess/.gitignore.
+StockfishSharp.Uci/Assets/Book/

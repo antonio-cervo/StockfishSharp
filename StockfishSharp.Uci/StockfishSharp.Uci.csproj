@@ -14,4 +14,11 @@
     <ProjectReference Include="..\StockfishSharp.Engine\StockfishSharp.Engine.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Libro di aperture Polyglot (D1) — file di terze parti, gitignored (vedi .gitignore). -->
+    <None Update="Assets\Book\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

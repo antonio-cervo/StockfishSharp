@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using StockfishSharp.Engine;
+using StockfishSharp.Uci;
 using File = StockfishSharp.Engine.File;
 
 // Punto di ingresso UCI. Non un porting di src/uci.cpp+ucioption.cpp (~1500 righe insieme, con
@@ -26,6 +27,16 @@ else
 {
     Console.WriteLine("info string NNUE network not found, using placeholder material+PSQT evaluation");
 }
+
+// Libro di aperture Polyglot (Flow D1, non un porting — Stockfish non ne ha uno integrato).
+// Percorso relativo all'eseguibile, gitignored (file di terze parti), stessa convenzione di
+// ACMyChess.Uci. Se il file manca, il motore prosegue normalmente senza libro.
+const int BookMaxPlies = 24; // oltre questa profondità non si consulta più il libro
+string bookPath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "Book", "performance.bin");
+var book = PolyglotBook.TryLoad(bookPath);
+Console.WriteLine(book != null
+    ? $"info string opening book loaded from {System.IO.Path.GetFileName(bookPath)}"
+    : "info string no opening book found, playing without one");
 
 // UCI_Chess960, engine.cpp:113 (options.add("UCI_Chess960", Option(false))) — usata sia da
 // HandlePosition sia dal comando bench (la lista Defaults reale include due posizioni Chess960
@@ -270,6 +281,18 @@ Square ParseSquare(string s)
 
 void HandleGo(string[] toks)
 {
+    // Libro di aperture (Flow D1): se la posizione è coperta, risponde subito senza avviare la
+    // ricerca vera — stessa logica di ACMyChess.Uci/Program.cs.
+    if (position.GamePly < BookMaxPlies)
+    {
+        Move? bookMove = book?.TryGetMove(position);
+        if (bookMove.HasValue)
+        {
+            Console.WriteLine($"bestmove {MoveToUci(bookMove.Value)}");
+            return;
+        }
+    }
+
     long? GetLong(string key)
     {
         int i = Array.IndexOf(toks, key);

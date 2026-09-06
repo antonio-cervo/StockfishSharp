@@ -441,11 +441,28 @@ Syzygy (quello è C2 sopra, porting vero). L'unico caso genuino è il libro di a
 non ne ha uno, lo gestisce sempre il layer UCI esterno/la GUI/il bot — stesso spirito di
 `StockfishSharp.Uci/Program.cs` (layer pratico non fedele) più che di `StockfishSharp.Engine`.
 
-### D1 — Libro di aperture
-Non ancora iniziato. ACMyChess (il motore precedente, vedi [[acmychess-features-2026-06]]) ha già
-un libro Polyglot funzionante — stessa logica riusabile qui (formato file `.bin` standard, non
-specifico di un motore), verosimilmente portabile/riusabile quasi as-is nel layer
-`StockfishSharp.Uci`.
+### D1 — Libro di aperture — ✅ FATTO
+
+Adattato da `ACMyChess.Engine/PolyglotBook.cs`+`PolyglotRandom.cs` (stessa logica, riscritta sui
+tipi `Position`/`Move`/`MoveGen` di `StockfishSharp.Engine`) — le 781 costanti Zobrist standard del
+formato Polyglot sono dati di interoperabilità universali, copiate identiche. La chiave Polyglot è
+ricalcolata da zero a ogni `go` (mai incrementale come in ACMyChess: `Position.Key` usa lo schema
+Zobrist interno di Stockfish, incompatibile col formato .bin, e il libro si consulta solo nelle
+primissime mosse — il costo è trascurabile). Più semplice della controparte ACMyChess su due punti:
+`Square` in questo porting (A1=0..H8=63) è già la convenzione richiesta da Polyglot, niente flip di
+riga; l'arrocco è codificato allo stesso modo in entrambi (`Move.ToSq` = casa della torre), niente
+reinterpretazione speciale.
+
+File `performance.bin` (asset di terze parti, gitignored) copiato da ACMyChess in
+`StockfishSharp.Uci/Assets/Book/`, `CopyToOutputDirectory` nel `.csproj`. Wiring in `Program.cs`:
+caricato all'avvio, consultato in `HandleGo` prima della ricerca vera se `GamePly < 24` — se
+copre la posizione risponde subito con `bestmove`, altrimenti la ricerca prosegue normalmente
+(stessa soglia e stesso comportamento di ACMyChess.Uci).
+
+Verificato a mano via UCI: risposta immediata (nessun `info depth`, quindi confermato che non ha
+cercato) su più posizioni in sequenza (`e2e4` dalla partenza, `c7c5` dopo 1.e4, `a1b2` — la
+ricerca vera, corretta — su un finale K vs k fuori libro, `a7a6` dopo una Ruy Lopez). 85/85 test
+(nessuno tocca `StockfishSharp.Uci`, il progetto compila pulito). **Flow D COMPLETO.**
 
 ---
 
@@ -540,8 +557,8 @@ al nostro porting (non ha accumulo intermedio a i16), resta rilevante solo per c
 6. **A3, A4** (tempo, UCI) — meno urgenti: le versioni attuali funzionano, il divario è in
    completezza di funzioni, non in forza.
 7. **C2** (Syzygy, porting vero di `tbprobe.cpp`), **C3** (utilità) — alla fine.
-8. **D1** (libro di aperture) — ultimissimo, richiesto esplicitamente dall'utente come traguardo
-   finale (non porting: Stockfish non ne ha uno).
+8. **D1** (libro di aperture) — ✅ FATTO, ultimo pezzo richiesto esplicitamente dall'utente come
+   traguardo finale (non porting: Stockfish non ne ha uno).
 
 ## Come si misura la fine
 
