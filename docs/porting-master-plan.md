@@ -313,6 +313,17 @@ punteggi WDL, `Skill Level`, `export_net`, `speedtest` (`setup_benchmark`, bench
 un secondo comando di benchmark su partite reali per lo SPRT — non essenziale, lista
 `BenchmarkPositions` enorme non copiata), `ponder`/`ponderhit` (pondering vero).
 
+**Nota per quando si affronterà il pondering (osservazione dal vivo, 2026-09-06)**: in una
+partita reale del bot, l'avversario (bot Lichess) rispondeva quasi istantaneamente a ogni mossa
+pur avendo un orologio che CRESCEVA rispetto al nostro (lui oltre 11 minuti, noi circa 2) —
+comportamento coerente con un pondering reale attivo dall'altra parte (continua a cercare sulla
+posizione prevista mentre è il nostro turno; se indovina la mossa, risponde con una ricerca già
+pronta). Da noi `SearchManager::ponder`/`stopOnPonderhit` (search.h) non sono portati e
+`Program.cs` non gestisce affatto `go ponder`/`ponderhit` — motivo in più, oltre alla completezza
+di protocollo, per dargli priorità quando si tornerà su Flow A4: senza pondering il nostro bot
+parte strutturalmente svantaggiato sul tempo in ogni partita con incremento contro avversari che
+lo usano.
+
 **Bug reale di correttezza trovato e corretto (2026-09-06, due partite perse dal vivo sul
 bot)**: `MoveToUci`/`ParseUciMove` (scritte come codice pratico fin dal primissimo commit del
 progetto, `0967bda` — questo file non è mai stato un porting, la fedeltà a `uci.cpp` è sempre
