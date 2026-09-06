@@ -4,10 +4,8 @@
 namespace StockfishSharp.Engine;
 
 /// <summary>Chiavi Zobrist per il calcolo incrementale dell'hash di posizione — namespace
-/// <c>Zobrist</c> in position.cpp. Non porta ancora le "cuckoo table" per la rilevazione veloce
-/// di ripetizione (position.cpp:106-162): servono solo a <c>is_draw</c>/<c>upcoming_repetition</c>,
-/// non a perft/do_move/undo_move — rimandate a quando servirà la rilevazione di patta in
-/// ricerca.</summary>
+/// <c>Zobrist</c> in position.cpp. Include ora anche le "cuckoo table" (l'algoritmo di Marcel van
+/// Kervinck, position.cpp:106-162) per <c>Position.UpcomingRepetition</c>.</summary>
 public static class Zobrist
 {
     // [Piece.Nb, Square.Nb] — indicizzato per pezzo e casa, come la fonte.
@@ -20,6 +18,16 @@ public static class Zobrist
 
     public static ulong Side;
     public static ulong NoPawns;
+
+    // Cuckoo table, position.cpp:111-162: due funzioni hash (H1/H2) e due array paralleli
+    // (chiave, mossa) per rilevare in O(1) se una SINGOLA mossa reversibile trasforma una
+    // posizione in un'altra — usato da Position.UpcomingRepetition per stabilire se una mossa
+    // imminente porterebbe a una ripetizione, senza dover generare/provare ogni mossa.
+    public static readonly ulong[] Cuckoo = new ulong[8192];
+    public static readonly Move[] CuckooMove = new Move[8192];
+
+    public static int H1(ulong h) => (int)(h & 0x1fff);
+    public static int H2(ulong h) => (int)((h >> 16) & 0x1fff);
 
     private static bool _initialized;
     private static readonly object InitLock = new();
@@ -60,6 +68,41 @@ public static class Zobrist
 
         Side = rng.Next();
         NoPawns = rng.Next();
+
+        // Tabelle cuckoo, position.cpp:140-162: per ogni pezzo e ogni coppia di case (s1<s2) tale
+        // che il pezzo (non pedone) possa muoversi fra le due su scacchiera vuota (quindi mossa
+        // REVERSIBILE — la stessa mossa rigiocata torna alla posizione di partenza), inserisce la
+        // chiave XOR delle due case + il cambio di turno nella tabella, con la tecnica dei
+        // "cuculi" (se lo slot è occupato, sposta l'occupante nel suo slot alternativo H1/H2, a
+        // catena, finché non si libera uno slot vuoto).
+        Array.Clear(Cuckoo);
+        Array.Fill(CuckooMove, Move.None);
+        Attacks.EnsureInitialized();
+
+        foreach (var pc in AllPieces.Values)
+        {
+            if (Types.TypeOf(pc) == PieceType.Pawn) continue;
+
+            for (var s1 = Square.A1; s1 <= Square.H8; s1++)
+            {
+                for (var s2 = (Square)((byte)s1 + 1); s2 <= Square.H8; s2++)
+                {
+                    if ((Attacks.AttacksBb(Types.TypeOf(pc), s1) & Bitboards.SquareBB(s2)) == 0) continue;
+
+                    var move = new Move(s1, s2);
+                    ulong key = Psq[(byte)pc, (byte)s1] ^ Psq[(byte)pc, (byte)s2] ^ Side;
+                    int i = H1(key);
+
+                    while (true)
+                    {
+                        (Cuckoo[i], key) = (key, Cuckoo[i]);
+                        (CuckooMove[i], move) = (move, CuckooMove[i]);
+                        if (move == Move.None) break; // slot vuoto raggiunto
+                        i = i == H1(key) ? H2(key) : H1(key); // sposta la "vittima" nell'alternativa
+                    }
+                }
+            }
+        }
     }
 }
 

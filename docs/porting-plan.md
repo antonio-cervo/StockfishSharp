@@ -52,10 +52,9 @@ FEN (parse->serializza->stesso testo) e fare+disfare ogni mossa legale dalla pos
 riporta esattamente alla FEN di partenza.
 
 **NON portato da `position.h`/`position.cpp`** (non serve a perft, rimandato):
-- Static Exchange Evaluation (`see_ge`) — serve all'ordinamento mosse in ricerca.
-- `is_draw`/`is_repetition`/`upcoming_repetition` e le "cuckoo table" per la rilevazione veloce di
-  ripetizione — perft conta tutti i nodi foglia comunque, ripetizioni comprese; questa rilevazione
-  serve alla ricerca vera. `StateInfo.Repetition` resta sempre a 0 per ora.
+- Static Exchange Evaluation (`see_ge`) — FATTA (vedi Fase 2 sotto).
+- `is_draw`/`is_repetition`/`upcoming_repetition` e le "cuckoo table" — **FATTE, Flow A5** (vedi
+  `porting-master-plan.md`): `StateInfo.Repetition` ora calcolato davvero, wired in Search.cs.
 - `pos_is_ok()` (asserzioni di consistenza per debug) e `flip()` (specchia la posizione, utile per
   test di simmetria — buon candidato per rinforzare i test di perft in futuro).
 - Gli agganci NNUE (`DirtyPiece`/`DirtyThreats`/`scratchDirties`) e transposition

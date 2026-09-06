@@ -69,6 +69,11 @@
 // una riduzione forse eccessiva; se ci ha ridotti un po' e le due valutazioni statiche combinate
 // sembrano già buone, un ply in meno evita di scavare inutilmente.
 //
+// Rilevazione patta/ripetizione ora portata (Flow A5, position.cpp:1496-1568 + tabelle cuckoo di
+// Marcel van Kervinck in Zobrist.cs): Step 2 (patta immediata) e il controllo "ripetizione
+// imminente" a inizio search() (search.cpp:736-742), entrambi mai portati prima — il motore prima
+// non rilevava MAI patte per ripetizione o regola delle 50 mosse durante la ricerca.
+//
 // NON ancora portato: Lazy SMP (Flow C).
 
 namespace StockfishSharp.Engine;
@@ -273,6 +278,11 @@ public sealed class Search
     /// "distanza dal nodo corrente" a "distanza dalla radice" prima di salvarlo in TT — altrimenti
     /// una entry scritta a un ply diverso da dove viene poi letta darebbe una distanza di matto
     /// sbagliata.</summary>
+    /// <summary><c>value_draw</c>, search.cpp:134 — piccola componente casuale (±1, dal bit del
+    /// contatore nodi) per evitare la "cecità da tripla ripetizione" quando due rami portano
+    /// entrambi a una patta ma uno la raggiunge più a fondo dell'altro.</summary>
+    private int ValueDraw() => Values.Draw - 1 + (int)(_nodes & 0x2);
+
     private static int ValueToTt(int v, int ply) =>
         Values.IsWin(v) ? v + ply : Values.IsLoss(v) ? v - ply : v;
 
@@ -390,6 +400,14 @@ public sealed class Search
         // nota di semplificazione in testa al file sull'estimate di punteggio radice.
         bool seekMate = _rootDepth >= 16 && Math.Abs(_lastCompletedScore) >= 2000;
 
+        // Step 2. Controllo di patta immediata — search.cpp:787-790 (qui senza il controllo di
+        // ricerca interrotta, gestito a parte da _ct.ThrowIfCancellationRequested sopra).
+        if (ply != 0)
+        {
+            if (pos.IsDraw(ply) || ply >= Ply.MaxPly)
+                return ply >= Ply.MaxPly && pos.Checkers() == 0 ? Evaluate.StaticEval(pos) : ValueDraw();
+        }
+
         // Mate distance pruning — esatta, non euristica: da questo ply il miglior esito possibile
         // è dare matto alla prossima mossa, il peggiore essere già sotto matto.
         int matingValue = MateScore - ply;
@@ -406,6 +424,15 @@ public sealed class Search
         }
 
         if (depth <= 0) return Quiesce(pos, alpha, beta, ply);
+
+        // Controllo "ripetizione imminente" — search.cpp:736-742: se esiste una mossa disponibile
+        // che pareggerebbe per ripetizione e quel pareggio batte già alpha, tronca qui invece di
+        // esplorare il sottoalbero per scoprirlo più a fondo.
+        if (ply != 0 && alpha < Values.Draw && pos.UpcomingRepetition(ply))
+        {
+            alpha = ValueDraw();
+            if (alpha >= beta) return alpha;
+        }
 
         bool inCheck = pos.Checkers() != 0;
 

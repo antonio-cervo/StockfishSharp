@@ -196,10 +196,24 @@ plausibili (~10s su un orologio 5+0 a centropartita).
 `UCI_LimitStrength`/`UCI_Elo`, `UCI_ShowWDL`, conversione punteggi WDL, `Skill Level`, `d`,
 `flip`, `compiler`, `export_net`.
 
-### A5 — Parti non lette di `position.cpp` (~700 righe)
-`is_draw`/`is_repetition`/`upcoming_repetition`/`has_repeated` + **tabelle cuckoo** (rilevazione
-veloce delle ripetizioni), `pos_is_ok`, `material_key_is_ok`, `flip`, `dtz_is_dtm`, e tutta la
-macchina `update_piece_threats`/`DirtyThreats` — quest'ultima è **prerequisito di N9**.
+### A5 — Parti non lette di `position.cpp` (~700 righe) — 🟡 IN CORSO
+
+**Rilevazione patta/ripetizione FATTA** (`is_draw`/`is_repetition`/`has_repeated`/
+`upcoming_repetition` + le tabelle cuckoo di Marcel van Kervinck, position.cpp:106-162,1496-1568):
+`Position.Repetition` ora calcolato davvero in `DoMove` (prima sempre 0), le tabelle cuckoo
+costruite in `Zobrist.Init()` (stesso ordine/RNG della fonte, quindi stesso layout). Wired in
+`Search.cs`: Step 2 (patta immediata a inizio nodo) e il controllo "ripetizione imminente"
+all'inizio di `search()` (search.cpp:736-742), entrambi mai portati prima — il motore prima
+d'ora non rilevava MAI patte per ripetizione o regola delle 50 mosse durante la ricerca.
+
+Verificato: 69/69 test (3 nuovi su `RepetitionTests`, incluso un controllo per esaustione su
+tutte le mosse legali che replica l'invariante della fonte stessa per `upcoming_repetition` — deve
+combaciare esattamente con "esiste una mossa dopo la quale `IsDraw` diventa vera"), nessuna
+regressione sulle posizioni di test esistenti, verificato a mano che una tripla ripetizione reale
+via UCI riporta un punteggio drasticamente ridotto rispetto al materiale in campo.
+
+**Manca ancora**: `pos_is_ok`, `material_key_is_ok`, `flip`, `dtz_is_dtm` (debug/tablebase), tutta
+la macchina `update_piece_threats`/`DirtyThreats` — quest'ultima è **prerequisito di N9**.
 
 ---
 

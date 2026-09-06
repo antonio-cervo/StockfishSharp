@@ -321,6 +321,88 @@ public sealed class Position
 
     public int PliesFromNull => _st.PliesFromNull;
 
+    /// <summary>Patta per regola delle 50 mosse o per ripetizione — NON rileva lo stallo (quello
+    /// si vede dall'assenza di mosse legali nel ciclo di ricerca) — <c>Position::is_draw</c>,
+    /// position.cpp:1496-1502.</summary>
+    public bool IsDraw(int ply)
+    {
+        if (_st.Rule50 > 99)
+        {
+            if (Checkers() == 0) return true;
+            var moves = new List<Move>();
+            MoveGen.Generate(GenType.Legal, this, moves);
+            if (moves.Count > 0) return true;
+        }
+
+        return IsRepetition(ply);
+    }
+
+    /// <summary>Vero se la posizione si è già ripetuta una volta STRETTAMENTE dopo la radice, o
+    /// due volte prima o alla radice — <c>Position::is_repetition</c>, position.cpp:1504-1506.</summary>
+    public bool IsRepetition(int ply) => _st.Repetition != 0 && _st.Repetition < ply;
+
+    /// <summary>Vero se c'è stata almeno una ripetizione dall'ultima cattura o mossa di pedone —
+    /// <c>Position::has_repeated</c>, position.cpp:1508-1522.</summary>
+    public bool HasRepeated()
+    {
+        StateInfo? stc = _st;
+        int end = Math.Min(_st.Rule50, _st.PliesFromNull);
+        while (end-- >= 4)
+        {
+            if (stc!.Repetition != 0) return true;
+            stc = stc.Previous;
+        }
+
+        return false;
+    }
+
+    /// <summary>Vero se esiste una mossa che porterebbe a una ripetizione — usa le tabelle cuckoo
+    /// per verificarlo senza generare/provare ogni mossa candidata. Combacia esattamente con
+    /// l'esito di <see cref="IsDraw"/> su tutte le mosse legali — <c>Position::upcoming_repetition</c>,
+    /// position.cpp:1525-1568.</summary>
+    public bool UpcomingRepetition(int ply)
+    {
+        int end = Math.Min(_st.Rule50, _st.PliesFromNull);
+        if (end < 3) return false;
+
+        ulong originalKey = _st.Key;
+        StateInfo? stp = _st.Previous;
+        ulong other = originalKey ^ stp!.Key ^ Zobrist.Side;
+
+        for (int i = 3; i <= end; i += 2)
+        {
+            stp = stp!.Previous;
+            other ^= stp!.Key ^ stp.Previous!.Key ^ Zobrist.Side;
+            stp = stp.Previous;
+
+            if (other != 0) continue;
+
+            ulong moveKey = originalKey ^ stp!.Key;
+
+            int j = Zobrist.H1(moveKey);
+            if (Zobrist.Cuckoo[j] != moveKey)
+            {
+                j = Zobrist.H2(moveKey);
+                if (Zobrist.Cuckoo[j] != moveKey) continue;
+            }
+
+            Move move = Zobrist.CuckooMove[j];
+            Square s1 = move.FromSq;
+            Square s2 = move.ToSq;
+
+            if (((Attacks.Between(s1, s2) ^ Bitboards.SquareBB(s2)) & Pieces()) == 0)
+            {
+                if (ply > i) return true;
+
+                // Per i nodi prima o alla radice, verifica che la mossa sia una ripetizione
+                // rispetto a una mossa verso la posizione attuale.
+                if (stp.Repetition != 0) return true;
+            }
+        }
+
+        return false;
+    }
+
     public int NonPawnMaterial(Color c) => _st.NonPawnMaterial[(byte)c];
 
     public int NonPawnMaterial() => NonPawnMaterial(Color.White) + NonPawnMaterial(Color.Black);
@@ -795,8 +877,26 @@ public sealed class Position
         _sideToMove = them;
         SetCheckInfo();
 
-        // Ripetizione: rimandata (vedi nota in cima al file) — repetition resta sempre 0 per ora.
+        // Calcola l'informazione di ripetizione — position.cpp:1053-1069: distanza in ply
+        // dall'occorrenza precedente della stessa posizione, negativa nel caso di tripla
+        // ripetizione (l'occorrenza precedente era già essa stessa una ripetizione), zero se la
+        // posizione non si è ripetuta. Risale la catena Previous a due ply per volta (stesso lato
+        // al tratto) fino a min(rule50, pliesFromNull) ply indietro.
         _st.Repetition = 0;
+        int repEnd = Math.Min(_st.Rule50, _st.PliesFromNull);
+        if (repEnd >= 4)
+        {
+            StateInfo? stp = _st.Previous!.Previous;
+            for (int i = 4; i <= repEnd; i += 2)
+            {
+                stp = stp!.Previous!.Previous;
+                if (stp!.Key == _st.Key)
+                {
+                    _st.Repetition = stp.Repetition != 0 ? -i : i;
+                    break;
+                }
+            }
+        }
     }
 
     /// <summary>Disfa una mossa, riportando la posizione esattamente allo stato precedente —
