@@ -47,7 +47,7 @@ var position = new Position();
 position.Set("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", isChess960);
 
 var search = new SearchThreadPool();
-search.SetThreadCount(1);
+search.SetThreadCount(8);
 search.Resize(16);
 search.NewGame();
 var timeManagement = new TimeManagement();
@@ -144,7 +144,7 @@ while (Console.ReadLine() is { } line)
             Console.WriteLine("id name StockfishSharp (porting in corso)");
             Console.WriteLine("id author Antonio Cervo, porting da Stockfish (GPLv3)");
             Console.WriteLine("option name Hash type spin default 16 min 1 max 4096");
-            Console.WriteLine($"option name Threads type spin default 1 min 1 max {Environment.ProcessorCount}");
+            Console.WriteLine($"option name Threads type spin default 8 min 1 max {Environment.ProcessorCount}");
             Console.WriteLine("option name UCI_Chess960 type check default false");
             Console.WriteLine("uciok");
             break;
