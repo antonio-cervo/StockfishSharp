@@ -245,9 +245,32 @@ finché non finiva da sola) e a `go infinite`. Verificato: `isready` risponde su
 una ricerca attiva, `stop` interrompe `go infinite` in pratica istantaneamente, 69/69 test
 (invariati, non toccano Program.cs).
 
-**Manca**: infrastruttura opzioni generica, `setoption` completo, `bench`, `MultiPV`,
-`UCI_LimitStrength`/`UCI_Elo`, `UCI_ShowWDL`, conversione punteggi WDL, `Skill Level`, `d`,
-`flip`, `compiler`, `export_net`.
+**Comando `bench` FATTO** (scope ridotto): porta `UCIEngine::bench` (uci.cpp:248-312) +
+`Benchmark::setup_bench` (benchmark.cpp:395-447) — la lista `Defaults` REALE (51 posizioni, incluse
+le 2 Chess960, copiata identica, incluse le mosse incorporate in alcune righe) eseguita a profondità
+fissa (default 13, come la fonte), con `setoption`/`ucinewgame` incorporati elaborati come nella
+lista stessa, riepilogo finale identico (`Total time (ms)`/`Nodes searched`/`Nodes/second`) su
+stderr come la fonte. Ridotto rispetto alla fonte: solo `limitType` `depth`/`movetime` (non
+`eval`/`nodes`/`perft`), solo `fenFile` `default` (non un file esterno o `current`), `threads`
+accettato per compatibilità di sintassi ma ignorato (motore sempre a thread singolo). Aggiunto
+anche il supporto minimo a `UCI_Chess960` (opzione + `setoption`, usata da `HandlePosition` e
+dalle 2 posizioni Chess960 della lista `Defaults`), assente prima.
+
+**Bug scoperto e corretto testando `bench`**: a matto/stallo, `Search_` imposta `result.BestMove`
+a `Move.None` (non `null` — la TT salva sempre `bestMove ?? Move.None`), ma sia `HandleGo` sia il
+nuovo `HandleBench` controllavano solo `.HasValue`, quindi stampavano `bestmove a1a1` (`Move.None`
+ha `from=to=A1`) invece di `bestmove 0000` — una mossa ILLEGALE che un client UCI reale (GUI,
+lichess-bot) avrebbe provato a giocare a fine partita. Corretto in entrambi i punti.
+
+**Manca ancora**: infrastruttura opzioni generica (`Option`/`OptionsMap`), `setoption` completo
+oltre a `Hash`/`UCI_Chess960`, `MultiPV`, `UCI_LimitStrength`/`UCI_Elo`, `UCI_ShowWDL`, conversione
+punteggi WDL, `Skill Level`, `d`, `flip`, `compiler`, `export_net`, `speedtest`
+(`setup_benchmark`, benchmark.cpp:449-528, un secondo comando di benchmark su partite reali per lo
+SPRT — non essenziale, lista `BenchmarkPositions` enorme non copiata).
+
+Verificato: 69/69 test; `bench 16 1 6` a mano completa le 51 posizioni senza errori (incluse le 2
+Chess960), riepilogo coerente; `go` normale (non-bench) ancora corretto dopo la correzione del bug
+`a1a1`.
 
 ### A5 — Parti non lette di `position.cpp` (~700 righe) — 🟡 IN CORSO
 
