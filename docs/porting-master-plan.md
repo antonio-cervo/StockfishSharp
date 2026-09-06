@@ -191,7 +191,14 @@ il tempo rimasto). Sanity check via UCI con `wtime`/`btime`/`winc` realistici: t
 plausibili (~10s su un orologio 5+0 a centropartita).
 
 ### A4 — Livello UCI (`uci.cpp` 704 + `ucioption.cpp` 213 + `engine.cpp` + `benchmark.cpp` ≈ 1.600)
-**Oggi**: ~180 righe in `Program.cs` — i comandi minimi per giocare.
+**Oggi**: ~200 righe in `Program.cs` — i comandi minimi per giocare, PIÙ una correzione pratica
+importante non presente nella fonte come tale (qui il layer UCI non è comunque un porting fedele):
+**`go` ora gira su un task in background invece di bloccare il ciclo principale**, con supporto
+vero al comando `stop` (prima impossibile: una ricerca sincrona non poteva mai leggere "stop"
+finché non finiva da sola) e a `go infinite`. Verificato: `isready` risponde subito anche durante
+una ricerca attiva, `stop` interrompe `go infinite` in pratica istantaneamente, 69/69 test
+(invariati, non toccano Program.cs).
+
 **Manca**: infrastruttura opzioni generica, `setoption` completo, `bench`, `MultiPV`,
 `UCI_LimitStrength`/`UCI_Elo`, `UCI_ShowWDL`, conversione punteggi WDL, `Skill Level`, `d`,
 `flip`, `compiler`, `export_net`.

@@ -35,6 +35,23 @@ search.NewGame();
 var timeManagement = new TimeManagement();
 int maxDepth = 30;
 
+// Una ricerca ("go") gira su un task in background invece che bloccare questo ciclo: un client
+// UCI reale (GUI o lichess-bot) può mandare "stop" mentre il motore sta ancora pensando e si
+// aspetta un "bestmove" pronto subito dopo — con una chiamata sincrona qui, "stop" non sarebbe mai
+// letto finché la ricerca non finisce da sola. Non un porting (Flow A4, uci.cpp non ancora
+// portato) — ingegneria pratica sul nostro layer UCI minimo, che già non è fedele.
+CancellationTokenSource? searchCts = null;
+Task? searchTask = null;
+
+void StopSearch()
+{
+    if (searchTask is { IsCompleted: false })
+    {
+        searchCts?.Cancel();
+        searchTask.Wait();
+    }
+}
+
 while (Console.ReadLine() is { } line)
 {
     var tokens = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -54,6 +71,7 @@ while (Console.ReadLine() is { } line)
             break;
 
         case "ucinewgame":
+            StopSearch();
             search.NewGame();
             timeManagement.NewGame();
             break;
@@ -63,14 +81,21 @@ while (Console.ReadLine() is { } line)
             break;
 
         case "position":
+            StopSearch();
             HandlePosition(tokens);
             break;
 
         case "go":
+            StopSearch();
             HandleGo(tokens);
             break;
 
+        case "stop":
+            searchCts?.Cancel();
+            break;
+
         case "quit":
+            StopSearch();
             return;
     }
 }
@@ -176,9 +201,17 @@ void HandleGo(string[] toks)
 
     var movetime = GetLong("movetime");
     var depthArg = GetLong("depth");
+    bool infinite = Array.IndexOf(toks, "infinite") >= 0;
 
     TimeSpan budget;
-    if (movetime.HasValue)
+    if (infinite)
+    {
+        // Nessun limite di tempo reale: si ferma solo con "stop" o al raggiungimento di maxDepth
+        // (il vero "infinite" della fonte non ha nemmeno quel limite, ma un tetto pratico qui
+        // evita una ricerca che non termina mai se il client non manda mai "stop").
+        budget = TimeSpan.FromHours(1);
+    }
+    else if (movetime.HasValue)
     {
         budget = TimeSpan.FromMilliseconds(Math.Max(50, movetime.Value - 50));
     }
@@ -196,23 +229,31 @@ void HandleGo(string[] toks)
         }
         else
         {
-            budget = TimeSpan.FromSeconds(10); // "go depth N"/"go infinite" senza orologio: budget fisso ragionevole
+            budget = TimeSpan.FromSeconds(10); // "go depth N" senza orologio: budget fisso ragionevole
         }
     }
 
     int depth = depthArg.HasValue ? (int)Math.Min(depthArg.Value, maxDepth) : maxDepth;
 
-    var result = search.Search_(position, depth, budget);
+    searchCts = new CancellationTokenSource();
+    var ct = searchCts.Token;
+    var pos = position; // stesso oggetto Position: il client UCI non deve mandare "position"/"go"
+                        // finché non riceve "bestmove" o manda "stop" prima (regola del protocollo).
 
-    if (result.BestMove.HasValue)
+    searchTask = Task.Run(() =>
     {
-        Console.WriteLine($"info depth {result.Depth} score cp {result.ScoreCp} nodes {result.Nodes}");
-        Console.WriteLine($"bestmove {MoveToUci(result.BestMove.Value)}");
-    }
-    else
-    {
-        Console.WriteLine("bestmove 0000");
-    }
+        var result = search.Search_(pos, depth, budget, ct);
+
+        if (result.BestMove.HasValue)
+        {
+            Console.WriteLine($"info depth {result.Depth} score cp {result.ScoreCp} nodes {result.Nodes}");
+            Console.WriteLine($"bestmove {MoveToUci(result.BestMove.Value)}");
+        }
+        else
+        {
+            Console.WriteLine("bestmove 0000");
+        }
+    });
 }
 
 string MoveToUci(Move m)
