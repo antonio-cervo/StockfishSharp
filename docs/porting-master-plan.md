@@ -380,6 +380,29 @@ Portate finora solo le briciole che servivano (`PRNG` dentro `Attacks.cs`).
 
 ---
 
+## Flusso D — Pratico, non porting (richiesto dall'utente 2026-09-06)
+
+Due pezzi che l'utente vuole prima della fine, ma che NON sono "porting" in senso stretto: la
+fonte Stockfish reale non ha né un libro di aperture né codice di query Syzygy proprio (Syzygy è
+`syzygy/`, C2 sopra — quello sì è porting vero; il libro invece Stockfish non ce l'ha affatto, lo
+gestisce sempre il layer UCI esterno/la GUI/il bot). Stesso spirito di `StockfishSharp.Uci/
+Program.cs` (layer pratico non fedele) più che di `StockfishSharp.Engine`.
+
+### D1 — Libro di aperture
+Non ancora iniziato. ACMyChess (il motore precedente, vedi [[acmychess-features-2026-06]]) ha già
+un libro Polyglot funzionante — stessa logica riusabile qui (formato file `.bin` standard, non
+specifico di un motore), verosimilmente portabile/riusabile quasi as-is nel layer
+`StockfishSharp.Uci`.
+
+### D2 — Tablebase Syzygy, uso pratico
+Distinto da **C2** sopra (il porting vero del probe code `syzygy/`, 2.053 righe, mai aperto). I
+file di dati fino a 5 pezzi sono già disponibili (vedi [[acmychess-tablebase-plan]], usati da
+ACMyChess/il bot). Se C2 risultasse troppo oneroso da portare fedelmente, un'alternativa più
+pratica (come già fatto in ACMyChess) è un client per lo stesso formato di file, non
+necessariamente una trascrizione riga-per-riga di `syzygy/`.
+
+---
+
 ## L'oracolo: cosa garantisce e cosa no
 
 `stockfish-reference-binary/.../stockfish-windows-x86-64-universal.exe`, **Stockfish 19**
@@ -470,7 +493,9 @@ al nostro porting (non ha accumulo intermedio a i16), resta rilevante solo per c
    catena, in quest'ordine.
 6. **A3, A4** (tempo, UCI) — meno urgenti: le versioni attuali funzionano, il divario è in
    completezza di funzioni, non in forza.
-7. **C2** (Syzygy), **C3** (utilità) — alla fine.
+7. **C2** (Syzygy vero), **C3** (utilità) — alla fine.
+8. **D1** (libro di aperture), **D2** (Syzygy pratico, alternativa a C2 se troppo oneroso) —
+   ultimissimi, richiesti esplicitamente dall'utente come traguardo finale.
 
 ## Come si misura la fine
 
