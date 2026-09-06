@@ -86,8 +86,14 @@ Miglioramento incrementale sul caveat: la posizione di prova resta stabile su `d
 (prima solo 8-10), ancora non a depth 6 e 12 — residuo non risolto, atteso richiedere la
 generazione a stadi vera e/o il resto della history in `OrderMoves` per chiudersi del tutto.
 
-**Manca ancora**: l'hindsight depth adjustment da `priorReduction`, tutta la taratura fine dei
-margini rimasti, la struttura
+**Hindsight depth adjustment da priorReduction FATTO** (search.cpp:807-808,866-870, l'ultimo pezzo
+mancante di Flow A1 elencato): se il genitore ha ridotto molto la profondità con LMR ma la sua
+posizione non peggiora, un ply in più qui compensa; se ha ridotto un po' e le valutazioni statiche
+combinate sembrano già buone, un ply in meno. **Flow A1 è ora COMPLETO** per quanto riguarda le
+tecniche di search.cpp applicabili a thread singolo (resta solo Lazy SMP, Flow C). Ulteriore
+miglioramento sul caveat: la posizione di prova resta stabile su `d7c8q` a depth 7-12 (prima 7-10).
+
+**Manca ancora**: tutta la taratura fine dei margini rimasti, la struttura
 `Worker`/`RootMove`/`Stack` completa della fonte (qui minimizzata a quanto serve). L'aspiration
 window usa lo score dell'iterazione precedente al posto della media mobile pesata per "effort"
 della fonte (richiede bookkeeping per-root-move non ancora presente). `followPV` (segue la riga

@@ -64,7 +64,12 @@
 // Miglioramento incrementale sul caveat dello Step 15/16: la posizione di prova resta stabile su
 // d7c8q a depth 7-10 (prima solo 8-10), ancora non a depth 6 e 12 — residuo non risolto.
 //
-// NON ancora portati: hindsight depth adjustment da priorReduction, Lazy SMP.
+// Hindsight depth adjustment da priorReduction ora portato (search.cpp:807-808,866-870): se il
+// genitore ci ha ridotti molto (LMR) ma la sua posizione non peggiora, un ply in più qui compensa
+// una riduzione forse eccessiva; se ci ha ridotti un po' e le due valutazioni statiche combinate
+// sembrano già buone, un ply in meno evita di scavare inutilmente.
+//
+// NON ancora portato: Lazy SMP (Flow C).
 
 namespace StockfishSharp.Engine;
 
@@ -106,6 +111,11 @@ public sealed class Search
     // (search.cpp:1578-1601), che legge (ss-1)->statScore e (ss-1)->moveCount.
     private readonly int[] _statScoreHistory = new int[Ply.MaxPly + StackOffset + 1];
     private readonly int[] _moveCountHistory = new int[Ply.MaxPly + StackOffset + 1];
+    // Stack::reduction della fonte — quanto il GENITORE ha ridotto la profondità per arrivare a
+    // questo nodo con una ricerca LMR (search.cpp:1371,1373: impostato solo per la durata di
+    // quella singola chiamata, poi azzerato) — letto come (ss-1) per l'hindsight depth adjustment
+    // (search.cpp:866-870).
+    private readonly int[] _reductionHistory = new int[Ply.MaxPly + StackOffset + 1];
     // Stack::cutoffCnt della fonte — quanti tagli beta ha causato il nodo a QUESTO ply, azzerato
     // dal nodo due ply più in alto (Step 1, search.cpp:810: "(ss+2)->cutoffCnt=0") prima di
     // iniziare il proprio ciclo mosse, e letto dal genitore immediato (ss+1) in Step 18 per la
@@ -311,6 +321,7 @@ public sealed class Search
         Array.Clear(_cutoffCntHistory);
         Array.Clear(_statScoreHistory);
         Array.Clear(_moveCountHistory);
+        Array.Clear(_reductionHistory);
         _lastCompletedScore = -Infinity;
 
         var result = new SearchResult();
@@ -403,6 +414,12 @@ public sealed class Search
         // riduzione LMR in Step 18) accumuleranno nel corso del ciclo mosse di questo nodo.
         _cutoffCntHistory[ply + StackOffset + 2] = 0;
 
+        // search.cpp:807-808 — "consuma" la riduzione che il GENITORE ha applicato per arrivare
+        // qui con LMR (0 se non è stata una ricerca ridotta), poi la azzera: serve solo una volta,
+        // all'hindsight depth adjustment sotto.
+        int priorReduction = _reductionHistory[ply + StackOffset - 1];
+        _reductionHistory[ply + StackOffset - 1] = 0;
+
         var probe = _tt.Probe(pos.Key);
         int ttScore = probe.Found ? ValueFromTt(probe.Data.Value, ply, pos.Rule50Count) : Values.None;
         bool ttPv = isPvNode || (probe.Found && probe.Data.IsPv);
@@ -451,6 +468,13 @@ public sealed class Search
 
         bool improving = staticEval > _staticEvalHistory[ply + StackOffset - 2]; // (ss-2)->staticEval
         bool opponentWorsening = staticEval > -_staticEvalHistory[ply + StackOffset - 1]; // -(ss-1)->staticEval
+
+        // Hindsight adjustment of reductions, search.cpp:866-870: se il genitore ci ha ridotti
+        // molto ma la sua posizione non sta peggiorando, forse ha ridotto troppo — un ply in più
+        // qui compensa; se ci ha ridotti un po' e le due valutazioni statiche combinate sembrano
+        // già buone per chi muove, un ply in meno evita di scavare inutilmente.
+        if (priorReduction >= 3 && !opponentWorsening) depth++;
+        if (priorReduction >= 2 && depth >= 2 && staticEval + _staticEvalHistory[ply + StackOffset - 1] > 166) depth--;
 
         if (!inCheck)
         {
@@ -744,7 +768,9 @@ public sealed class Search
             if (depth >= 2 && moveCount > 1)
             {
                 int d = Math.Max(1, Math.Min(newDepth - (r / 1024), newDepth + 2)) + (isPvNode ? 1 : 0);
+                _reductionHistory[ply + StackOffset] = newDepth - d; // search.cpp:1371
                 score = -Negamax(pos, d, ply + 1, -(alpha + 1), -alpha, cutNode: true);
+                _reductionHistory[ply + StackOffset] = 0; // search.cpp:1373
 
                 if (score > alpha)
                 {
