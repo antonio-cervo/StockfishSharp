@@ -114,6 +114,17 @@ public sealed class Search
     private long _nodes;
     private long _tbHits;
 
+    /// <summary>Mossa trovata dal ciclo mosse di Negamax ALLA RADICE (ply=0) — impostata appena
+    /// prima del suo return, letta da Search_ subito dopo la chiamata. Sostituisce una ri-sonda
+    /// della TT a posteriori (mai necessaria nella fonte, che usa sempre rootMoves[0].pv[0]) che
+    /// sotto Lazy SMP poteva restituire una mossa non verificata legale per la posizione attuale
+    /// — bug reale trovato in una partita del bot, 2026-09-06. Il Singular Extensions è l'unico
+    /// altro punto che richiama Negamax alla STESSA ply con un parametro diverso (excludedMove),
+    /// ma è esplicitamente disattivato alla radice (condizione "ply != 0" più sotto) — quindi
+    /// questo campo riceve sempre e solo il risultato della vera ricerca radice, mai di una
+    /// sotto-ricerca di verifica.</summary>
+    private Move _rootBestMove;
+
     /// <summary>Equivalente di <c>Search::Worker::tbConfig</c> (search.cpp:922-973, Step 7) —
     /// <c>Cardinality=0</c> di default (probing disattivato finché il livello UCI non chiama
     /// <see cref="SetTbConfig"/>, tipicamente dopo aver caricato le tabelle con
@@ -385,6 +396,7 @@ public sealed class Search
         _ct = cts.Token;
         _nodes = 0;
         _tbHits = 0;
+        _rootBestMove = Move.None;
         if (callNewSearch) _tt.NewSearch();
         _movePick.ResetForSearch(); // lowPlyHistory.fill(102), search.cpp:326
         _accumulatorStack.Reset(); // AccumulatorStack::reset, nnue_accumulator.cpp:71-77
@@ -441,19 +453,19 @@ public sealed class Search
                 meanSquaredScore = (long)bestValue * Math.Abs(bestValue);
                 _lastCompletedScore = bestValue;
 
-                // Rete di sicurezza NON presente nella fonte reale (lì "bestmove" viene sempre da
-                // rootMoves[0].pv[0], una lista già verificata legale all'inizio della ricerca —
-                // qui, non avendo ancora quella struttura, si ri-sonda la TT a posteriori, che può
-                // in rari casi restituire una mossa non valida per QUESTA posizione (sotto Lazy SMP,
-                // C1, più thread scrivono/leggono concorrentemente la stessa entry radice — una
-                // lettura "spezzata", tollerata dalla fonte perché non si fida MAI ciecamente della
-                // TT per il bestmove, qui produceva invece una mossa illegale mandata al client UCI:
-                // trovato in una partita reale del bot, 2026-09-06). PseudoLegal+Legal è lo stesso
-                // controllo già usato per una ttData.move "potenzialmente corrotta" dentro l'albero.
-                var probe = _tt.Probe(pos.Key);
-                if (probe.Found && probe.Data.Move != Move.None
-                    && pos.PseudoLegal(probe.Data.Move) && pos.Legal(probe.Data.Move))
-                    result.BestMove = probe.Data.Move;
+                // bestmove preso DIRETTAMENTE dalla mossa trovata da Negamax alla radice (impostata
+                // in _rootBestMove appena prima del suo return, vedi lì) — non più da una ri-sonda
+                // della TT a posteriori. La fonte reale non ha mai questo problema (usa sempre
+                // rootMoves[0].pv[0], una lista già verificata legale all'inizio della ricerca,
+                // struttura che questo porting non ha ancora), ma qui una ri-sonda a posteriori
+                // poteva restituire una mossa non valida per QUESTA posizione sotto Lazy SMP (C1):
+                // più thread scrivono/leggono concorrentemente la stessa entry di TT alla radice,
+                // una lettura "spezzata" produceva una mossa illegale mandata al client UCI — trovato
+                // in una partita reale del bot, 2026-09-06. _rootBestMove viene dal ciclo mosse di
+                // QUESTA chiamata a Negamax, quindi è per costruzione la stessa identica garanzia di
+                // legalità di rootMoves[0].pv[0] nella fonte (pos.Legal(m) già verificato lì).
+                if (_rootBestMove != Move.None)
+                    result.BestMove = _rootBestMove;
                 result.ScoreCp = bestValue;
                 result.Depth = depth;
             }
@@ -1084,6 +1096,13 @@ public sealed class Search
 
         var flag = value <= origAlpha ? Bound.Upper : value >= beta ? Bound.Lower : Bound.Exact;
         _tt.Save(probe.WriteIndex, pos.Key, ValueToTt(value, ply), ttPv, flag, depth, bestMove ?? Move.None, unadjustedStaticEval);
+
+        // Vedi _rootBestMove: alla radice, questa chiamata a Negamax ha appena finito il proprio
+        // ciclo mosse vero (Singular Extensions non tocca mai ply==0, condizione "ply != 0" sopra),
+        // quindi bestMove qui è già garantita legale — esattamente come rootMoves[0].pv[0] nella
+        // fonte, mai da ri-derivare da una TT condivisa fra thread.
+        if (ply == 0)
+            _rootBestMove = bestMove ?? Move.None;
 
         return value;
     }
