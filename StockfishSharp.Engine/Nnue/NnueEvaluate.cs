@@ -27,13 +27,25 @@ public static class NnueEvaluate
 
     /// <summary><c>Eval::evaluate</c>, evaluate.cpp:42-69 — assume <c>!pos.checkers()</c> (NNUE
     /// non va chiamata sotto scacco, come nella fonte: il chiamante deve gestire quel caso, non
-    /// ancora integrato — N7). Valore dal punto di vista del lato al tratto.</summary>
-    public static int Evaluate(NnueNetwork net, Position pos, int optimism = 0)
+    /// ancora integrato — N7). Valore dal punto di vista del lato al tratto. <paramref
+    /// name="accStack"/> (facoltativo, N9): se fornito, l'accumulatore viene aggiornato in modo
+    /// incrementale invece di essere ricalcolato da zero — vedi AccumulatorStack.cs.</summary>
+    public static int Evaluate(NnueNetwork net, Position pos, int optimism = 0, AccumulatorStack? accStack = null)
     {
         int numPieces = Bitboards.PopCount(pos.Pieces());
         int bucket = (numPieces - 1) / 4;
 
-        var acc = NnueAccumulator.ComputeFromScratch(net, pos);
+        NnueAccumulator acc;
+        if (accStack != null)
+        {
+            accStack.Evaluate(pos, net);
+            acc = accStack.Latest;
+        }
+        else
+        {
+            acc = NnueAccumulator.ComputeFromScratch(net, pos);
+        }
+
         byte[] transformed = NnueLayers.TransformBothPerspectives(acc, pos.SideToMove);
 
         int psqt = acc.MaterialPsqt(pos.SideToMove, bucket);

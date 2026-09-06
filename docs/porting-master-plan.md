@@ -365,6 +365,38 @@ layer, tutto confermato contro l'oracolo. N8 usa una meccanica SIMD diversa dall
 scalare oltre che contro l'oracolo. Resta solo N9 (aggiornamento incrementale dell'accumulatore,
 prerequisito di C1 Lazy SMP).
 
+**N9, infrastruttura FATTA** (nnue_accumulator.h+.cpp, nucleo senza due ottimizzazioni della fonte
+— vedi nota in `AccumulatorStack.cs` per il perché sono rimandabili senza intaccare la
+correttezza): niente Finny Tables (cache dei refresh per casa del re, solo velocità), niente
+"hybrid update"/`backward_update_incremental` (ripiena i frame intermedi non ancora calcolati
+quando manca un accumulatore riusabile in avanti — qui si fa sempre un refresh completo in quel
+caso, corretto ma meno efficiente nei ply consecutivi senza valutazione statica, es. sotto scacco).
+
+Nuovo `AccumulatorStack.cs`: `Push`/`Pop`/`Evaluate`/`FindLastUsableAccumulator`/
+`ForwardUpdateIncremental`, fedeli a nnue_accumulator.cpp:67-193. `NnueAccumulator.cs` fonde
+`Accumulator`+`Dirties` della fonte in un'unica classe (separate lì solo per un dettaglio di
+ereditarietà multipla C++, irrilevante qui) e guadagna `RefreshPerspective`/
+`ApplyIncrementalDelta`/`Subtract*` (simmetrici degli `Add*` già esistenti). `NnueFeatures.cs`
+guadagna `AppendChangedIndices` per tutte e 3 le feature (`MakeIndex` esisteva già da N1-N8):
+HalfKA da un `DirtyPiece` (half_ka_v2_hm.cpp:89-100), FullThreats iterando direttamente la lista di
+`DirtyThreat` già generata da `Position.UpdatePieceThreats` (full_threats.cpp:261-285), Pp3Wide
+confrontando le bitboard pedoni prima/dopo (pp_3wide.cpp:144-169, ramo scalare).
+
+**Bug di trascrizione trovato e corretto durante la verifica**: `Pp3Wide.AppendChangedIndices`
+usava il bitboard "aggiornato" ORIGINALE intatto invece della variabile di loop che si riduce
+progressivamente (`u` nella fonte, dopo `pop_lsb`) — generava ogni coppia di pedoni DUE VOLTE
+quando entrambi i pedoni della coppia erano "aggiornati" nella stessa mossa (es. una cattura di
+pedone), corrompendo silenziosamente l'accumulatore in quei casi specifici.
+
+Verificato in modo indipendente (nuovo `NnueIncrementalTests.cs`, stesso principio già usato per
+l'accumulatore "da zero" negli oracoli N1-N8): per ogni mossa raggiunta durante una perft (3
+posizioni, incluso un arrocco che esercita `RequiresRefresh`), l'accumulatore mantenuto
+incrementalmente da `AccumulatorStack` è bit-esatto — non solo la valutazione finale, gli interi
+stessi di `Accumulation`/`PsqtAccumulation` — contro `NnueAccumulator.ComputeFromScratch`
+ricalcolato indipendentemente sulla stessa posizione. 85/85 test totali; `bench 16 1 8` — nodi
+identici (l'infrastruttura non è ancora usata dalla ricerca, wiring in `Search.cs` prossimo passo
+per chiudere N9 e ottenerne il beneficio reale di velocità).
+
 ---
 
 ## Flusso C — Il resto

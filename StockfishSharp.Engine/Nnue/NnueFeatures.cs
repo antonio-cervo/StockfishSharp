@@ -93,10 +93,24 @@ public static class HalfKAv2Hm
     }
 
     /// <summary>Vero se il cambiamento richiede un refresh completo (il re si è mosso) —
-    /// <c>requires_refresh</c>, half_ka_v2_hm.cpp:102-104. Non ancora usata (N9, aggiornamento
-    /// incrementale), presente per completezza dell'interfaccia.</summary>
+    /// <c>requires_refresh</c>, half_ka_v2_hm.cpp:102-104.</summary>
     public static bool RequiresRefresh(Piece movedPiece, Color perspective) =>
         movedPiece == Types.MakePiece(perspective, PieceType.King);
+
+    /// <summary><c>append_changed_indices</c>, half_ka_v2_hm.cpp:89-100 — le feature che cambiano
+    /// a causa di un singolo DirtyPiece (N9, aggiornamento incrementale).</summary>
+    public static void AppendChangedIndices(Color perspective, Square ksq, DirtyPiece diff, List<int> removed, List<int> added)
+    {
+        removed.Add(MakeIndex(perspective, diff.From, diff.Pc, ksq));
+        if (diff.To != Square.None)
+            added.Add(MakeIndex(perspective, diff.To, diff.Pc, ksq));
+
+        if (diff.RemoveSq != Square.None)
+            removed.Add(MakeIndex(perspective, diff.RemoveSq, diff.RemovePc, ksq));
+
+        if (diff.AddSq != Square.None)
+            added.Add(MakeIndex(perspective, diff.AddSq, diff.AddPc, ksq));
+    }
 }
 
 /// <summary>Feature "chi minaccia chi" — <c>FullThreats</c>, full_threats.h+.cpp. La più grande e
@@ -306,6 +320,20 @@ public static class FullThreats
             }
         }
     }
+
+    /// <summary><c>append_changed_indices</c>, full_threats.cpp:261-285 — itera direttamente la
+    /// lista di <see cref="DirtyThreat"/> raccolta da <c>Position.UpdatePieceThreats</c> durante la
+    /// mossa: ciascuno diventa un indice aggiunto o rimosso a seconda del suo flag <c>Add</c>.</summary>
+    public static void AppendChangedIndices(Color perspective, Square ksq, List<DirtyThreat> dirtyThreats, List<int> removed, List<int> added)
+    {
+        foreach (var dirty in dirtyThreats)
+        {
+            int index = MakeIndex(perspective, dirty.Pc, dirty.PcSq, dirty.ThreatenedSq, dirty.ThreatenedPc, ksq);
+            if (index >= Dimensions) continue; // combinazione esclusa dalla feature — vedi AppendActiveIndices
+
+            (dirty.Add ? added : removed).Add(index);
+        }
+    }
 }
 
 /// <summary>Feature "coppie di pedoni" — <c>PP_3Wide</c>, pp_3wide.h+.cpp.</summary>
@@ -363,5 +391,47 @@ public static class Pp3Wide
             ulong bbk = band & bb;
             while (bbk != 0) active.Add(MakeIndex(perspective, Color.Black, from, Bitboards.PopLsb(ref bbk), Color.Black, ksq));
         }
+    }
+
+    /// <summary><c>append_changed_indices</c> (ramo scalare), pp_3wide.cpp:144-169 — a differenza
+    /// delle altre due feature non itera un dirty già pronto: confronta le bitboard pedoni
+    /// prima/dopo per trovare quali sono apparsi/spariti, poi genera le coppie con i loro vicini
+    /// (<c>Bitboards.PawnPairBB</c>) che erano già presenti o sono anch'essi apparsi/spariti nello
+    /// stesso momento.</summary>
+    public static void AppendChangedIndices(Color perspective, Square ksq, DirtyPawnPairs diff, List<int> removed, List<int> added)
+    {
+        ulong whiteBefore = diff.Before[(byte)Color.White];
+        ulong blackBefore = diff.Before[(byte)Color.Black];
+        ulong whiteAfter = diff.After[(byte)Color.White];
+        ulong blackAfter = diff.After[(byte)Color.Black];
+
+        if (whiteBefore == whiteAfter && blackBefore == blackAfter) return;
+
+        void Generate(ulong updatedW, ulong updatedB, ulong pawnsW, ulong pawnsB, List<int> outList)
+        {
+            ulong unchanged = (pawnsW | pawnsB) & ~(updatedW | updatedB);
+            ulong updated = updatedW | updatedB;
+
+            while (updated != 0)
+            {
+                Square a = Bitboards.PopLsb(ref updated);
+                // "unchanged | updated" (il residuo DOPO aver estratto "a", non il valore
+                // originale intatto) — evita di generare la stessa coppia due volte quando
+                // ENTRAMBI i pedoni della coppia sono "aggiornati": una volta rimosso "a" da
+                // "updated", l'altro pedone della coppia già processato non vi compare più, quindi
+                // la coppia si genera una sola volta (dal lato che viene estratto per primo).
+                ulong mask = Bitboards.PawnPairBB(a) & (unchanged | updated);
+                Color aCol = (pawnsB & Bitboards.SquareBB(a)) != 0 ? Color.Black : Color.White;
+
+                ulong pb = pawnsB & mask;
+                while (pb != 0) outList.Add(MakeIndex(perspective, aCol, a, Bitboards.PopLsb(ref pb), Color.Black, ksq));
+
+                ulong pw = pawnsW & mask;
+                while (pw != 0) outList.Add(MakeIndex(perspective, aCol, a, Bitboards.PopLsb(ref pw), Color.White, ksq));
+            }
+        }
+
+        Generate(whiteAfter & ~whiteBefore, blackAfter & ~blackBefore, whiteAfter, blackAfter, added);
+        Generate(whiteBefore & ~whiteAfter, blackBefore & ~blackAfter, whiteBefore, blackBefore, removed);
     }
 }

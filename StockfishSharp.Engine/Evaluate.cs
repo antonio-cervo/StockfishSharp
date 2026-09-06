@@ -99,11 +99,14 @@ public static class Evaluate
     ];
 
     /// <summary>Valutazione statica dal punto di vista del lato al tratto — segno coerente col
-    /// negamax (positivo = meglio per chi deve muovere).</summary>
-    public static int StaticEval(Position pos)
+    /// negamax (positivo = meglio per chi deve muovere). <paramref name="accStack"/> (facoltativo,
+    /// N9): se fornito e una rete NNUE è caricata, l'accumulatore viene aggiornato in modo
+    /// incrementale invece di essere ricalcolato da zero a ogni chiamata — passato solo dalla
+    /// ricerca vera (Search.cs), che tiene lo stack sincronizzato con DoMove/UndoMove.</summary>
+    public static int StaticEval(Position pos, Nnue.AccumulatorStack? accStack = null)
     {
         if (NnueNetwork != null)
-            return Nnue.NnueEvaluate.Evaluate(NnueNetwork, pos);
+            return Nnue.NnueEvaluate.Evaluate(NnueNetwork, pos, accStack: accStack);
 
         int score = 0;
         for (var s = Square.A1; s <= Square.H8; s++)
