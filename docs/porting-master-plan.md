@@ -313,6 +313,22 @@ punteggi WDL, `Skill Level`, `export_net`, `speedtest` (`setup_benchmark`, bench
 un secondo comando di benchmark su partite reali per lo SPRT — non essenziale, lista
 `BenchmarkPositions` enorme non copiata), `ponder`/`ponderhit` (pondering vero).
 
+**Bug reale di correttezza trovato e corretto (2026-09-06, due partite perse dal vivo sul
+bot)**: `MoveToUci`/`ParseUciMove` (scritte come codice pratico fin dal primissimo commit del
+progetto, `0967bda` — questo file non è mai stato un porting, la fedeltà a `uci.cpp` è sempre
+stata rimandata a questa stessa Fase A4) confrontavano le mosse sulle case grezze, ma la
+rappresentazione interna dell'arrocco è "il re cattura la propria torre" (Move.ToSq=casa
+della torre) mentre una GUI/bot non-Chess960 manda sempre la notazione standard (e1g1, non
+e1h1) — ogni arrocco nella cronologia veniva scartato silenziosamente, disallineando la
+posizione interna per il resto della partita. La lista "manca ancora" qui sopra non aveva mai
+segnalato esplicitamente questo buco (nessuna verifica manuale precedente aveva mai fatto un
+vero giro "GUI manda e1g8 dopo un arrocco reale"): serviva una partita vera per farlo
+emergere. **Corretto** portando fedelmente `UCIEngine::move`/`UCIEngine::to_move`
+(uci.cpp:611-644, verificate riga per riga): `MoveToUci` converte ora la casa di arrivo
+dell'arrocco alla casa finale del re quando non Chess960; `ParseUciMove` confronta ogni mossa
+legale con la stringa in arrivo convertendola PRIMA con `MoveToUci` invece di confrontare le
+case grezze — la stessa tecnica esatta della fonte, non più codice pratico proprio.
+
 ### A5 — Parti non lette di `position.cpp` (~700 righe) — 🟡 IN CORSO
 
 **Rilevazione patta/ripetizione FATTA** (`is_draw`/`is_repetition`/`has_repeated`/
