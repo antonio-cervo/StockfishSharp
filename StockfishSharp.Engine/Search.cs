@@ -38,19 +38,26 @@
 // late move pruning, futility/SEE per catture, futility+potatura da history+SEE per mosse quiete,
 // search.cpp:1164-1232) sono ora portati, ricontrollati riga per riga contro la fonte.
 //
-// ⚠️ CAVEAT sullo Step 15: su una posizione con una promozione a donna vincente (verificata contro
-// l'oracolo come d7c8q in commit precedenti) la mossa scelta oscilla fra profondità vicine (6-9→q,
-// 10→r, 12→q) invece di restare stabile come fa l'oracolo reale (d7c8q ad ogni profondità,
-// verificato). Senza questo Step la stabilità torna. Nessun errore di trascrizione trovato dopo
-// due controlli riga per riga (incluso verificare che il "return 0>=threshold" di see_ge sulle
-// mosse non-Normal è il comportamento REALE della fonte per le promozioni, non una nostra
-// semplificazione — position.cpp:1393-1395). Ipotesi più probabile: nella fonte questo Step lavora
-// in coppia con le Singular Extensions (sotto, non ancora portate) come rete di sicurezza contro
-// esattamente questo tipo di instabilità — portarlo da solo può essere legittimamente più
-// instabile a profondità basse. Vedi il commento sul posto in Negamax per il dettaglio.
+// Singular Extensions (Step 16, search.cpp:1234-1303) ora portate: ricerca di verifica sulla
+// STESSA posizione (stesso ply, con la mossa di TT esclusa via nuovo parametro excludedMove su
+// Negamax) per stabilire se quella mossa è "l'unica buona" (da estendere) o no (multi-cut /
+// estensione negativa). Richiede is_shuffling() (search.cpp:153-160) e riuso della valutazione
+// statica già calcolata quando excludedMove è impostata (Step 5, search.cpp:831-832).
 //
-// NON ancora portati (candidati per i prossimi Step): Singular Extensions (vedi caveat sopra —
-// priorità alta), multi-cut, countermove, hindsight depth adjustment da priorReduction, Lazy SMP.
+// Questo ha CONFERMATO l'ipotesi del caveat sullo Step 15 (vedi commit precedente): sulla stessa
+// posizione con promozione a donna vincente, aggiungendo le Singular Extensions la mossa ora
+// resta stabile su d7c8q da depth 8 in poi con cronologia "scaldata" da ricerche precedenti sulla
+// stessa posizione (come avviene naturalmente dentro l'iterative deepening di UNA singola "go
+// depth N", che scalda da profondità 1). Resta un residuo di instabilità a "freddo" — la
+// primissima "go depth N" su questa posizione senza ricerche precedenti può ancora dare d7c8r a
+// depth 9 — non risolto: probabile conseguenza delle parti ancora mancanti (generazione a stadi
+// vera, multi-cut, resto della history in OrderMoves) che nella fonte concorrono tutte alla
+// stabilità fin dalle prime iterazioni.
+//
+// Step 16 include già multi-cut (il ramo "singularScore>=beta" che pota l'intero sottoalbero) ed
+// estensione negativa (il ramo "else if ttValue>=beta||cutNode").
+//
+// NON ancora portati: countermove, hindsight depth adjustment da priorReduction, Lazy SMP.
 
 namespace StockfishSharp.Engine;
 
@@ -348,13 +355,16 @@ public sealed class Search
         return result;
     }
 
-    private int Negamax(Position pos, int depth, int ply, int alpha, int beta, bool cutNode)
+    private int Negamax(Position pos, int depth, int ply, int alpha, int beta, bool cutNode, Move excludedMove = default)
     {
         _nodes++;
         if ((_nodes & 2047) == 0) _ct.ThrowIfCancellationRequested();
 
         bool isPvNode = beta - alpha > 1;
         bool allNode = !isPvNode && !cutNode; // search.cpp:726 — !(PvNode||cutNode)
+        // search.cpp:727 — usato da Step 9 (futility) e Step 16 (Singular Extensions); vedi la
+        // nota di semplificazione in testa al file sull'estimate di punteggio radice.
+        bool seekMate = _rootDepth >= 16 && Math.Abs(_lastCompletedScore) >= 2000;
 
         // Mate distance pruning — esatta, non euristica: da questo ply il miglior esito possibile
         // è dare matto alla prossima mossa, il peggiore essere già sotto matto.
@@ -387,7 +397,7 @@ public sealed class Search
 
         int correctionValue = CorrectionValue(pos, ply);
 
-        if (!isPvNode && probe.Found && probe.Data.Depth >= depth && Values.IsValid(ttScore))
+        if (excludedMove == default && !isPvNode && probe.Found && probe.Data.Depth >= depth && Values.IsValid(ttScore))
         {
             if (probe.Data.Bound == Bound.Exact) return ttScore;
             if (probe.Data.Bound == Bound.Lower && ttScore >= beta) return ttScore;
@@ -403,6 +413,13 @@ public sealed class Search
         if (inCheck)
         {
             staticEval = eval = _staticEvalHistory[ply + StackOffset - 2]; // (ss-2)->staticEval
+        }
+        else if (excludedMove != default)
+        {
+            // Ricerca di verifica delle Singular Extensions (Step 16): stessa posizione, stesso
+            // ply della chiamata esterna — riusa la valutazione statica già calcolata lì invece
+            // di ricalcolarla (search.cpp:831-832).
+            staticEval = eval = unadjustedStaticEval = _staticEvalHistory[ply + StackOffset];
         }
         else
         {
@@ -433,7 +450,6 @@ public sealed class Search
             // Step 9. Futility pruning: nodo figlio — search.cpp:994-1008. La condizione sulla
             // profondità (6 se si "cerca il matto", 19 altrimenti) non va tarata: serve a non
             // troncare la ricerca quando un punteggio già alto suggerisce un matto vicino.
-            bool seekMate = _rootDepth >= 16 && Math.Abs(_lastCompletedScore) >= 2000;
             if (!ttPv && depth < (seekMate ? 6 : 19) && eval >= beta
                 && (!probe.Found || probe.Data.Move == Move.None || ttCapture)
                 && !Values.IsLoss(beta) && !Values.IsWin(eval))
@@ -632,6 +648,54 @@ public sealed class Search
                 }
             }
 
+            // Step 16. Singular Extensions — search.cpp:1234-1303. Verifica se la mossa di TT è
+            // "l'unica buona" ricercando la STESSA posizione (stesso ply, nessuna mossa fatta) con
+            // quella mossa esclusa e una finestra molto stretta sotto il suo valore di TT: se
+            // nessun'altra mossa riesce ad avvicinarsi, la mossa di TT è singolare e va estesa
+            // (stima meglio la linea forzata); se un'altra mossa la eguaglia o supera, si può
+            // potare l'intero sottoalbero (multi-cut) o comunque ridurre la fiducia nella mossa
+            // di TT (estensione negativa). "seekMate" già calcolato sopra (Step 9).
+            int extension = 0;
+            if (ply != 0 && m == probe.Data.Move && excludedMove == default && depth >= 6 + (ttPv ? 1 : 0)
+                && Values.IsValid(ttScore) && !Values.IsDecisive(ttScore) && (probe.Data.Bound & Bound.Lower) != Bound.None
+                && probe.Data.Depth >= depth - 3 && !IsShuffling(m, ply, pos) && !seekMate)
+            {
+                int singularBeta = ttScore - (((59 + (66 * ((ttPv && !isPvNode) ? 1 : 0))) * depth) / 63);
+                int singularDepth = newDepth / 2;
+
+                int singularScore = Negamax(pos, singularDepth, ply, singularBeta - 1, singularBeta, cutNode, excludedMove: m);
+
+                if (singularScore < singularBeta)
+                {
+                    int corrValAdj = Math.Abs(correctionValue) / 198368;
+                    int doubleMargin = -2 + (204 * (isPvNode ? 1 : 0)) - (152 * (ttCapture ? 0 : 1)) - corrValAdj
+                        - (1175 * _movePick.TtMoveHistory / 114178) - (ply > _rootDepth ? 38 : 0);
+                    int tripleMargin = 70 + (279 * (isPvNode ? 1 : 0)) - (188 * (ttCapture ? 0 : 1)) + (81 * (ttPv ? 1 : 0))
+                        - corrValAdj - (ply > _rootDepth ? 43 : 0);
+
+                    extension = 1 + (singularScore < singularBeta - doubleMargin ? 1 : 0) + (singularScore < singularBeta - tripleMargin ? 1 : 0);
+                    depth++;
+                }
+                else if (singularScore >= beta && !Values.IsDecisive(singularScore))
+                {
+                    _movePick.UpdateTtMoveHistory(-421 - (110 * depth));
+
+                    if (!inCheck && singularScore > staticEval)
+                    {
+                        int mcBonus = Math.Clamp((singularScore - staticEval) * singularDepth * 177 / 1024,
+                            -CorrectionHistoryLimit / 4, CorrectionHistoryLimit / 4);
+                        UpdateCorrectionHistory(pos, ply, mcBonus);
+                    }
+
+                    return singularScore;
+                }
+                else if (ttScore >= beta || cutNode)
+                {
+                    extension = -3;
+                }
+            }
+            newDepth += extension;
+
             var st = new StateInfo();
             pos.DoMove(m, st, givesCheck);
 
@@ -814,6 +878,18 @@ public sealed class Search
                 refs[i - 1] = new ContinuationRef(true, _inCheckHistory[idx], _captureStageHistory[idx], _movedPieceHistory[idx], _currentMoveHistory[idx].ToSq);
         }
         return refs;
+    }
+
+    /// <summary><c>is_shuffling</c>, search.cpp:153-160 — rileva mosse che vanno-e-vengono senza
+    /// scopo (limita esplosioni di ricerca in finali con regola delle 50 mosse alta).</summary>
+    private bool IsShuffling(Move m, int ply, Position pos)
+    {
+        if (pos.CaptureStage(m) || pos.Rule50Count < 10) return false;
+        if (pos.PliesFromNull < 6 || ply < 20) return false;
+
+        Move m2 = _currentMoveHistory[ply + StackOffset - 2]; // (ss-2)->currentMove
+        Move m4 = _currentMoveHistory[ply + StackOffset - 4]; // (ss-4)->currentMove
+        return m.FromSq == m2.ToSq && m2.FromSq == m4.ToSq;
     }
 
     private static bool HasNonPawnMaterial(Position pos, Color c)

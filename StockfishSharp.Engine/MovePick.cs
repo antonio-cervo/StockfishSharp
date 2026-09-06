@@ -95,6 +95,14 @@ public sealed class MovePick
     private const int TtMoveHistoryLimit = 8192;
     private short _ttMoveHistory;
 
+    /// <summary>Lettura pubblica di TTMoveHistory — usata dalle Singular Extensions in Search.cs
+    /// (search.cpp:1260-1261).</summary>
+    public int TtMoveHistory => _ttMoveHistory;
+
+    /// <summary>Aggiornamento diretto di TTMoveHistory fuori da <see cref="UpdateStats"/> — usato
+    /// dal multi-cut delle Singular Extensions (search.cpp:1279).</summary>
+    public void UpdateTtMoveHistory(int bonus) => UpdateHistory(ref _ttMoveHistory, bonus, TtMoveHistoryLimit);
+
     // PawnHistory, history.h:146, 38 — DynStats<AtomicStats<i16,8192,PIECE_NB,SQUARE_NB>,
     // PAWN_HISTORY_BASE_SIZE(8192)>, indicizzata [zobrist dei pedoni & 8191][pezzo][casa]. Qui
     // solo il punto di aggiornamento in update_quiet_histories (search.cpp:2056-2057) — gli altri

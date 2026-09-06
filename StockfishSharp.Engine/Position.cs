@@ -319,6 +319,8 @@ public sealed class Position
 
     public int Rule50Count => _st.Rule50;
 
+    public int PliesFromNull => _st.PliesFromNull;
+
     public int NonPawnMaterial(Color c) => _st.NonPawnMaterial[(byte)c];
 
     public int NonPawnMaterial() => NonPawnMaterial(Color.White) + NonPawnMaterial(Color.Black);

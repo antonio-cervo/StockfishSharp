@@ -62,17 +62,26 @@ statica, quindi il suo effetto sul punteggio non è un segno di regressione).
 **Reduction() (formula LMR vera) e Step 15 (potatura a profondità bassa) FATTI**, ricontrollati
 riga per riga contro `search.cpp:1152-1232`/`1885-1888` due volte. `reduction()` è stabile e
 verificato (nessuna regressione, nodi drasticamente ridotti — es. Kiwipete depth 10: da 98585 a
-~9275). Lo **Step 15 ha un caveat aperto**: su una posizione con una promozione a donna vincente
-(verificata contro l'oracolo come `d7c8q` nei commit precedenti) la mossa oscilla fra profondità
-vicine invece di restare stabile come fa l'oracolo reale. Trascrizione ricontrollata riga per riga
-due volte, nessun errore trovato (incluso confermare che `see_ge` per le mosse non-Normal fa
-davvero `return 0>=threshold` nella fonte, non una nostra semplificazione). Ipotesi più probabile:
-lo Step 15 lavora in coppia con le Singular Extensions come rete di sicurezza — portarlo da solo
-può essere legittimamente più instabile a profondità basse. **Singular Extensions è quindi la
-priorità immediata**, sia per fedeltà sia per verificare/risolvere questo caveat.
+~9275). Lo Step 15 aveva mostrato un caveat: su una posizione con una promozione a donna vincente
+(verificata contro l'oracolo come `d7c8q`) la mossa oscillava fra profondità vicine. Ipotesi
+formulata: lavora in coppia con le Singular Extensions come rete di sicurezza.
 
-**Manca ancora**: Singular Extensions (priorità alta, vedi sopra), multi-cut, l'hindsight depth
-adjustment da `priorReduction`, tutta la taratura fine dei margini rimasti, la struttura
+**Singular Extensions FATTE** (Step 16, search.cpp:1234-1303): ricerca di verifica sulla stessa
+posizione/ply con la mossa di TT esclusa (nuovo parametro `excludedMove` su `Negamax`), estensione
+se singolare, multi-cut ed estensione negativa altrimenti. Richiesto `is_shuffling()` e il riuso
+della valutazione statica già calcolata quando `excludedMove` è impostata.
+
+**Ipotesi CONFERMATA**: con le Singular Extensions, la posizione del caveat resta stabile su
+`d7c8q` da depth 8 in poi con cronologia "scaldata" da ricerche precedenti sulla stessa posizione
+(come avviene dentro l'iterative deepening di una singola "go depth N", che scalda da profondità
+1). Resta un residuo di instabilità "a freddo" (prima "go depth N" su una posizione mai vista può
+ancora dare `d7c8r` a depth 9) — non risolto, probabile conseguenza delle parti ancora mancanti
+(generazione a stadi vera, resto della history in `OrderMoves`) che nella fonte concorrono tutte
+alla stabilità fin dalle prime iterazioni. Verificato: 62/62 test, nessuna nuova regressione sulle
+altre posizioni di test.
+
+**Manca ancora**: countermove, l'hindsight depth adjustment da `priorReduction`, tutta la taratura
+fine dei margini rimasti, la struttura
 `Worker`/`RootMove`/`Stack` completa della fonte (qui minimizzata a quanto serve). L'aspiration
 window usa lo score dell'iterazione precedente al posto della media mobile pesata per "effort"
 della fonte (richiede bookkeeping per-root-move non ancora presente). `followPV` (segue la riga
