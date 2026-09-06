@@ -324,10 +324,28 @@ in sequenza). 77/77 test totali; `bench 16 1 8` con `git stash` prima/dopo — n
 refactor di RemovePiece/PutPiece/MovePiece/SwapPiece per accettare il parametro opzionale non
 cambia alcun comportamento quando non usato, come da progetto).
 
-**Manca ancora**: `pos_is_ok`, `material_key_is_ok`, `flip`, `dtz_is_dtm` (debug/tablebase) —
-minori, non prerequisiti di nulla. Il vero prerequisito di N9 era `DirtyThreats`, ora fatto: N9
-(aggiornamento incrementale dell'accumulatore, che consuma sia questo che `DirtyPiece`/
-`DirtyPawnPairs`, ancora da aggiungere) può procedere.
+**`DirtyPiece`/`DirtyPawnPairs` FATTI** (types.h:296-306,347-350): a differenza di `DirtyThreats`
+sono puramente descrittivi (nessun calcolo, solo popolare campi con valori già noti in `DoMove`) —
+`DirtyPiece.cs` (classe mutabile, popolata in più punti sparsi di `DoMove`/`DoCastling` esattamente
+come la fonte fa con il puntatore `dp`) e `DirtyPawnPairs.cs` (bitboard pedoni prima/dopo, per la
+feature Pp3Wide). Stessi parametri opzionali (`null` di default) di `DirtyThreats`.
+
+Verificato in modo indipendente: nuovo `DirtyPieceTests.cs` — applicare i campi di `DirtyPiece` (nel
+loro significato dichiarato: rimuovi `RemovePc` da `RemoveSq`, sposta `Pc` da `From` a `To`,
+aggiungi `AddPc` su `AddSq`) a una copia della board "prima" di ogni mossa legale deve produrre
+esattamente la board "dopo" osservata direttamente, su 4 posizioni (mosse/catture/arrocco/en
+passant/promozioni/promozione con cattura); `DirtyPawnPairs.Before/After` confrontati contro le
+bitboard pedoni lette direttamente. 81/81 test totali; `bench 16 1 8` — nodi identici (nessuna
+regressione).
+
+**Tutti e 3 i meccanismi "dirty" della fonte sono ora presenti e verificati indipendentemente.**
+Manca solo chi li CONSUME: N9, l'aggiornamento incrementale vero dell'accumulatore NNUE — un pezzo
+a sé, che tocca `NnueAccumulator.cs` per tutte e 3 le feature (HalfKA via `DirtyPiece`, FullThreats
+via `DirtyThreats`, Pp3Wide via `DirtyPawnPairs`), oggi ancora ricalcolato da zero a ogni
+valutazione (corretto, verificato bit-esatto contro l'oracolo N1-N8 — solo non incrementale).
+
+**Manca ancora** (minore, non prerequisito di nulla): `pos_is_ok`, `material_key_is_ok`, `flip`,
+`dtz_is_dtm` (debug/tablebase).
 
 ---
 

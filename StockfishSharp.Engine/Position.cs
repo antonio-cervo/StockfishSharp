@@ -3,9 +3,10 @@
 //
 // Semplificazioni deliberate rispetto alla fonte, tutte per rimandare a fasi successive del
 // porting (vedi docs/porting-plan.md), non per correttezza dell'algoritmo di base:
-// - NNUE (DirtyPiece/DirtyThreats/scratchDirties, i parametri "dts"/"dp" di put_piece/remove_piece/
-//   move_piece/swap_piece/do_castling): del tutto assenti, non solo disattivati — la fase NNUE li
-//   aggiungerà quando servirà l'aggiornamento incrementale delle feature.
+// - NNUE: i tre meccanismi "dirty" (DirtyThreat.cs/DirtyPiece.cs/DirtyPawnPairs.cs) sono ora
+//   tracciati da DoMove/DoCastling/PutPiece/RemovePiece/MovePiece/SwapPiece (parametri opzionali,
+//   null di default — nessun costo per i chiamanti esistenti, che non li passano ancora). Manca
+//   ancora chi li CONSUMA: l'aggiornamento incrementale vero dell'accumulatore NNUE (N9).
 // - Transposition table / SharedHistories (prefetch in do_move): assenti — servono solo a
 //   prefetchare la cache prima che la ricerca ne abbia bisogno, non alla correttezza.
 // - Static Exchange Evaluation (see_ge), is_draw/is_repetition/upcoming_repetition (cuckoo table),
@@ -890,10 +891,13 @@ public sealed class Position
 
     /// <summary><paramref name="dirtyThreats"/> (facoltativo, null di default) raccoglie i
     /// cambiamenti di minaccia FullThreats causati da questa mossa — vedi UpdatePieceThreats.
-    /// Nessun costo per i chiamanti esistenti (che non lo passano): resta il comportamento
-    /// originale, l'unico ramo condizionale aggiunto è dentro RemovePiece/PutPiece/MovePiece/
-    /// SwapPiece stessi.</summary>
-    public void DoMove(Move m, StateInfo newSt, bool givesCheck, List<DirtyThreat>? dirtyThreats = null)
+    /// <paramref name="dirtyPiece"/> (DirtyPiece, types.h:296-306) e <paramref
+    /// name="dirtyPawnPairs"/> (DirtyPawnPairs, types.h:347-350) sono gli altri due meccanismi
+    /// "dirty" della fonte usati dall'accumulatore NNUE incrementale (N9, non ancora portato) per
+    /// le feature HalfKA e Pp3Wide rispettivamente. Nessun costo per i chiamanti esistenti (che
+    /// non li passano): restano il comportamento originale.</summary>
+    public void DoMove(Move m, StateInfo newSt, bool givesCheck, List<DirtyThreat>? dirtyThreats = null,
+        DirtyPiece? dirtyPiece = null, DirtyPawnPairs? dirtyPawnPairs = null)
     {
         ulong k = _st.Key ^ Zobrist.Side;
 
@@ -905,6 +909,12 @@ public sealed class Position
         _st.Rule50++;
         _st.PliesFromNull++;
 
+        if (dirtyPawnPairs != null)
+        {
+            dirtyPawnPairs.Before[(byte)Color.White] = Pieces(Color.White, PieceType.Pawn);
+            dirtyPawnPairs.Before[(byte)Color.Black] = Pieces(Color.Black, PieceType.Pawn);
+        }
+
         Color us = _sideToMove;
         Color them = Types.Opposite(us);
         Square from = m.FromSq;
@@ -912,9 +922,17 @@ public sealed class Position
         Piece pc = PieceOn(from);
         Piece captured = m.TypeOf == MoveType.EnPassant ? Types.MakePiece(them, PieceType.Pawn) : PieceOn(to);
 
+        if (dirtyPiece != null)
+        {
+            dirtyPiece.Pc = pc;
+            dirtyPiece.From = from;
+            dirtyPiece.To = to;
+            dirtyPiece.AddSq = Square.None;
+        }
+
         if (m.TypeOf == MoveType.Castling)
         {
-            DoCastling(true, us, from, ref to, out Square rfrom, out Square rto, dirtyThreats);
+            DoCastling(true, us, from, ref to, out Square rfrom, out Square rto, dirtyThreats, dirtyPiece);
             k ^= Zobrist.Psq[(byte)captured, (byte)rfrom] ^ Zobrist.Psq[(byte)captured, (byte)rto];
             _st.NonPawnKey[(byte)us] ^= Zobrist.Psq[(byte)captured, (byte)rfrom] ^ Zobrist.Psq[(byte)captured, (byte)rto];
             captured = Piece.None;
@@ -941,10 +959,20 @@ public sealed class Position
                     _st.MinorPieceKey ^= Zobrist.Psq[(byte)captured, (byte)capsq];
             }
 
+            if (dirtyPiece != null)
+            {
+                dirtyPiece.RemovePc = captured;
+                dirtyPiece.RemoveSq = capsq;
+            }
+
             k ^= Zobrist.Psq[(byte)captured, (byte)capsq];
             _st.MaterialKey ^= Zobrist.Psq[(byte)captured, 8 + _pieceCount[(byte)captured] - (m.TypeOf != MoveType.EnPassant ? 1 : 0)];
 
             _st.Rule50 = 0;
+        }
+        else if (dirtyPiece != null)
+        {
+            dirtyPiece.RemoveSq = Square.None;
         }
 
         k ^= Zobrist.Psq[(byte)pc, (byte)from] ^ Zobrist.Psq[(byte)pc, (byte)to];
@@ -983,6 +1011,13 @@ public sealed class Position
             {
                 PieceType pt = m.PromotionType;
                 Piece promotion = Types.MakePiece(us, pt);
+
+                if (dirtyPiece != null)
+                {
+                    dirtyPiece.AddPc = promotion;
+                    dirtyPiece.AddSq = to;
+                    dirtyPiece.To = Square.None;
+                }
 
                 k ^= Zobrist.Psq[(byte)promotion, (byte)to];
                 _st.MaterialKey ^= Zobrist.Psq[(byte)promotion, 8 + _pieceCount[(byte)promotion]]
@@ -1051,6 +1086,12 @@ public sealed class Position
                     break;
                 }
             }
+        }
+
+        if (dirtyPawnPairs != null)
+        {
+            dirtyPawnPairs.After[(byte)Color.White] = Pieces(Color.White, PieceType.Pawn);
+            dirtyPawnPairs.After[(byte)Color.Black] = Pieces(Color.Black, PieceType.Pawn);
         }
     }
 
@@ -1215,12 +1256,23 @@ public sealed class Position
     /// <summary>Esegue/disfa un arrocco — <c>Position::do_castling&lt;Do&gt;</c>,
     /// position.cpp:1311-1339. Rimuove entrambi i pezzi prima di riposizionarli (le case possono
     /// sovrapporsi in Chess960, es. la torre già sulla casa di arrivo del re).</summary>
-    private void DoCastling(bool doIt, Color us, Square from, ref Square to, out Square rfrom, out Square rto, List<DirtyThreat>? dts = null)
+    private void DoCastling(bool doIt, Color us, Square from, ref Square to, out Square rfrom, out Square rto,
+        List<DirtyThreat>? dts = null, DirtyPiece? dp = null)
     {
         bool kingSide = to > from;
         rfrom = to; // l'arrocco è codificato come "il re cattura la propria torre"
         rto = Types.RelativeSquare(us, kingSide ? Square.F1 : Square.D1);
         to = Types.RelativeSquare(us, kingSide ? Square.G1 : Square.C1);
+
+        // dp è popolato solo per "fare" la mossa (doIt=true), mai per "disfarla" — position.cpp:
+        // 1324 "assert(!Do || dp)".
+        if (doIt && dp != null)
+        {
+            dp.To = to;
+            dp.RemovePc = dp.AddPc = Types.MakePiece(us, PieceType.Rook);
+            dp.RemoveSq = rfrom;
+            dp.AddSq = rto;
+        }
 
         // Rimuove entrambi i pezzi prima di rimetterli — in Chess960 le case potrebbero
         // sovrapporsi (position.cpp:1334 "Remove both pieces first since squares could overlap").
