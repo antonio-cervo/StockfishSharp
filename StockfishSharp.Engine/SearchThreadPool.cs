@@ -139,6 +139,20 @@ public sealed class SearchThreadPool
         // throttling del pool (~1 nuovo thread/secondo) mette in coda i thread di ricerca
         // successivi dietro quelli precedenti non ancora rilasciati, rallentando progressivamente
         // ogni chiamata — LongRunning chiede invece un vero System.Threading.Thread dedicato.
+        // search.cpp:562-566 — SOLO il thread principale legge e azzera bestMoveChanges di OGNI
+        // thread del pool (compreso se stesso), non ciascun thread il proprio: se ogni Search
+        // azzerasse il proprio contatore per conto suo, il thread principale leggerebbe sempre 0
+        // dagli altri (già azzerati) invece del loro vero accumulo — bug reale osservato dal vivo
+        // sul bot (2026-09-06): con 8 thread indipendenti la volatilità del solo thread principale
+        // (non mediata sugli altri 7) poteva gonfiare "bestMoveInstability" molto più del dovuto,
+        // facendo impiegare tempi spropositati su mosse in posizioni genuinamente instabili.
+        ulong SumAndResetBestMoveChangesAcrossPool()
+        {
+            ulong total = 0;
+            foreach (var s in _searches) total += s.PeekAndResetBestMoveChanges();
+            return total;
+        }
+
         var results = new SearchResult?[_searches.Count];
         var tasks = new Task[_searches.Count];
         for (int i = 0; i < _searches.Count; i++)
@@ -149,7 +163,8 @@ public sealed class SearchThreadPool
                 // Il thread principale rispetta il limite di profondità richiesto da UCI.
                 tasks[idx] = Task.Factory.StartNew(() =>
                 {
-                    results[idx] = _searches[idx].Search_(positions[idx], maxDepth, timeLimit, stopCt, callNewSearch: false, optimumMs: optimumMs);
+                    results[idx] = _searches[idx].Search_(positions[idx], maxDepth, timeLimit, stopCt, callNewSearch: false, optimumMs: optimumMs,
+                        crossThreadBestMoveChanges: SumAndResetBestMoveChangesAcrossPool, threadCountForInstability: _searches.Count);
                     stopCts.Cancel();
                 }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             }

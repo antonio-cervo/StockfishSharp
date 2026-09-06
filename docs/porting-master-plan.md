@@ -824,6 +824,47 @@ di matto/stallo; verifica manuale UCI su posizioni fuori libro (matto in 1 con t
 promozione, mediogioco con arrocco già avvenuto) — bestmove e PV legali e coerenti col materiale/
 tattica della posizione.
 
+### Fix: `bestMoveChanges` self-azzerato da ogni thread invece che mediato dal principale — ✅ 2026-09-06
+
+**Bug reale trovato dal vivo lo stesso giorno**, subito dopo il deploy della gestione tempo
+adattiva sopra: il thread principale calcolava `bestMoveInstability` (search.cpp:586,
+`1.077 + 2.229 * totBestMoveChanges / threads.size()`) usando SOLO il proprio
+`_bestMoveChanges`, mentre `Search_` faceva `totBestMoveChanges += _bestMoveChanges;
+_bestMoveChanges = 0;` **incondizionatamente in OGNI thread del pool**, non solo nel principale —
+quindi anche se avessi provato a sommare i valori degli altri thread, li avrei trovati già
+azzerati da loro stessi. Sintomo osservato: una mossa (un arrocco, mediogioco, niente di
+tatticamente urgente) ha impiegato 111 secondi/73.7M nodi/depth 21 — molto più del normale — con
+l'ipotesi confermata dall'utente stesso ("ma non avevi portato fedelmente la gestione del
+tempo?").
+
+**Causa**: la fonte reale (search.cpp:562-566) fa fare SOLO al thread principale un ciclo
+`for (auto&&th:threads) {totBestMoveChanges+=th->worker->bestMoveChanges;
+th->worker->bestMoveChanges=0;}` che legge E azzera il contatore di OGNI thread (compreso se
+stesso) — un thread helper non tocca mai il proprio. Nella prima versione qui, invece, ogni
+thread (compresi gli helper, che non usano mai `optimumMs`) auto-azzerava il proprio contatore ad
+ogni iterazione: il valore del thread principale non era mai una vera media su 8 thread, solo la
+propria volatilità individuale — che non riduce il rumore come fa la media reale, causando picchi
+occasionali di tempo eccessivo su posizioni genuinamente instabili (l'evento non era un bug di
+per sé — un cambio di mossa migliore vero — ma la sua ampiezza, sì).
+
+**Fix**: nuovo `Search.PeekAndResetBestMoveChanges()` (legge+azzera, chiamabile dall'esterno);
+`Search_` non auto-azzera più incondizionatamente — lo fa solo dentro
+`if (optimumMs < NoBound)`, e solo tramite un nuovo delegato opzionale
+`crossThreadBestMoveChanges` (più `threadCountForInstability`). `SearchThreadPool` costruisce
+questo delegato (`SumAndResetBestMoveChangesAcrossPool`, chiama `PeekAndResetBestMoveChanges` su
+OGNI `Search` del pool, se stesso incluso) e lo passa SOLO al thread principale — gli helper non
+auto-azzerano mai il proprio contatore, accumulano finché il principale non li legge, esattamente
+come la fonte. La divisione per `threads.size()` è applicata al momento dell'accumulo (matematicamente
+equivalente ad applicarla al momento dell'uso, dato che il numero di thread è costante per tutta la
+ricerca). Il caso standalone (nessun pool, delegato non fornito) resta equivalente al caso limite
+`threads.size()==1` della fonte.
+
+**Verificato**: 109/109 test; bench a 8 thread (51 posizioni) e `go wtime/btime` a 8 thread su una
+posizione fuori libro, nessuna eccezione/deadlock nella lettura cross-thread. Non riprodotta la
+stessa identica posizione volatile della partita dal vivo (avrebbe richiesto fermare il bot a
+metà di una partita che stava vincendo) — la correttezza qui è verificata per costruzione/
+equivalenza matematica con la fonte, non per confronto diretto di nodi come altrove nel progetto.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:

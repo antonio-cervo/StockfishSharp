@@ -173,11 +173,25 @@ public sealed class Search
     private int _selDepth;
 
     /// <summary><c>Search::Worker::bestMoveChanges</c>, search.h — quante volte la mossa migliore
-    /// alla radice è cambiata in questa iterazione (search.cpp:1498-1499). Accumulato fedelmente
-    /// ma non ancora consumato: la gestione tempo adattiva reale che lo legge (search.cpp:562-566,
-    /// 586) resta un pezzo separato non ancora portato — qui il tempo è gestito da un
-    /// CancellationToken esterno (vedi Program.cs/ComputeBudget).</summary>
+    /// alla radice è cambiata in questa iterazione (search.cpp:1498-1499). Consumato dalla
+    /// gestione tempo adattiva (search.cpp:562-566,586) — MAI auto-azzerato dentro Negamax/
+    /// Search_: nella fonte solo il thread principale lo azzera, per OGNI thread del pool
+    /// (compreso se stesso), dentro il ciclo "for (auto&&th:threads)" di search.cpp:562-566 — un
+    /// thread helper accumula qui senza mai leggersi/azzerarsi da solo. Vedi
+    /// <see cref="PeekAndResetBestMoveChanges"/>.</summary>
     private ulong _bestMoveChanges;
+
+    /// <summary>Legge e azzera <see cref="_bestMoveChanges"/> — usato da <see
+    /// cref="SearchThreadPool"/> per replicare il ciclo "for (auto&&th:threads)" di
+    /// search.cpp:562-566 dal thread principale su OGNI thread del pool (compreso se stesso),
+    /// invece di lasciare che ciascun thread azzeri solo il proprio contatore (che romperebbe la
+    /// sincronizzazione: il thread principale leggerebbe sempre 0 dagli altri thread).</summary>
+    internal ulong PeekAndResetBestMoveChanges()
+    {
+        ulong v = _bestMoveChanges;
+        _bestMoveChanges = 0;
+        return v;
+    }
 
     /// <summary>Equivalente di <c>Search::Worker::tbConfig</c> (search.cpp:922-973, Step 7) — non
     /// più impostato dall'esterno: ricalcolato da <see cref="Tablebase.RankRootMoves"/> a ogni
@@ -525,7 +539,16 @@ public sealed class Search
     // assoluto (equivalente di tm.maximum() quando la gestione tempo è attiva, o il budget fisso
     // altrimenti) — la ricerca non supera MAI questo limite, la formula sotto può solo fermarsi
     // PRIMA.
-    public SearchResult Search_(Position pos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default, bool callNewSearch = true, long optimumMs = NoBound)
+    //
+    // crossThreadBestMoveChanges/threadCountForInstability: replicano "for(auto&&th:threads)
+    // {totBestMoveChanges+=th->worker->bestMoveChanges; th->worker->bestMoveChanges=0;}" seguito
+    // da "totBestMoveChanges/threads.size()" (search.cpp:562-566,586) — SearchThreadPool passa qui
+    // un delegato che somma e azzera bestMoveChanges di OGNI thread del pool (vedi
+    // PeekAndResetBestMoveChanges) e il conteggio dei thread; senza pool (default, standalone),
+    // legge/azzera solo se stesso e divide per 1 — matematicamente lo stesso caso limite
+    // "threads.size()==1" della fonte.
+    public SearchResult Search_(Position pos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default, bool callNewSearch = true, long optimumMs = NoBound,
+        Func<ulong>? crossThreadBestMoveChanges = null, int threadCountForInstability = 1)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeLimit);
@@ -690,19 +713,25 @@ public sealed class Search
                     lastBestMoveDepth = depth;
                 lastBestMovePv = bestRootMove.Pv;
 
-                // search.cpp:561-566 — accumula quante volte la mossa migliore è cambiata in
-                // questa iterazione (sommato su tutti i thread nella fonte; qui solo il thread che
-                // sta eseguendo, dato che gli altri thread del pool girano indipendentemente e non
-                // consultano mai questo valore comunque — vedi SearchThreadPool).
-                totBestMoveChanges += _bestMoveChanges;
-                _bestMoveChanges = 0;
-
                 // search.cpp:568-614 — gestione tempo adattiva reale: SOLO quando optimumMs è
                 // stato fornito (equivalente di limits.use_time_management()); "ponder"/
                 // "stopOnPonderhit" non sono portati (il protocollo ponder non è gestito da
                 // Program.cs), quindi qui il ramo "ferma la ricerca" è sempre quello percorso.
+                //
+                // Il ciclo "for(auto&&th:threads)" della fonte (search.cpp:562-566) gira SEMPRE
+                // per il thread principale, non solo quando use_time_management è attivo — ma dato
+                // che senza gestione tempo totBestMoveChanges non viene mai letto, per noi non
+                // azzerare _bestMoveChanges in quel caso è innocuo (resta comunque azzerato
+                // all'inizio del prossimo "go"): innestare tutto qui dentro semplifica senza
+                // cambiare comportamento osservabile.
                 if (optimumMs < NoBound)
                 {
+                    // search.cpp:561-566 — accumula quante volte la mossa migliore è cambiata in
+                    // questa iterazione, mediata su tutti i thread del pool (vedi
+                    // crossThreadBestMoveChanges sopra).
+                    ulong changesThisRead = crossThreadBestMoveChanges?.Invoke() ?? PeekAndResetBestMoveChanges();
+                    totBestMoveChanges += (double)changesThisRead / Math.Max(1, threadCountForInstability);
+
                     ulong nodesEffort = bestRootMove.Effort * 100000UL / (ulong)Math.Max(1L, _nodes);
 
                     double fallingEval = (11.48 + (2.30 * (_bestPreviousAverageScore - bestValue))
