@@ -80,6 +80,8 @@ public sealed class Position
 
     public Square CastlingRookSquareOf(CastlingRights cr) => _castlingRookSquare[(int)cr];
 
+    public CastlingRights CastlingRightsMaskOf(Square s) => _castlingRightsMask[(byte)s];
+
     // --- Scacco — position.h:122-134 ---
 
     public ulong Checkers() => _st.CheckersBB;
@@ -1280,5 +1282,112 @@ public sealed class Position
         RemovePiece(doIt ? rfrom : rto, dts);
         PutPiece(Types.MakePiece(us, PieceType.King), doIt ? to : from, dts);
         PutPiece(Types.MakePiece(us, PieceType.Rook), doIt ? rto : rfrom, dts);
+    }
+
+    // --- Debug/utilità — position.cpp:1573-1670 (A5) ---
+
+    /// <summary>Specchia la posizione (scambia i colori, ruota la scacchiera di 180°) —
+    /// <c>Position::flip</c>, position.cpp:1573-1603. Porting fedele: opera sulla STRINGA FEN
+    /// (non sulle bitboard interne) esattamente come la fonte — inverte l'ordine delle traverse,
+    /// poi inverte maiuscole/minuscole su pezzi+colore+arrocco in un solo passaggio (lo stesso
+    /// trucco della fonte: scrive il nuovo colore in maiuscolo apposta, sapendo che verrà
+    /// invertito in minuscolo da quel passaggio), infine specchia la traversa della casa
+    /// en-passant (3↔6) senza toccarne la colonna.</summary>
+    public void Flip()
+    {
+        string[] parts = Fen().Split(' ');
+        string[] ranks = parts[0].Split('/'); // ranks[0]=traversa 8 (prima nella FEN) .. ranks[7]=traversa 1
+
+        var sb = new StringBuilder();
+        for (int i = ranks.Length - 1; i >= 0; i--)
+        {
+            if (sb.Length > 0) sb.Append('/');
+            sb.Append(ranks[i]);
+        }
+        sb.Append(' ').Append(parts[1] == "w" ? 'B' : 'W').Append(' ').Append(parts[2]).Append(' ');
+
+        var toggled = new char[sb.Length];
+        for (int i = 0; i < sb.Length; i++)
+        {
+            char c = sb[i];
+            toggled[i] = char.IsLower(c) ? char.ToUpperInvariant(c) : char.ToLowerInvariant(c);
+        }
+
+        string ep = parts[3];
+        if (ep != "-") ep = ep[0] + (ep[1] == '3' ? "6" : "3");
+
+        string newFen = new string(toggled) + ep + " " + parts[4] + " " + parts[5];
+        Set(newFen, _chess960);
+    }
+
+    /// <summary><c>Position::material_key_is_ok</c>, position.cpp:1606 — verifica che la chiave
+    /// materiale incrementale combaci con un ricalcolo indipendente da zero.</summary>
+    public bool MaterialKeyIsOk() => ComputeMaterialKey() == _st.MaterialKey;
+
+    /// <summary><c>Position::pos_is_ok</c>, position.cpp:1609-1668 — controlli di coerenza interna
+    /// per il debug (nella fonte fanno <c>assert(0, "...")</c>; qui restituisce semplicemente
+    /// <c>false</c> al primo controllo fallito, senza distinguere QUALE). Mai chiamata dalla
+    /// logica di ricerca/perft, solo un helper diagnostico per il comando UCI "d"/i test.</summary>
+    public bool PosIsOk()
+    {
+        Color us = _sideToMove;
+        Color them = Types.Opposite(us);
+
+        if (PieceOn(SquareOf(PieceType.King, Color.White)) != Piece.WKing) return false;
+        if (PieceOn(SquareOf(PieceType.King, Color.Black)) != Piece.BKing) return false;
+        if (EpSquare != Square.None && Types.RelativeRank(us, EpSquare) != Rank.Rank6) return false;
+
+        if (Count(PieceType.King, Color.White) != 1 || Count(PieceType.King, Color.Black) != 1) return false;
+        if (AttackersToExist(SquareOf(PieceType.King, them), Pieces(), us)) return false;
+
+        if ((Pieces(PieceType.Pawn) & (Bitboards.Rank1BB | Bitboards.Rank8BB)) != 0) return false;
+        if (Count(PieceType.Pawn, Color.White) > 8 || Count(PieceType.Pawn, Color.Black) > 8) return false;
+
+        if (EpSquare != Square.None)
+        {
+            Square ksq = SquareOf(PieceType.King, us);
+            ulong captured = Bitboards.SquareBB(Types.AddDirection(EpSquare, Types.PawnPush(them))) & Pieces(them, PieceType.Pawn);
+            ulong pawns = Attacks.PawnAttacksBb(EpSquare, them) & Pieces(us, PieceType.Pawn);
+            ulong potentialCheckers = Pieces(them) ^ captured;
+
+            if (captured == 0 || pawns == 0) return false;
+
+            ulong occAfterLsb = Pieces() ^ captured ^ Bitboards.SquareBB(EpSquare) ^ Bitboards.SquareBB(Bitboards.Lsb(pawns));
+            ulong occAfterMsb = Pieces() ^ captured ^ Bitboards.SquareBB(EpSquare) ^ Bitboards.SquareBB(Bitboards.Msb(pawns));
+            if ((AttackersTo(ksq, occAfterLsb) & potentialCheckers) != 0 && (AttackersTo(ksq, occAfterMsb) & potentialCheckers) != 0)
+                return false;
+        }
+
+        if ((Pieces(Color.White) & Pieces(Color.Black)) != 0) return false;
+        if ((Pieces(Color.White) | Pieces(Color.Black)) != Pieces()) return false;
+        if (Bitboards.PopCount(Pieces(Color.White)) > 16 || Bitboards.PopCount(Pieces(Color.Black)) > 16) return false;
+
+        for (var p1 = PieceType.Pawn; p1 <= PieceType.King; p1++)
+            for (var p2 = PieceType.Pawn; p2 <= PieceType.King; p2++)
+                if (p1 != p2 && (Pieces(p1) & Pieces(p2)) != 0) return false;
+
+        foreach (var pc in AllPieces.Values)
+        {
+            if (_pieceCount[(byte)pc] != Bitboards.PopCount(Pieces(Types.ColorOf(pc), Types.TypeOf(pc)))) return false;
+
+            int boardCount = 0;
+            for (var s = Square.A1; s <= Square.H8; s++)
+                if (_board[(byte)s] == pc) boardCount++;
+            if (_pieceCount[(byte)pc] != boardCount) return false;
+        }
+
+        foreach (var c in new[] { Color.White, Color.Black })
+        {
+            foreach (var cr in new[] { Types.CastlingFor(c, CastlingRights.KingSide), Types.CastlingFor(c, CastlingRights.QueenSide) })
+            {
+                if (!CanCastle(cr)) continue;
+
+                if (PieceOn(CastlingRookSquareOf(cr)) != Types.MakePiece(c, PieceType.Rook)) return false;
+                if (CastlingRightsMaskOf(CastlingRookSquareOf(cr)) != cr) return false;
+                if ((CastlingRightsMaskOf(SquareOf(PieceType.King, c)) & cr) != cr) return false;
+            }
+        }
+
+        return true;
     }
 }

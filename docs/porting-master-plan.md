@@ -276,15 +276,42 @@ nuovo `HandleBench` controllavano solo `.HasValue`, quindi stampavano `bestmove 
 ha `from=to=A1`) invece di `bestmove 0000` — una mossa ILLEGALE che un client UCI reale (GUI,
 lichess-bot) avrebbe provato a giocare a fine partita. Corretto in entrambi i punti.
 
-**Manca ancora**: infrastruttura opzioni generica (`Option`/`OptionsMap`), `setoption` completo
-oltre a `Hash`/`UCI_Chess960`, `MultiPV`, `UCI_LimitStrength`/`UCI_Elo`, `UCI_ShowWDL`, conversione
-punteggi WDL, `Skill Level`, `d`, `flip`, `compiler`, `export_net`, `speedtest`
-(`setup_benchmark`, benchmark.cpp:449-528, un secondo comando di benchmark su partite reali per lo
-SPRT — non essenziale, lista `BenchmarkPositions` enorme non copiata).
-
-Verificato: 69/69 test; `bench 16 1 6` a mano completa le 51 posizioni senza errori (incluse le 2
+**Manca ancora**: `bench 16 1 6` a mano completa le 51 posizioni senza errori (incluse le 2
 Chess960), riepilogo coerente; `go` normale (non-bench) ancora corretto dopo la correzione del bug
 `a1a1`.
+
+**Comandi di debug `d`/`eval`/`flip`/`compiler`/`--help`/`help`/`--license`/`license`/`go perft N`
+FATTI** (uci.cpp:147-183,224-225): `d` porta `operator<<(ostream&, const Position&)`
+(position.cpp:67-103, senza la parte tablebase WDL/DTZ — Flow C2 non ancora portato) — griglia
+ASCII, FEN, chiave esadecimale, checkers. `eval` mostra la valutazione statica corrente. `compiler`
+non ha un vero compilatore C++ da interrogare: stampa l'equivalente runtime .NET (versione SDK, OS,
+architettura). `go perft N` usa `Perft.Run` già esistente (verificato: `perft(4)` dalla posizione
+iniziale = 197.281, il valore standard pubblicato).
+
+`flip` porta `Position::flip` (position.cpp:1573-1603) in `Position.cs` — porting fedele
+inconsueto: opera sulla STRINGA FEN (non sulle bitboard interne) esattamente come la fonte, con lo
+stesso trucco (scrive il nuovo colore in maiuscolo apposta, sapendo che un passaggio successivo di
+toggle-case su pezzi+colore+arrocco lo trasforma in minuscolo). Insieme, anche `Position.PosIsOk`
+(position.cpp:1609-1668, controlli di coerenza interna per debug — qui restituisce `bool` invece di
+`assert`) e `Position.MaterialKeyIsOk` (banale, ricalcolo indipendente della chiave materiale).
+Questi ultimi due chiudono **A5 al 100%** (`pos_is_ok`/`material_key_is_ok`/`flip` erano l'unica
+voce rimasta).
+
+Verificato in modo indipendente (nuovo `PositionUtilTests.cs`): `PosIsOk`/`MaterialKeyIsOk` veri su
+4 posizioni standard; `Flip` è involutivo (specchiare due volte torna esattamente alla FEN
+originale, verificato su 4 posizioni incluso un arrocco/promozione disponibili); una posizione
+specchiata ha ESATTAMENTE lo stesso numero di mosse legali dell'originale (perft prima/dopo `Flip`
+identico, su 2 posizioni) — proprietà scacchistica indipendente dall'implementazione, verificata
+col motore di perft già validato contro i valori pubblicati. 95/95 test totali (85 precedenti + 10
+nuovi); verificato a mano via UCI: `d`/`eval`/`flip`/`compiler`/`go perft 4` tutti corretti in
+sequenza sulla stessa sessione.
+
+**Manca ancora** (A4, meno urgente — completezza di protocollo, non forza di gioco):
+infrastruttura opzioni generica (`Option`/`OptionsMap`), `setoption` completo oltre a
+`Hash`/`UCI_Chess960`, `MultiPV`, `UCI_LimitStrength`/`UCI_Elo`, `UCI_ShowWDL`, conversione
+punteggi WDL, `Skill Level`, `export_net`, `speedtest` (`setup_benchmark`, benchmark.cpp:449-528,
+un secondo comando di benchmark su partite reali per lo SPRT — non essenziale, lista
+`BenchmarkPositions` enorme non copiata), `ponder`/`ponderhit` (pondering vero).
 
 ### A5 — Parti non lette di `position.cpp` (~700 righe) — 🟡 IN CORSO
 

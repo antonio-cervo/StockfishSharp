@@ -180,6 +180,38 @@ while (Console.ReadLine() is { } line)
             HandleBench(tokens);
             break;
 
+        // Comandi non-UCI di debug, uci.cpp:147-183 — "Add custom non-UCI commands, mainly for
+        // debugging purposes".
+        case "d":
+            Console.WriteLine(Visualize(position));
+            break;
+
+        case "eval":
+            Console.WriteLine($"info string static eval (side to move): {Evaluate.StaticEval(position)}");
+            break;
+
+        case "flip":
+            StopSearch();
+            position.Flip();
+            break;
+
+        case "compiler":
+            Console.WriteLine(CompilerInfo());
+            break;
+
+        case "--help":
+        case "help":
+        case "--license":
+        case "license":
+            Console.WriteLine();
+            Console.WriteLine("Stockfish is a powerful chess engine for playing and analyzing.");
+            Console.WriteLine("It is released as free software licensed under the GNU GPLv3 License.");
+            Console.WriteLine("Stockfish is normally used with a graphical user interface (GUI) and implements");
+            Console.WriteLine("the Universal Chess Interface (UCI) protocol to communicate with a GUI, an API, etc.");
+            Console.WriteLine("For any further information, visit https://github.com/official-stockfish/Stockfish#readme");
+            Console.WriteLine("or read the corresponding README.md and Copying.txt files distributed along with this program.");
+            break;
+
         case "quit":
             StopSearch();
             return;
@@ -281,6 +313,21 @@ Square ParseSquare(string s)
 
 void HandleGo(string[] toks)
 {
+    long? GetLong(string key)
+    {
+        int i = Array.IndexOf(toks, key);
+        return i >= 0 && i + 1 < toks.Length && long.TryParse(toks[i + 1], out long v) ? v : null;
+    }
+
+    // "go perft N", uci.cpp:224-225 + Engine::perft — bypassa sia il libro che la ricerca vera.
+    var perftDepth = GetLong("perft");
+    if (perftDepth.HasValue)
+    {
+        long nodes = Perft.Run(position, (int)perftDepth.Value);
+        Console.WriteLine($"\nNodes searched: {nodes}\n");
+        return;
+    }
+
     // Libro di aperture (Flow D1): se la posizione è coperta, risponde subito senza avviare la
     // ricerca vera — stessa logica di ACMyChess.Uci/Program.cs.
     if (position.GamePly < BookMaxPlies)
@@ -291,12 +338,6 @@ void HandleGo(string[] toks)
             Console.WriteLine($"bestmove {MoveToUci(bookMove.Value)}");
             return;
         }
-    }
-
-    long? GetLong(string key)
-    {
-        int i = Array.IndexOf(toks, key);
-        return i >= 0 && i + 1 < toks.Length && long.TryParse(toks[i + 1], out long v) ? v : null;
     }
 
     var movetime = GetLong("movetime");
@@ -440,3 +481,38 @@ string MoveToUci(Move m)
 }
 
 string SquareToString(Square s) => $"{(char)('a' + (byte)Types.FileOf(s))}{(char)('1' + (byte)Types.RankOf(s))}";
+
+// operator<<(ostream&, const Position&), position.cpp:67-103 — comando "d". Senza la parte
+// tablebase (Syzygy WDL/DTZ, Flow C2 non ancora portato).
+const string PieceToCharUci = " PNBRQK  pnbrqk";
+string Visualize(Position pos)
+{
+    var sb = new System.Text.StringBuilder();
+    sb.Append("\n +---+---+---+---+---+---+---+---+\n");
+
+    for (var r = Rank.Rank8; ; r--)
+    {
+        for (var f = File.A; f <= File.H; f++)
+            sb.Append(" | ").Append(PieceToCharUci[(byte)pos.PieceOn(Types.MakeSquare(f, r))]);
+
+        sb.Append(" | ").Append(1 + (byte)r).Append("\n +---+---+---+---+---+---+---+---+\n");
+        if (r == Rank.Rank1) break;
+    }
+
+    sb.Append("   a   b   c   d   e   f   g   h\n");
+    sb.Append($"\nFen: {pos.Fen()}\nKey: {pos.Key:X16}\nCheckers: ");
+
+    ulong checkers = pos.Checkers();
+    while (checkers != 0)
+        sb.Append(SquareToString(Bitboards.PopLsb(ref checkers))).Append(' ');
+
+    return sb.ToString();
+}
+
+// compiler_info(), misc.cpp — versione minima: qui non c'è un compilatore C++/preprocessore da
+// interrogare, solo l'informazione equivalente per la runtime .NET.
+string CompilerInfo() =>
+    $"\nCompiled by                : .NET SDK {Environment.Version}"
+    + $"\nCompiled on                : {System.Runtime.InteropServices.RuntimeInformation.OSDescription}"
+    + $"\nCompilation architecture   : {System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}"
+    + $"\nCompilation settings       : {(Environment.Is64BitProcess ? "64bit" : "32bit")}\n";
