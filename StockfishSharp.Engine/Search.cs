@@ -441,8 +441,19 @@ public sealed class Search
                 meanSquaredScore = (long)bestValue * Math.Abs(bestValue);
                 _lastCompletedScore = bestValue;
 
+                // Rete di sicurezza NON presente nella fonte reale (lì "bestmove" viene sempre da
+                // rootMoves[0].pv[0], una lista già verificata legale all'inizio della ricerca —
+                // qui, non avendo ancora quella struttura, si ri-sonda la TT a posteriori, che può
+                // in rari casi restituire una mossa non valida per QUESTA posizione (sotto Lazy SMP,
+                // C1, più thread scrivono/leggono concorrentemente la stessa entry radice — una
+                // lettura "spezzata", tollerata dalla fonte perché non si fida MAI ciecamente della
+                // TT per il bestmove, qui produceva invece una mossa illegale mandata al client UCI:
+                // trovato in una partita reale del bot, 2026-09-06). PseudoLegal+Legal è lo stesso
+                // controllo già usato per una ttData.move "potenzialmente corrotta" dentro l'albero.
                 var probe = _tt.Probe(pos.Key);
-                result.BestMove = probe.Found ? probe.Data.Move : result.BestMove;
+                if (probe.Found && probe.Data.Move != Move.None
+                    && pos.PseudoLegal(probe.Data.Move) && pos.Legal(probe.Data.Move))
+                    result.BestMove = probe.Data.Move;
                 result.ScoreCp = bestValue;
                 result.Depth = depth;
             }
