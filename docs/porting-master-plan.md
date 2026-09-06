@@ -419,8 +419,15 @@ correttezza.
 Lazy SMP. Prerequisito N9 (accumulatore per-thread) ora FATTO — sbloccato. Oggi il motore resta a
 thread singolo.
 
-### C2 — Tablebase Syzygy (`syzygy/`, 2.053 righe)
-Mai aperto. I file di dati sono già disponibili in `../ACMyChess/Syzygy/`.
+### C2 — Tablebase Syzygy (`syzygy/`, 2.053 righe) — porting VERO, non un extra
+Mai aperto. Fa parte della fonte reale a tutti gli effetti: `tbprobe.h`+`.cpp` è integrato
+nativamente in Stockfish e usato direttamente in `search.cpp` (ordinamento delle mosse alla radice
+per tablebase) e nelle opzioni UCI (`SyzygyPath`/`Syzygy50MoveRule`/`SyzygyProbeDepth`/
+`SyzygyProbeLimit`, engine.cpp) — a differenza del libro di aperture (D1 sotto), qui l'obiettivo
+resta la trascrizione fedele. I file di dati fino a 5 pezzi sono già disponibili in
+`../ACMyChess/Syzygy/` (vedi [[acmychess-tablebase-plan]]). **Riserva** se il porting fedele di
+`tbprobe.cpp` risultasse troppo oneroso: un client pratico per lo stesso formato di file (come già
+fatto in ACMyChess) — ma questa resta un'ultima risorsa, non il piano.
 
 ### C3 — Utilità (`misc`, `memory`, `score`, `numa`, `tune`, `universal/`, ~1.500 righe)
 Portate finora solo le briciole che servivano (`PRNG` dentro `Attacks.cs`).
@@ -429,24 +436,16 @@ Portate finora solo le briciole che servivano (`PRNG` dentro `Attacks.cs`).
 
 ## Flusso D — Pratico, non porting (richiesto dall'utente 2026-09-06)
 
-Due pezzi che l'utente vuole prima della fine, ma che NON sono "porting" in senso stretto: la
-fonte Stockfish reale non ha né un libro di aperture né codice di query Syzygy proprio (Syzygy è
-`syzygy/`, C2 sopra — quello sì è porting vero; il libro invece Stockfish non ce l'ha affatto, lo
-gestisce sempre il layer UCI esterno/la GUI/il bot). Stesso spirito di `StockfishSharp.Uci/
-Program.cs` (layer pratico non fedele) più che di `StockfishSharp.Engine`.
+**Corretto 2026-09-06**: qui va SOLO ciò che la fonte Stockfish reale non ha affatto — non
+Syzygy (quello è C2 sopra, porting vero). L'unico caso genuino è il libro di aperture: Stockfish
+non ne ha uno, lo gestisce sempre il layer UCI esterno/la GUI/il bot — stesso spirito di
+`StockfishSharp.Uci/Program.cs` (layer pratico non fedele) più che di `StockfishSharp.Engine`.
 
 ### D1 — Libro di aperture
 Non ancora iniziato. ACMyChess (il motore precedente, vedi [[acmychess-features-2026-06]]) ha già
 un libro Polyglot funzionante — stessa logica riusabile qui (formato file `.bin` standard, non
 specifico di un motore), verosimilmente portabile/riusabile quasi as-is nel layer
 `StockfishSharp.Uci`.
-
-### D2 — Tablebase Syzygy, uso pratico
-Distinto da **C2** sopra (il porting vero del probe code `syzygy/`, 2.053 righe, mai aperto). I
-file di dati fino a 5 pezzi sono già disponibili (vedi [[acmychess-tablebase-plan]], usati da
-ACMyChess/il bot). Se C2 risultasse troppo oneroso da portare fedelmente, un'alternativa più
-pratica (come già fatto in ACMyChess) è un client per lo stesso formato di file, non
-necessariamente una trascrizione riga-per-riga di `syzygy/`.
 
 ---
 
@@ -540,9 +539,9 @@ al nostro porting (non ha accumulo intermedio a i16), resta rilevante solo per c
    catena, in quest'ordine.
 6. **A3, A4** (tempo, UCI) — meno urgenti: le versioni attuali funzionano, il divario è in
    completezza di funzioni, non in forza.
-7. **C2** (Syzygy vero), **C3** (utilità) — alla fine.
-8. **D1** (libro di aperture), **D2** (Syzygy pratico, alternativa a C2 se troppo oneroso) —
-   ultimissimi, richiesti esplicitamente dall'utente come traguardo finale.
+7. **C2** (Syzygy, porting vero di `tbprobe.cpp`), **C3** (utilità) — alla fine.
+8. **D1** (libro di aperture) — ultimissimo, richiesto esplicitamente dall'utente come traguardo
+   finale (non porting: Stockfish non ne ha uno).
 
 ## Come si misura la fine
 
