@@ -90,6 +90,11 @@ public sealed class Search
 {
     private readonly TranspositionTable _tt = new();
     private readonly MovePick _movePick = new();
+    // N9 — accumulatore NNUE aggiornato in modo incrementale invece di ricalcolato da zero a ogni
+    // Evaluate.StaticEval; sincronizzato con la ricerca via Push()/Pop() attorno a ogni DoMove/
+    // UndoMove REALE (mai per il null-move, search.cpp:674-679/686: nessun pezzo si muove, quindi
+    // l'accumulatore resta valido così com'è).
+    private readonly Nnue.AccumulatorStack _accumulatorStack = new();
     private CancellationToken _ct;
     private long _nodes;
 
@@ -351,6 +356,7 @@ public sealed class Search
         _nodes = 0;
         _tt.NewSearch();
         _movePick.ResetForSearch(); // lowPlyHistory.fill(102), search.cpp:326
+        _accumulatorStack.Reset(); // AccumulatorStack::reset, nnue_accumulator.cpp:71-77
 
         Array.Clear(_staticEvalHistory);
         for (int i = 0; i < StackOffset; i++) _staticEvalHistory[i] = Values.None; // (ss-7)..(ss-1)
@@ -435,7 +441,7 @@ public sealed class Search
         if (ply != 0)
         {
             if (pos.IsDraw(ply) || ply >= Ply.MaxPly)
-                return ply >= Ply.MaxPly && pos.Checkers() == 0 ? Evaluate.StaticEval(pos) : ValueDraw();
+                return ply >= Ply.MaxPly && pos.Checkers() == 0 ? Evaluate.StaticEval(pos, _accumulatorStack) : ValueDraw();
         }
 
         // Mate distance pruning — esatta, non euristica: da questo ply il miglior esito possibile
@@ -510,7 +516,7 @@ public sealed class Search
         }
         else
         {
-            unadjustedStaticEval = probe.Found && Values.IsValid(probe.Data.Eval) ? probe.Data.Eval : Evaluate.StaticEval(pos);
+            unadjustedStaticEval = probe.Found && Values.IsValid(probe.Data.Eval) ? probe.Data.Eval : Evaluate.StaticEval(pos, _accumulatorStack);
             staticEval = eval = ToCorrectedStaticEval(unadjustedStaticEval, correctionValue);
 
             if (Values.IsValid(ttScore)
@@ -615,8 +621,9 @@ public sealed class Search
                     if (!pos.Legal(pcMove)) continue;
                     if (!pos.SeeGe(pcMove, probCutBeta - staticEval)) continue;
 
+                    var pcFrame = _accumulatorStack.Push();
                     var pcSt = new StateInfo();
-                    pos.DoMove(pcMove, pcSt);
+                    pos.DoMove(pcMove, pcSt, pos.GivesCheck(pcMove), pcFrame.DirtyThreats, pcFrame.DirtyPiece, pcFrame.DirtyPawnPairs);
 
                     int pcValue = -Quiesce(pos, -probCutBeta, -probCutBeta + 1, ply + 1);
 
@@ -624,6 +631,7 @@ public sealed class Search
                         pcValue = -Negamax(pos, probCutDepth, ply + 1, -probCutBeta, -probCutBeta + 1, cutNode: !cutNode);
 
                     pos.UndoMove(pcMove);
+                    _accumulatorStack.Pop();
 
                     if (pcValue >= probCutBeta)
                     {
@@ -809,8 +817,9 @@ public sealed class Search
             }
             newDepth += extension;
 
+            var frame = _accumulatorStack.Push();
             var st = new StateInfo();
-            pos.DoMove(m, st, givesCheck);
+            pos.DoMove(m, st, givesCheck, frame.DirtyThreats, frame.DirtyPiece, frame.DirtyPawnPairs);
 
             // Step 18 (continua dopo aver fatto la mossa), search.cpp:1316-1359.
             if (ttPv)
@@ -872,6 +881,7 @@ public sealed class Search
                 score = -Negamax(pos, newDepth, ply + 1, -beta, -alpha, cutNode: false);
 
             pos.UndoMove(m);
+            _accumulatorStack.Pop();
 
             // Step 22, search.cpp:1514-1541: bestMove si aggiorna SOLO quando la mossa supera
             // davvero alpha — un fail-low puro (nessuna mossa batte alpha) lascia bestMove a null,
@@ -981,7 +991,7 @@ public sealed class Search
         _nodes++;
 
         bool inCheck = pos.Checkers() != 0;
-        int standPat = inCheck ? -MateScore + ply : Evaluate.StaticEval(pos);
+        int standPat = inCheck ? -MateScore + ply : Evaluate.StaticEval(pos, _accumulatorStack);
 
         if (!inCheck)
         {
@@ -1013,10 +1023,12 @@ public sealed class Search
 
             moveCount++;
 
+            var qFrame = _accumulatorStack.Push();
             var st = new StateInfo();
-            pos.DoMove(m, st);
+            pos.DoMove(m, st, pos.GivesCheck(m), qFrame.DirtyThreats, qFrame.DirtyPiece, qFrame.DirtyPawnPairs);
             int score = -Quiesce(pos, -beta, -alpha, ply + 1);
             pos.UndoMove(m);
+            _accumulatorStack.Pop();
 
             if (score >= beta) return beta;
             if (score > alpha) alpha = score;

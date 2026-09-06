@@ -393,16 +393,31 @@ l'accumulatore "da zero" negli oracoli N1-N8): per ogni mossa raggiunta durante 
 posizioni, incluso un arrocco che esercita `RequiresRefresh`), l'accumulatore mantenuto
 incrementalmente da `AccumulatorStack` è bit-esatto — non solo la valutazione finale, gli interi
 stessi di `Accumulation`/`PsqtAccumulation` — contro `NnueAccumulator.ComputeFromScratch`
-ricalcolato indipendentemente sulla stessa posizione. 85/85 test totali; `bench 16 1 8` — nodi
-identici (l'infrastruttura non è ancora usata dalla ricerca, wiring in `Search.cs` prossimo passo
-per chiudere N9 e ottenerne il beneficio reale di velocità).
+ricalcolato indipendentemente sulla stessa posizione.
+
+**N9 COMPLETO — wiring in Search.cs FATTO**: `_accumulatorStack.Push()` prima di ogni
+`Position.DoMove` REALE (ciclo principale, ProbCut, quiescenza) con `Pop()` dopo il corrispondente
+`UndoMove`, `Reset()` a inizio di ogni `Search_()`, `Evaluate.StaticEval` ora riceve lo stack in
+tutti e 3 i punti di chiamata. Il null-move (`DoNullMove`/`UndoNullMove`) resta **deliberatamente
+escluso**: non sposta pezzi, quindi l'accumulatore per entrambe le prospettive resta valido così
+com'è (search.cpp:674-679/686 non lo tocca nemmeno nella fonte).
+
+Verificato: 85/85 test; `bench 16 1 8` con `git stash` prima/dopo — **nodi IDENTICI** (507.992,
+bestmove `g2g3` in entrambi i casi, correttezza confermata end-to-end) E, per la prima volta in
+questa serie di ottimizzazioni, un **guadagno di velocità reale e misurato**: da ~140k a ~198k
+nodi/secondo (+40% circa, confermato su più esecuzioni ripetute) — il beneficio concreto che tutto
+il lavoro DirtyThreats/DirtyPiece/DirtyPawnPairs/AccumulatorStack di questa sessione doveva
+produrre. **Flow B (NNUE) è ora COMPLETO** salvo le due ottimizzazioni rimandate (Finny Tables,
+hybrid/backward-update) — ulteriore margine di velocità non ancora sfruttato, non un debito di
+correttezza.
 
 ---
 
 ## Flusso C — Il resto
 
 ### C1 — Threading (`thread.h`/`thread.cpp`, 464+ righe)
-Lazy SMP. Prerequisito: N9 (accumulatore per-thread). Oggi il motore è a thread singolo.
+Lazy SMP. Prerequisito N9 (accumulatore per-thread) ora FATTO — sbloccato. Oggi il motore resta a
+thread singolo.
 
 ### C2 — Tablebase Syzygy (`syzygy/`, 2.053 righe)
 Mai aperto. I file di dati sono già disponibili in `../ACMyChess/Syzygy/`.
