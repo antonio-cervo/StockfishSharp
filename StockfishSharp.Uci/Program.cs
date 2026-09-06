@@ -327,46 +327,29 @@ void HandlePosition(string[] toks)
     }
 }
 
+// UCIEngine::to_move, uci.cpp — confronta ogni mossa legale con la stringa in arrivo
+// convertendola PRIMA in notazione UCI (MoveToUci), non confrontando le case grezze: per
+// l'arrocco la nostra rappresentazione interna è "il re cattura la propria torre" (Move.ToSq =
+// casa della torre, es. e8h8 per il nero lato re), mentre una GUI/bot reale manda sempre la
+// notazione standard (e8g8) quando non è Chess960 — un confronto diretto sulle case non li fa
+// mai combaciare. Bug reale trovato in due partite del bot (2026-09-06): un arrocco nella
+// cronologia mosse veniva scartato silenziosamente ("continue" sul null qui sotto), lasciando la
+// posizione interna un ply indietro per il resto della partita — sintomo osservato: una mossa
+// sensata ma per il lato SBAGLIATO (l'engine rispondeva ancora come se toccasse al lato che
+// aveva già arroccato). Stessa tecnica della fonte: MoveToUci già fa la conversione corretta
+// (vedi lì), quindi basta confrontare le stringhe invece delle case.
 Move? ParseUciMove(string uci)
 {
     if (uci.Length < 4) return null;
-
-    Square from = ParseSquare(uci[..2]);
-    Square to = ParseSquare(uci.Substring(2, 2));
-    if (from == Square.None || to == Square.None) return null;
 
     var legalMoves = new List<Move>();
     MoveGen.Generate(GenType.Legal, position, legalMoves);
 
     foreach (var m in legalMoves)
-    {
-        if (m.FromSq != from || m.ToSq != to) continue;
-        if (uci.Length == 5 && m.TypeOf == MoveType.Promotion)
-        {
-            PieceType promo = char.ToLowerInvariant(uci[4]) switch
-            {
-                'q' => PieceType.Queen,
-                'r' => PieceType.Rook,
-                'b' => PieceType.Bishop,
-                'n' => PieceType.Knight,
-                _ => PieceType.None,
-            };
-            if (m.PromotionType != promo) continue;
-        }
-
-        return m;
-    }
+        if (MoveToUci(m) == uci)
+            return m;
 
     return null;
-}
-
-Square ParseSquare(string s)
-{
-    if (s.Length != 2) return Square.None;
-    int file = s[0] - 'a';
-    int rank = s[1] - '1';
-    if (file is < 0 or > 7 || rank is < 0 or > 7) return Square.None;
-    return Types.MakeSquare((File)file, (Rank)rank);
 }
 
 void HandleGo(string[] toks)
@@ -520,9 +503,21 @@ void HandleBench(string[] toks)
     Console.Error.WriteLine($"Nodes/second    : {1000 * totalNodes / elapsedMs}");
 }
 
+// UCIEngine::move, uci.cpp — la rappresentazione interna dell'arrocco è "il re cattura la
+// propria torre" (Move.ToSq = casa della torre, stessa convenzione della fonte reale e del
+// formato Polyglot), ma una GUI/bot non-Chess960 si aspetta la notazione standard (il re alla
+// sua casa finale, es. e1g1 non e1h1). Senza questa conversione ogni arrocco proposto da questo
+// motore verrebbe rifiutato come mossa illegale — bug reale trovato in una partita del bot,
+// 2026-09-06 (vedi anche la nota gemella in ParseUciMove, stesso problema in direzione opposta).
 string MoveToUci(Move m)
 {
-    string s = SquareToString(m.FromSq) + SquareToString(m.ToSq);
+    Square from = m.FromSq;
+    Square to = m.ToSq;
+
+    if (m.TypeOf == MoveType.Castling && !isChess960)
+        to = Types.MakeSquare(to > from ? File.G : File.C, Types.RankOf(from));
+
+    string s = SquareToString(from) + SquareToString(to);
     if (m.TypeOf == MoveType.Promotion)
     {
         s += m.PromotionType switch
