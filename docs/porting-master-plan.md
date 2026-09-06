@@ -200,10 +200,23 @@ direttamente in un buffer `moves[MAX_MOVES]` sullo stack senza allocare). Corret
 prestazioni no — riutilizzare buffer invece di allocare è l'ottimizzazione naturale successiva, non
 fatta qui per restare dentro lo scopo di questo Step (generazione a stadi, non le sue prestazioni).
 
-Manca ancora in Flow A2: i due usi mancanti di PawnHistory (bonus da differenza di valutazione
-statica, bonus al countermove — legati a tecniche non ancora portate), e `reduction()`/`statScore`
-che oggi usano solo main+contHist[0,1] invece di sfruttare tutta l'informazione ora disponibile in
-`MovePicker`.
+**Bonus da differenza di valutazione statica FATTO** ("use static evaluation difference to improve
+quiet move ordering", search.cpp:978-986): non collegato a un taglio o a `bestMove` — a ogni nodo
+non sotto scacco la cui mossa del genitore non era né sotto scacco né una cattura, il segno/
+ampiezza della sorpresa fra la valutazione statica di lì e quella di qui aggiorna sempre la main
+history del genitore (e, se non c'è già un hit di TT qui e il pezzo/mossa del genitore non erano
+un pedone/una promozione, anche la sua pawn history) — indipendentemente dall'esito della ricerca
+di questo nodo. Nuovi `MovePick.ApplyEvalDiffMainBonus`/`ApplyEvalDiffPawnBonus`. **Questo era
+l'ultimo uso mancante di PawnHistory**: ora tutti e tre gli usi della fonte sono portati.
+
+Correzione a una nota precedente: `reduction()`/`ComputeStatScore` (Step 18, search.cpp:1342-1349)
+in realtà usano GIÀ solo main+contHist[0,1] anche nella fonte reale — non era un gap, la nota
+precedente in questo documento era imprecisa. Stesso discorso per `ComputeQuietPruningHistory`
+(Step 15, search.cpp:1200-1202): cont[0]+cont[1]+pawn è la formula esatta della fonte. **Flow A2 è
+quindi COMPLETO** salvo prestazioni (le allocazioni di `MovePicker`, vedi sopra).
+
+Verificato (questo passaggio): 69/69 test, stesso bestmove su tutte le 5 posizioni di test
+(inclusa `d7c8q`) prima/dopo via `git stash`.
 
 ### A3 — Gestione del tempo (`timeman.h` 70 + `timeman.cpp` 144 = 214 righe) — ✅ FATTO
 

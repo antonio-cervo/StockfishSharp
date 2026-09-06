@@ -226,6 +226,21 @@ public sealed class MovePick
     public void ApplyCountermoveCaptureBonus(Piece prevPiece, Square prevSq, PieceType capturedType) =>
         UpdateHistory(ref _captureHistory[(byte)prevPiece, (byte)prevSq, (byte)capturedType], 892, CaptureHistoryLimit);
 
+    /// <summary>"Use static evaluation difference to improve quiet move ordering",
+    /// search.cpp:978-986 — a differenza di <see cref="UpdateStats"/> non dipende dall'esito della
+    /// ricerca di questo nodo: premia/punisce la mossa del GENITORE in base a quanto la
+    /// valutazione statica è cambiata da lì a qui (una mossa che ha portato a una posizione più
+    /// brutta/migliore del previsto). Chiamata da Search.cs per ogni nodo non sotto scacco la cui
+    /// mossa del genitore non era né sotto scacco né una cattura.</summary>
+    public void ApplyEvalDiffMainBonus(Color opponent, Move parentMove, int bonus) =>
+        UpdateHistory(ref _mainHistory[(byte)opponent, parentMove.Raw], bonus, MainHistoryLimit);
+
+    /// <summary>Metà "pawn history" dello stesso ramo, search.cpp:983-985 — condizionata a parte
+    /// perché nella fonte ha guardie aggiuntive (nessun hit di TT, pezzo del genitore non un
+    /// pedone, mossa del genitore non una promozione).</summary>
+    public void ApplyEvalDiffPawnBonus(Position pos, Piece prevPiece, Square prevSq, int bonus) =>
+        UpdateHistory(ref _pawnHistory[pos.PawnKey & (PawnHistorySize - 1), (byte)prevPiece, (byte)prevSq], bonus, PawnHistoryLimit);
+
     /// <summary><c>ss-&gt;statScore</c>, search.cpp:1342-1349 — usato da Reduction() in Search.cs
     /// per rifinire la riduzione LMR in base a quanto la history "approva" la mossa. Per le
     /// catture usa CapturePieceToHistory; per le mosse quiete combina main history + le prime due

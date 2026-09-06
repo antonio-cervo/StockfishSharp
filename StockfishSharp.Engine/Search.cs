@@ -505,6 +505,23 @@ public sealed class Search
 
         if (!inCheck)
         {
+            // "Use static evaluation difference to improve quiet move ordering", search.cpp:978-
+            // 986: non collegato a un taglio o a bestMove — se la mossa del genitore non era né
+            // sotto scacco né una cattura, il segno/ampiezza della sorpresa fra la sua valutazione
+            // statica e quella di qui aggiorna sempre la sua main history (e, se non era un
+            // pedone/promozione e non c'è già un hit di TT qui, anche la sua pawn history).
+            Move parentMoveForEvalDiff = _currentMoveHistory[ply + StackOffset - 1];
+            if (parentMoveForEvalDiff.IsOk && !_inCheckHistory[ply + StackOffset - 1] && !_captureStageHistory[ply + StackOffset - 1])
+            {
+                int evalDiff = Math.Clamp(-(_staticEvalHistory[ply + StackOffset - 1] + staticEval), -189, 194) + 60;
+                _movePick.ApplyEvalDiffMainBonus(Types.Opposite(pos.SideToMove), parentMoveForEvalDiff, evalDiff * 11);
+
+                Square prevSqForEvalDiff = parentMoveForEvalDiff.ToSq;
+                if (!probe.Found && Types.TypeOf(pos.PieceOn(prevSqForEvalDiff)) != PieceType.Pawn
+                    && parentMoveForEvalDiff.TypeOf != MoveType.Promotion)
+                    _movePick.ApplyEvalDiffPawnBonus(pos, pos.PieceOn(prevSqForEvalDiff), prevSqForEvalDiff, evalDiff * 13);
+            }
+
             // Step 8. Razoring — search.cpp:989-992: se la valutazione statica è già molto sotto
             // alpha (margine che cresce col quadrato della profondità), la posizione non si
             // riprenderà: si passa direttamente alla quiescenza.
