@@ -745,12 +745,67 @@ esattamente il tipo di "impalcatura pratica mai riconciliata con la fonte" che l
   (`bestmove 0000`, punteggio di matto/patta) — trovato scrivendo il codice, poi confermato dal
   bench reale (2 delle 51 posizioni di default sono matto/stallo).
 
-**Deliberatamente non fatto oggi** (dichiarato esplicitamente, non dimenticato): il ciclo MultiPV
-(search.cpp:360-503, qui `multiPV` resta fissato a 1 — `_pvIdx` è sempre 0), Skill Level, il filtro
-"searchmoves", `bestMoveChanges`/`totBestMoveChanges` (accumulato fedelmente ma non consumato: la
-gestione tempo adattiva reale che lo userebbe resta un pezzo separato non portato).
-`Tablebases::rank_root_moves` (TB9) è stato invece wired sulle vere RootMoves subito dopo, stesso
-giorno — vedi la nota dedicata nel Flusso C2.
+**Deliberatamente non fatto in questo passaggio** (dichiarato esplicitamente, non dimenticato): il
+ciclo MultiPV (search.cpp:360-503, qui `multiPV` resta fissato a 1 — `_pvIdx` è sempre 0), Skill
+Level, il filtro "searchmoves". `Tablebases::rank_root_moves` (TB9), `followPV`, il vero ProbCut
+via `MovePicker` e la gestione tempo adattiva reale (che consuma `bestMoveChanges`/
+`totBestMoveChanges`, lasciati "accumulati ma non consumati" nella nota sopra) sono stati invece
+tutti fatti subito dopo, stesso giorno — vedi le note dedicate qui sotto e nel Flusso C2.
+
+### followPV, ProbCut via MovePicker e gestione tempo adattiva reale — ✅ FATTI 2026-09-06
+
+Tre pezzi distinti, tutti richiesti esplicitamente dall'utente nella stessa sessione dopo la
+domanda "cosa resta fuori, tutto il resto è un porting fedele?":
+
+- **`followPV`** (search.cpp:772-775): un nuovo array per-ply `_followPvHistory` traccia se un
+  nodo è ancora sulla riga principale dell'iterazione PRECEDENTE (`RootMove.PreviousPv`,
+  snapshottata una volta per profondità in `_lastIterationIdxPv`, search.cpp:370). Usato per
+  disattivare l'Internal Iterative Reduction (Step 11) e la potatura delle mosse quiete a
+  profondità bassa (Step 15) quando si sta seguendo quella riga in un nodo PV
+  (`else if (!ss->followPV || !PvNode)`, search.cpp:1197) — prima quella potatura si applicava
+  SEMPRE alle mosse quiete, una differenza reale dalla fonte, non solo "leggermente più ampia".
+- **ProbCut vero via `MovePicker`** (Step 12): il secondo costruttore di `MovePicker`
+  (movepick.cpp:181-189, stage `ProbcutTt`/`ProbcutInit`/`Probcut`) era già stato scritto
+  fedelmente durante il porting di `MovePicker.cs` (generazione a stadi vera) ma MAI usato dal
+  punto di chiamata in `Negamax` — Step 12 generava le catture a mano con
+  `MoveGen.Generate(GenType.Captures,...)` e le provava nell'ordine di generazione grezzo invece
+  di quello per MVV+capture history della fonte. Corretto: ora usa `new MovePicker(pos, hist,
+  ttMove, probCutBeta-staticEval, ...)`, con l'aggiunta del controllo `pcMove == excludedMove`
+  (search.cpp:1069) che mancava anche nella versione manuale.
+- **Gestione tempo adattiva reale** (search.cpp:568-618): `Search_` accetta ora un parametro
+  `optimumMs` (default `Search.NoBound`, equivalente di `!limits.use_time_management()`,
+  search.h:182 — vero solo quando la GUI fornisce `wtime`/`btime` reali). Quando fornito, dopo
+  ogni iterazione completata la ricerca calcola `fallingEval`/`timeReduction`/
+  `bestMoveInstability`/`highBestMoveEffort` (usando `RootMove.Effort`, ora disponibile per
+  davvero) e può fermarsi PRIMA del tetto massimo se la mossa migliore è stabile, o continuare se
+  instabile — `timeLimit` (il parametro esistente) diventa il tetto ASSOLUTO
+  (`TimeManagement.MaximumTime`), mai superato. Nuovi campi persistenti su `Search`
+  (`bestPreviousScore`/`bestPreviousAverageScore`/`previousTimeReduction`, azzerati da `NewGame`
+  come `ThreadPool::clear()`, thread.cpp:272-278) e un nuovo `Search.SetPreviousScores` che
+  `SearchThreadPool` chiama sul thread principale dopo aver scelto il "bestThread" del pool
+  (search.cpp:247-248: la fonte aggiorna sempre `main_manager()` con i valori del VINCITORE, anche
+  se diverso dal thread principale). Program.cs passa `MaximumTime` come `timeLimit` e
+  `OptimumTime` come `optimumMs` solo nel ramo `wtime`/`btime` — `movetime`/`depth`/`infinite`
+  restano un budget fisso, senza gestione adattiva, come nella fonte.
+
+  **Semplificazione dichiarata**: `totBestMoveChanges` nella fonte è la somma di
+  `bestMoveChanges` di TUTTI i thread del pool divisa per il loro numero (search.cpp:562-566,586)
+  — qui usa solo il valore del thread CHE STA ESEGUENDO la gestione tempo (sempre e solo il
+  principale, gli helper non la consultano mai), senza sincronizzazione cross-thread: con thread
+  indipendenti sulla stessa posizione, il valore di un singolo thread è già un proxy ragionevole
+  della media, e la sincronizzazione aggiungerebbe complessità per un guadagno di fedeltà marginale
+  (il numero non sarebbe comunque bit-esatto rispetto alla fonte, che ha timing di thread reali
+  diversi). `ponder`/`stopOnPonderhit` non portati (nessun supporto ponder in Program.cs): il ramo
+  "ferma subito" è sempre quello percorso.
+
+**Verificato**: 109/109 test (nessuna regressione), bench 1 e 4 thread senza eccezioni (il numero
+di nodi CAMBIA rispetto a prima di questo passaggio — atteso, followPV e il vero ProbCut alterano
+davvero l'albero esplorato, non sono no-op come TB9 nel caso comune). Verifica dal vivo: un matto
+in 1 con `wtime 60000` si ferma a depth 1 (score decisivo supera la soglia `mate_in(3)`, invece di
+continuare a scavare su una posizione già risolta); una posizione di mediogioco non decisiva con
+lo stesso orologio usa solo una piccola frazione dei 60s disponibili (coerente con `OptimumTime`
+calcolato da `TimeManagement`, non con `MaximumTime`); bench multi-thread con `SetPreviousScores`
+attivo, nessuna eccezione.
 
 **Verifica**: `dotnet test` 109/109 (nessuna regressione); bench 1 thread e 4 thread (Lazy SMP) su
 tutte le 51 posizioni di default, nessuna eccezione, PV plausibili su ogni posizione incluse le 2

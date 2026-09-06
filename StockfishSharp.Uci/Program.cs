@@ -379,6 +379,13 @@ void HandleGo(string[] toks)
     bool infinite = Array.IndexOf(toks, "infinite") >= 0;
 
     TimeSpan budget;
+    // limits.use_time_management(), search.h:182 — vero solo quando la GUI ha fornito wtime/btime
+    // reali (ramo "else" sotto): in quel caso "budget" diventa il tetto ASSOLUTO
+    // (TimeManagement.MaximumTime, equivalente di tm.maximum()) e optimumMs attiva la gestione
+    // tempo adattiva reale dentro Search_ (search.cpp:568-618), che normalmente si ferma MOLTO
+    // prima del tetto. Per "infinite"/"movetime"/"go depth" senza orologio, come nella fonte,
+    // niente gestione adattiva: optimumMs resta Search.NoBound e budget è l'unico limite, fisso.
+    long optimumMs = Search.NoBound;
     if (infinite)
     {
         // Nessun limite di tempo reale: si ferma solo con "stop" o al raggiungimento di maxDepth
@@ -400,7 +407,8 @@ void HandleGo(string[] toks)
         if (myTime.HasValue)
         {
             timeManagement.Init(myTime.Value, myInc, movesToGo, position.GamePly);
-            budget = TimeSpan.FromMilliseconds(timeManagement.OptimumTime);
+            budget = TimeSpan.FromMilliseconds(timeManagement.MaximumTime);
+            optimumMs = timeManagement.OptimumTime;
         }
         else
         {
@@ -417,7 +425,7 @@ void HandleGo(string[] toks)
 
     searchTask = Task.Run(() =>
     {
-        var result = search.Search_(pos, depth, budget, ct);
+        var result = search.Search_(pos, depth, budget, ct, optimumMs: optimumMs);
         Console.WriteLine($"info depth {result.Depth} seldepth {result.SelDepth} score cp {result.ScoreCp} nodes {result.Nodes} tbhits {result.TbHits} pv {FormatPv(result.Pv)}");
 
         // Matto/stallo: la TT salva Move.None come bestMove (Search.cs, "bestMove ?? Move.None"),

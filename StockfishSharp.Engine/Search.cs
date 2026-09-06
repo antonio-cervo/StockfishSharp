@@ -18,17 +18,31 @@
 //   dall'ultima iterazione completata. Le aspiration windows usano ora la vera media mobile pesata
 //   per "effort" (search.cpp:1437-1468) invece del valore grezzo dell'iterazione precedente.
 //   L'optimism derivato da rootMoves[pvIdx].averageScore (search.cpp:381-383) è ora wired dentro
-//   Evaluate.StaticEval (parametro optimism). Ancora NON portati: il ciclo MultiPV
-//   (search.cpp:360-503, qui multiPV resta fissato a 1), Skill Level, il filtro "searchmoves", e
-//   l'ordinamento/restrizione delle mosse radice via tablebase (Tablebases::rank_root_moves —
-//   TbRank/TbScore restano sempre 0, vedi RootMove.cs).
+//   Evaluate.StaticEval (parametro optimism). L'ordinamento/restrizione delle mosse radice via
+//   tablebase (Tablebases::rank_root_moves, TB9) è ora wired su RootMove.TbRank/.TbScore, incluso
+//   il filtro pvFirst/pvLast del ciclo mosse radice (search.cpp:1131-1135). Ancora NON portati: il
+//   ciclo MultiPV (search.cpp:360-503, qui multiPV resta fissato a 1), Skill Level, il filtro
+//   "searchmoves".
 // cutNode è ora tracciato attraverso la ricorsione (Step 11 Internal Iterative Reduction,
 // search.cpp:1048-1052, ne dipende) con la stessa convenzione di chiamata della fonte — vedi i
 // commenti sui singoli punti di ricorsione. "followPV" (segue la riga principale dell'iterazione
-// precedente) non è portato: la condizione di IIR qui è quindi leggermente più ampia di quella
-// esatta della fonte.
+// precedente, search.cpp:772-775) ora portato (Step 11 e Step 15).
 // ProbCut (Step 12, la verifica vera con quiescenza + ricerca ridotta sulle catture con SEE sopra
-// soglia; Step 13, la "piccola idea" solo da TT, attiva anche sotto scacco) è ora portato.
+// soglia; Step 13, la "piccola idea" solo da TT, attiva anche sotto scacco) è ora portato usando
+// il vero MovePicker in modalità ProbCut (movepick.cpp:181-189, già presente in MovePicker.cs) al
+// posto della generazione manuale usata inizialmente — ordina le catture per MVV+capture history
+// invece di provarle nell'ordine di generazione grezzo.
+// Gestione tempo adattiva reale (search.cpp:568-618) ora portata: quando Search_ riceve un
+// optimumMs (equivalente di limits.use_time_management(), search.h:182 — vero solo con wtime/
+// btime reali), la ricerca può fermarsi PRIMA del tetto massimo in base a quanto la mossa migliore
+// è stabile (fallingEval/bestMoveInstability/nodesEffort). bestPreviousScore/
+// bestPreviousAverageScore/previousTimeReduction persistono fra chiamate a Search_ nella stessa
+// partita (azzerati da NewGame). "totBestMoveChanges" usa qui solo il valore del thread che sta
+// eseguendo invece della somma su tutti i thread del pool divisa per il loro numero — con thread
+// indipendenti che condividono la stessa posizione, il valore di un singolo thread è già un buon
+// proxy della media (nessuna sincronizzazione cross-thread aggiunta per un guadagno di fedeltà
+// marginale). Non portato: ponder/stopOnPonderhit (il protocollo ponder non è gestito da
+// Program.cs) — il ramo "ferma la ricerca" è quindi sempre quello percorso.
 // Flow A2 (docs/porting-master-plan.md) iniziato in MovePick.cs: ButterflyHistory (main history)
 // con la formula "a gravità" fedele e i bonus/malus di update_all_stats (solo il ramo mosse
 // quiete). Da qui, corretta anche una semantica pre-esistente di bestMove: si aggiorna SOLO
@@ -89,6 +103,10 @@ public sealed class SearchResult
     public List<Move> Pv = [];
     public int SelDepth;
     public int ScoreCp;
+    // RootMove.AverageScore della mossa migliore — search.cpp:248, propagato da
+    // SearchThreadPool.GetBestResult al thread principale via Search.SetPreviousScores per la
+    // gestione tempo adattiva della PROSSIMA chiamata a Search_ nella stessa partita.
+    public int AverageScore;
     public long Nodes;
     public int Depth;
     public long TbHits;
@@ -143,6 +161,12 @@ public sealed class Search
     private int _pvFirst;
     private int _pvLast;
 
+    /// <summary><c>Search::Worker::lastIterationIdxPV</c>, search.cpp:370 —
+    /// <c>rootMoves[pvIdx].previousPV</c> snapshottato una volta per profondità, prima che il
+    /// ciclo mosse di questa iterazione lo sovrascriva: la riga da "seguire" per calcolare
+    /// <c>followPV</c> in ogni nodo di questa iterazione.</summary>
+    private List<Move> _lastIterationIdxPv = [];
+
     /// <summary><c>Search::Worker::selDepth</c>, search.h — azzerato a ogni profondità
     /// (iterative_deepening, search.cpp:373), aggiornato dal primo nodo PV di ogni ramo che
     /// raggiunge un nuovo ply massimo (search.cpp:781-783).</summary>
@@ -181,6 +205,10 @@ public sealed class Search
     private const int Infinity = 32001; // VALUE_INFINITE della fonte, types.h:155
     private const int MateScore = 32000; // VALUE_MATE, types.h:157
 
+    // TimePoint massimo/"nessun limite", timeman.h — usato come sentinella per optimumMs quando
+    // la gestione tempo adattiva non è attiva (equivalente di !limits.use_time_management()).
+    public const long NoBound = long.MaxValue / 2;
+
     private const int NullMoveMinDepth = 3;
     private const int NullMoveReduction = 3;
     private const int ReverseFutilityMaxDepth = 6;
@@ -196,6 +224,8 @@ public sealed class Search
     private readonly Move[] _currentMoveHistory = new Move[Ply.MaxPly + StackOffset + 1];
     private readonly Piece[] _movedPieceHistory = new Piece[Ply.MaxPly + StackOffset + 1];
     private readonly bool[] _inCheckHistory = new bool[Ply.MaxPly + StackOffset + 1];
+    // Stack::followPV della fonte — vedi la nota sopra la sua unica lettura/scrittura in Negamax.
+    private readonly bool[] _followPvHistory = new bool[Ply.MaxPly + StackOffset + 1];
     private readonly bool[] _captureStageHistory = new bool[Ply.MaxPly + StackOffset + 1];
     // Stack::statScore/moveCount della fonte — per il bonus "countermove" di Step 23
     // (search.cpp:1578-1601), che legge (ss-1)->statScore e (ss-1)->moveCount.
@@ -287,6 +317,32 @@ public sealed class Search
     /// <summary><c>Search::Worker::evaluate</c>, search.cpp:1901-1904: <c>optimism[pos.side_to_move()]</c>.</summary>
     private int Optimism(Color sideToMove) => sideToMove == _rootColor ? _rootOptimism : -_rootOptimism;
 
+    // SearchManager::bestPreviousScore/bestPreviousAverageScore/previousTimeReduction,
+    // search.h:310-312 — PERSISTONO fra chiamate a Search_ nella STESSA partita (azzerati solo da
+    // NewGame, come ThreadPool::clear, thread.cpp:272-278), usati dalla gestione tempo adattiva
+    // reale (search.cpp:568-618) per confrontare l'iterazione corrente con l'ULTIMA ricerca
+    // completata (non l'ultima iterazione di QUESTA ricerca). Valori iniziali identici a
+    // thread.cpp:273-277 (prima ancora di un "ucinewgame" esplicito).
+    private int _bestPreviousScore = Values.Infinite;
+    private int _bestPreviousAverageScore = Values.Infinite;
+    private double _previousTimeReduction = 0.85;
+
+    /// <summary>Permette a <see cref="SearchThreadPool"/> di propagare al thread principale i
+    /// valori del "bestThread" scelto da <c>get_best_thread</c> (search.cpp:247-248: la fonte
+    /// aggiorna sempre <c>main_manager()</c>, anche quando il thread vincente è un helper) — senza
+    /// questo, un thread principale che non ha trovato la riga migliore userebbe i PROPRI valori
+    /// invece di quelli del vincitore per calibrare la prossima mossa.</summary>
+    public void SetPreviousScores(int score, int averageScore)
+    {
+        _bestPreviousScore = score;
+        _bestPreviousAverageScore = averageScore;
+    }
+
+    /// <summary><c>interpolate</c>, misc.h:485-489 — interpolazione lineare fra due punti, non
+    /// clampata (il clamp è sempre applicato dal chiamante).</summary>
+    private static double Interpolate(double x, double x0, double x1, double y0, double y1) =>
+        y0 + ((y1 - y0) * (x - x0) / (x1 - x0));
+
     // CorrectionHistory, history.h:148-257 — differenze fra valutazione statica e punteggio di
     // ricerca, per correggere la valutazione statica in Step 5. Chiave: hash di pedoni/pezzi
     // minori/non-pedoni per colore (history.h:227-248, sizeMinus1 = CORRHIST_BASE_SIZE-1 =
@@ -309,6 +365,12 @@ public sealed class Search
     {
         _tt.Clear();
         _movePick.Clear();
+
+        // ThreadPool::clear(), thread.cpp:272-278 — questi due valori influenzano il tempo
+        // impiegato sulla prima mossa della nuova partita.
+        _bestPreviousAverageScore = Values.Infinite;
+        _previousTimeReduction = 0.85;
+        _bestPreviousScore = Values.Infinite;
 
         // Worker::clear(), search.cpp:696-697,708-710 — pawn/minor/nonpawn a -5, continuation a
         // +5 (segno diverso, fedele alla fonte).
@@ -446,22 +508,31 @@ public sealed class Search
 
     /// <summary>Iterative deepening con aspiration windows — <c>iterative_deepening</c>,
     /// search.cpp:270-618. Qui ridotto a MultiPV=1, thread singolo, nessuno Skill Level: il ciclo
-    /// MultiPV (search.cpp:360-503), la gestione tempo adattiva (search.cpp:568-614, qui il tempo
-    /// resta gestito da un CancellationToken esterno) e lo scambio della riga con Skill Level
-    /// abilitato (search.cpp:626-629) non sono ancora portati.</summary>
+    /// MultiPV (search.cpp:360-503) e lo scambio della riga con Skill Level abilitato
+    /// (search.cpp:626-629) non sono ancora portati. La gestione tempo adattiva reale
+    /// (search.cpp:568-618) è invece ora portata — vedi <paramref name="optimumMs"/>.</summary>
     // callNewSearch: false quando il chiamante è un pool multi-thread (SearchThreadPool), che
     // replica "is_mainthread()" della fonte (search.cpp:191-204) — SOLO il thread principale
     // chiama tt.new_search(), una volta, PRIMA di avviare gli helper (threads.start_searching()
     // arriva dopo, riga 216); gli helper (righe 196-199) vanno dritti a iterative_deepening()
     // senza mai chiamarlo. Un incremento di _generation per thread romperebbe l'invecchiamento
     // della TT condivisa (byte non atomico, corsa tra thread).
-    public SearchResult Search_(Position pos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default, bool callNewSearch = true)
+    //
+    // optimumMs: equivalente di "limits.use_time_management()" (search.h:182: vero solo quando la
+    // GUI ha fornito wtime/btime reali) — di default NoBound, che disattiva la formula adattiva
+    // sotto esattamente come la fonte fa per "go movetime"/"go depth"/"go infinite" (nessuno di
+    // questi imposta i tempi dell'orologio). <paramref name="timeLimit"/> resta comunque il tetto
+    // assoluto (equivalente di tm.maximum() quando la gestione tempo è attiva, o il budget fisso
+    // altrimenti) — la ricerca non supera MAI questo limite, la formula sotto può solo fermarsi
+    // PRIMA.
+    public SearchResult Search_(Position pos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default, bool callNewSearch = true, long optimumMs = NoBound)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeLimit);
         _ct = cts.Token;
         _nodes = 0;
         _tbHits = 0;
+        var elapsedStopwatch = System.Diagnostics.Stopwatch.StartNew(); // elapsed(), search.h
         if (callNewSearch) _tt.NewSearch();
         _movePick.ResetForSearch(); // lowPlyHistory.fill(102), search.cpp:326
         _accumulatorStack.Reset(); // AccumulatorStack::reset, nnue_accumulator.cpp:71-77
@@ -471,6 +542,7 @@ public sealed class Search
         Array.Clear(_currentMoveHistory);
         Array.Clear(_movedPieceHistory);
         Array.Clear(_inCheckHistory);
+        Array.Clear(_followPvHistory);
         Array.Clear(_captureStageHistory);
         Array.Clear(_cutoffCntHistory);
         Array.Clear(_statScoreHistory);
@@ -506,11 +578,23 @@ public sealed class Search
 
         _rootColor = pos.SideToMove;
 
+        // search.cpp:283,305-311 — locali a iterative_deepening, quindi resettate a ogni Search_
+        // (a differenza di _bestPreviousScore/_bestPreviousAverageScore/_previousTimeReduction,
+        // che sopravvivono da una chiamata all'altra nella stessa partita).
+        double timeReduction = 1;
+        double totBestMoveChanges = 0;
+        int lastBestMoveDepth = 0;
+        List<Move> lastBestMovePv = [];
+        var iterValue = new int[4];
+        int iterIdx = 0;
+        Array.Fill(iterValue, _bestPreviousScore == Values.Infinite ? Values.Zero : _bestPreviousScore);
+
         try
         {
             for (int depth = 1; depth <= maxDepth; depth++)
             {
                 _rootDepth = depth;
+                totBestMoveChanges /= 2; // search.cpp:341, invecchia la metrica di instabilità
                 _selDepth = 0; // search.cpp:373, dentro il ciclo pvIdx (qui multiPV=1, una volta)
 
                 // search.cpp:347-352 — salva i punteggi dell'iterazione precedente prima che il
@@ -537,6 +621,11 @@ public sealed class Search
                 for (_pvLast++; _pvLast < _rootMoves.Count; _pvLast++)
                     if (_rootMoves[_pvLast].TbRank != _rootMoves[_pvFirst].TbRank)
                         break;
+
+                // search.cpp:370 — la riga da seguire per followPV in questa iterazione è la PV
+                // dell'iterazione PRECEDENTE (già salvata sopra in PreviousPv prima di essere
+                // sovrascritta).
+                _lastIterationIdxPv = _rootMoves[_pvIdx].PreviousPv;
 
                 // search.cpp:376-383 — ampiezza dell'aspiration window e optimism dalla vera media
                 // mobile pesata per "effort" della mossa radice corrente (RootMove.cs), non più dal
@@ -586,13 +675,82 @@ public sealed class Search
                 result.BestMove = bestRootMove.Pv[0];
                 result.Pv = [.. bestRootMove.Pv];
                 result.ScoreCp = bestRootMove.Score;
+                result.AverageScore = bestRootMove.AverageScore;
                 result.Depth = depth;
                 result.SelDepth = bestRootMove.SelDepth;
+
+                // search.cpp:510-521 — traccia da quanto la mossa migliore è stabile.
+                // "forgottenMate"/l'aggancio a un matto di un'iterazione interrotta a metà
+                // (search.cpp:505-547) non servono qui: un'iterazione interrotta a metà lancia
+                // OperationCanceledException PRIMA di arrivare a questo punto, quindi il ciclo
+                // "for" non la raggiunge mai e result mantiene per costruzione l'ultimo risultato
+                // completato — lo stesso identico effetto che quella logica ottiene nella fonte
+                // con un flag cooperativo, qui gratis grazie al modello a eccezioni.
+                if (lastBestMovePv.Count == 0 || lastBestMovePv[0] != bestRootMove.Pv[0])
+                    lastBestMoveDepth = depth;
+                lastBestMovePv = bestRootMove.Pv;
+
+                // search.cpp:561-566 — accumula quante volte la mossa migliore è cambiata in
+                // questa iterazione (sommato su tutti i thread nella fonte; qui solo il thread che
+                // sta eseguendo, dato che gli altri thread del pool girano indipendentemente e non
+                // consultano mai questo valore comunque — vedi SearchThreadPool).
+                totBestMoveChanges += _bestMoveChanges;
+                _bestMoveChanges = 0;
+
+                // search.cpp:568-614 — gestione tempo adattiva reale: SOLO quando optimumMs è
+                // stato fornito (equivalente di limits.use_time_management()); "ponder"/
+                // "stopOnPonderhit" non sono portati (il protocollo ponder non è gestito da
+                // Program.cs), quindi qui il ramo "ferma la ricerca" è sempre quello percorso.
+                if (optimumMs < NoBound)
+                {
+                    ulong nodesEffort = bestRootMove.Effort * 100000UL / (ulong)Math.Max(1L, _nodes);
+
+                    double fallingEval = (11.48 + (2.30 * (_bestPreviousAverageScore - bestValue))
+                                          + (1.1 * (iterValue[iterIdx] - bestValue))) / 100.0;
+                    fallingEval = Math.Clamp(fallingEval, 0.576, 1.728);
+
+                    // Se la mossa migliore è stabile da diverse iterazioni, riduce il tempo di conseguenza.
+                    timeReduction = Math.Clamp(
+                        Interpolate(depth - lastBestMoveDepth, 4.96, 18.79, 0.639, 1.712), 0.629, 1.544);
+
+                    double reduction = (1.468 + _previousTimeReduction) / (2.284 * timeReduction);
+
+                    double bestMoveInstability = 1.077 + (2.229 * totBestMoveChanges);
+
+                    double highBestMoveEffort = Math.Clamp(
+                        Interpolate(nodesEffort, 75800, 104510, 0.969, 0.714), 0.693, 0.838);
+
+                    double totalTime = optimumMs * fallingEval * reduction * bestMoveInstability * highBestMoveEffort;
+
+                    if (_rootMoves.Count == 1)
+                        totalTime = Math.Min(500.0, totalTime); // limita a 0.5s per una miglior esperienza visiva
+
+                    double elapsedMs = elapsedStopwatch.Elapsed.TotalMilliseconds;
+
+                    if (elapsedMs > Math.Min(totalTime, (double)timeLimit.TotalMilliseconds)
+                        || bestRootMove.Score >= MateScore - 3
+                        || bestRootMove.Score == -MateScore + 2)
+                        break;
+                }
+
+                iterValue[iterIdx] = bestValue;
+                iterIdx = (iterIdx + 1) & 3;
             }
         }
         catch (OperationCanceledException)
         {
             // Iterazione in corso interrotta a metà: si tiene il risultato dell'ultima completata.
+        }
+
+        // search.cpp:247-248 — sempre eseguito (indipendentemente da use_time_management), per la
+        // prossima chiamata a Search_ nella stessa partita. Nella fonte usa "bestThread" (che può
+        // essere un thread diverso da mainThread, scelto da get_best_thread) — qui ogni Search
+        // aggiorna se stessa; SearchThreadPool.SetPreviousScores corregge il thread principale se
+        // il vincitore del pool è un altro thread.
+        if (_rootMoves.Count > 0)
+        {
+            _bestPreviousScore = _rootMoves[0].Score;
+            _bestPreviousAverageScore = _rootMoves[0].AverageScore;
         }
 
         result.Nodes = _nodes;
@@ -619,6 +777,19 @@ public sealed class Search
         // search.cpp:781-783 — selDepth conta da 1 (ply conta da 0), aggiornato dal primo nodo PV
         // che raggiunge un nuovo ply massimo in questa iterazione.
         if (isPvNode && _selDepth < ply + 1) _selDepth = ply + 1;
+
+        // search.cpp:772-775 — vero se questo nodo è ancora sulla riga principale
+        // dell'iterazione PRECEDENTE (radice sempre vera; altrimenti il genitore la seguiva E la
+        // mossa che ci ha portati qui è esattamente quella della PV precedente a questo ply).
+        // Posizionato qui (non subito dopo "Step 1" come nella fonte) perché in questo porting
+        // Step 1/2/3 sono in un ordine leggermente diverso — nessuna dipendenza di dati fra
+        // followPV e i controlli di patta/mate distance pruning sotto, quindi la posizione non
+        // cambia il risultato.
+        bool followPv = ply == 0
+            || (_followPvHistory[ply + StackOffset - 1]
+                && ply - 1 < _lastIterationIdxPv.Count
+                && _currentMoveHistory[ply + StackOffset - 1] == _lastIterationIdxPv[ply - 1]);
+        _followPvHistory[ply + StackOffset] = followPv;
 
         // Step 2. Controllo di patta immediata — search.cpp:787-790 (qui senza il controllo di
         // ricerca interrotta, gestito a parte da _ct.ThrowIfCancellationRequested sopra).
@@ -843,10 +1014,10 @@ public sealed class Search
 
             // Step 11. Internal iterative reduction — search.cpp:1048-1052: a profondità
             // sufficiente, riduce la profondità nei nodi PV/Cut senza una mossa in TT (una TT
-            // vuota qui è un segnale che questo nodo non è mai stato esplorato a sufficienza).
-            // "followPV" (segue la riga principale dell'iterazione precedente) non è portato —
-            // condizione qui leggermente più ampia.
-            if (!allNode && depth >= 6 && ttMove == Move.None)
+            // vuota qui è un segnale che questo nodo non è mai stato esplorato a sufficienza) —
+            // MAI se stiamo ancora seguendo la riga principale dell'iterazione precedente
+            // (followPv), che merita comunque piena profondità anche senza TT hit.
+            if (!followPv && !allNode && depth >= 6 && ttMove == Move.None)
                 depth--;
 
             // Step 12. ProbCut — search.cpp:1054-1096: se una cattura (o promozione) "abbastanza
@@ -857,17 +1028,23 @@ public sealed class Search
             if (depth >= 3 && !Values.IsDecisive(beta) && !(Values.IsValid(ttScore) && ttScore < probCutBeta))
             {
                 int probCutDepth = depth - (improving ? 5 : 3);
-                // Riusa il buffer per-ply di MovePicker (non ancora costruito a questo punto del
-                // nodo) invece di allocare una lista nuova — stessa ottimizzazione di
-                // MovePicker.cs, vedi nota lì.
-                var probCutCandidates = _mpGenBufs[ply];
-                probCutCandidates.Clear();
-                MoveGen.Generate(GenType.Captures, pos, probCutCandidates);
 
-                foreach (var pcMove in probCutCandidates)
+                // MovePicker in modalità ProbCut (il secondo costruttore, movepick.cpp:181-189):
+                // emette prima la mossa di TT se è una cattura pseudo-legale (anche senza ancora
+                // verificarne la soglia SEE — search.cpp:1069 la controlla comunque con
+                // pos.legal(), niente di più), poi le altre catture ordinate per MVV+capture
+                // history filtrate da see_ge(mossa, threshold). Riusa gli stessi buffer per-ply
+                // del MovePicker principale del ciclo mosse (costruito più sotto, allo Step 14) —
+                // sicuro perché non c'è mai sovrapposizione: questo ProbCut finisce prima che
+                // quello inizi.
+                var probCutMp = new MovePicker(pos, _movePick, ttMove, probCutBeta - staticEval,
+                    _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
+
+                Move pcMove;
+                while ((pcMove = probCutMp.NextMove()) != Move.None)
                 {
+                    if (pcMove == excludedMove) continue;
                     if (!pos.Legal(pcMove)) continue;
-                    if (!pos.SeeGe(pcMove, probCutBeta - staticEval)) continue;
 
                     var pcFrame = _accumulatorStack.Push();
                     var pcSt = new StateInfo();
@@ -957,8 +1134,7 @@ public sealed class Search
             // ri-confrontata riga per riga con la fonte (incluso il caso limite di see_ge sulle
             // mosse non-Normal: "return 0>=threshold" È il comportamento REALE della fonte per
             // le promozioni, non una nostra semplificazione — position.cpp:1393-1395). "followPV"
-            // (segue la riga principale dell'iterazione precedente) non è portato: qui questa
-            // potatura si applica sempre alle mosse quiete, piccola differenza dalla fonte.
+            // ora portato (vedi il gate sul ramo mosse quiete sotto).
             //
             // CAVEAT osservato: su una posizione con una promozione a donna vincente (d7c8q,
             // combaciante con l'oracolo nei commit precedenti), con questo Step attivo la mossa
@@ -1000,7 +1176,13 @@ public sealed class Search
                         && !pos.SeeGe(m, -margin))
                         continue;
                 }
-                else
+                // search.cpp:1197 — "else if (!ss->followPV || !PvNode)": una mossa quieta sulla
+                // riga principale dell'iterazione precedente, in un nodo PV, non viene mai potata
+                // qui (né late move pruning delle quiete sopra la riguarda: quello agisce su
+                // mp.SkipQuietMoves, non su questa singola mossa). Prima di followPv questa
+                // potatura si applicava SEMPRE alle mosse quiete — piccola ma reale differenza
+                // dalla fonte, ora corretta.
+                else if (!followPv || !isPvNode)
                 {
                     int dIndex = Math.Min(depth, LmrDivisor.Length) - 1;
                     int history = _movePick.ComputeQuietPruningHistory(pos, m, contRefs);

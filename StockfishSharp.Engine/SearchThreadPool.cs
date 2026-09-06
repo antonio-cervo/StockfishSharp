@@ -80,13 +80,17 @@ public sealed class SearchThreadPool
 
     /// <summary><c>ThreadPool::start_thinking</c> + attesa sincrona del risultato (il nostro
     /// layer UCI, come per <see cref="Search.Search_"/> a thread singolo, gestisce l'esecuzione in
-    /// background con un proprio <c>Task.Run</c> esterno — qui dentro l'attesa è bloccante).</summary>
-    public SearchResult Search_(Position rootPos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default)
+    /// background con un proprio <c>Task.Run</c> esterno — qui dentro l'attesa è bloccante).
+    /// <paramref name="optimumMs"/> (vedi <see cref="Search.Search_"/>) è passato SOLO al thread
+    /// principale (indice 0): gli helper, come nella fonte, non consultano mai la gestione tempo
+    /// adattiva — vanno sempre fino a <c>Ply.MaxPly</c> e si fermano solo quando il thread
+    /// principale (o il chiamante) cancella <paramref name="ct"/>.</summary>
+    public SearchResult Search_(Position rootPos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default, long optimumMs = Search.NoBound)
     {
         if (_searches.Count == 0) SetThreadCount(1);
 
         if (_searches.Count == 1)
-            return _searches[0].Search_(rootPos, maxDepth, timeLimit, ct);
+            return _searches[0].Search_(rootPos, maxDepth, timeLimit, ct, optimumMs: optimumMs);
 
         // tt.new_search(), search.cpp:204 — chiamato UNA SOLA VOLTA dal "thread principale"
         // (qui: il pool stesso, prima di avviare tutti i worker) e MAI dagli helper (vedi la nota
@@ -135,7 +139,7 @@ public sealed class SearchThreadPool
                 // Il thread principale rispetta il limite di profondità richiesto da UCI.
                 tasks[idx] = Task.Factory.StartNew(() =>
                 {
-                    results[idx] = _searches[idx].Search_(positions[idx], maxDepth, timeLimit, stopCt, callNewSearch: false);
+                    results[idx] = _searches[idx].Search_(positions[idx], maxDepth, timeLimit, stopCt, callNewSearch: false, optimumMs: optimumMs);
                     stopCts.Cancel();
                 }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             }
@@ -149,7 +153,15 @@ public sealed class SearchThreadPool
 
         Task.WaitAll(tasks);
 
-        return GetBestResult(results!);
+        var best = GetBestResult(results!);
+
+        // search.cpp:247-248 — "main_manager()->bestPreviousScore = bestThread->rootMoves[0].score"
+        // è SEMPRE il vincitore del voto, anche quando è un thread diverso da quello principale:
+        // senza questa propagazione, la prossima chiamata a Search_ del thread principale userebbe
+        // i PROPRI valori (magari peggiori) invece di quelli della riga davvero scelta.
+        _searches[0].SetPreviousScores(best.ScoreCp, best.AverageScore);
+
+        return best;
     }
 
     /// <summary><c>ThreadPool::get_best_thread</c>, thread.cpp:357-408 — vedi la nota in testa al
@@ -195,6 +207,7 @@ public sealed class SearchThreadPool
             Pv = best.Pv,
             SelDepth = best.SelDepth,
             ScoreCp = best.ScoreCp,
+            AverageScore = best.AverageScore,
             Depth = best.Depth,
             Nodes = results.Sum(r => r.Nodes), // Threads::nodes_searched, thread.cpp — somma su tutti i thread
             TbHits = results.Sum(r => r.TbHits), // Threads::tb_hits(), thread.cpp — idem
