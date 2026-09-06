@@ -116,6 +116,37 @@ public class TablebaseTests
         Assert.Equal(WdlScore.Loss, wdl);
     }
 
+    /// <summary>TB9 end-to-end: <see cref="Tablebase.RankRootMoves"/> deve classificare al
+    /// primo posto una mossa che porta al matto più veloce dichiarato dall'oracolo Stockfish
+    /// reale con le stesse opzioni UCI (default: Syzygy50MoveRule=true, SyzygyProbeDepth=1,
+    /// SyzygyProbeLimit=7) — l'oracolo sceglie "e1h4" ("mate 2"), ma DTZ=3 è raggiunto anche da
+    /// altre mosse (Qb4/Qe5): a parità di DTZ lo spareggio dipende dall'ordine di generazione
+    /// delle mosse, che differisce naturalmente da un'implementazione all'altra, quindi si
+    /// verifica che "e1h4" sia FRA le mosse a pari merito in cima (stesso TbRank della prima),
+    /// non che sia esattamente la prima. Verifica anche che le mosse restino ordinate per
+    /// <c>TbRank</c> decrescente dopo <see cref="Tablebase.RankRootMoves"/> (std::stable_sort
+    /// nella fonte).</summary>
+    [Fact]
+    public void RankRootMovesPicksSameMoveAsOracle()
+    {
+        var pos = MakePosition("4k3/8/4K3/8/8/8/8/4Q3 w - - 0 1");
+
+        List<Move> legalMoves = [];
+        MoveGen.Generate(GenType.Legal, pos, legalMoves);
+        var rootMoves = legalMoves.Select(m => new TbRootMove(m)).ToList();
+
+        var config = Tablebase.RankRootMoves(pos, rootMoves, syzygy50MoveRule: true, syzygyProbeDepth: 1, syzygyProbeLimit: 7);
+
+        Assert.True(config.RootInTb);
+        Assert.True(rootMoves[0].TbScore > Values.Draw, "La radice e' vinta: la prima mossa classificata deve avere punteggio positivo");
+
+        for (int i = 1; i < rootMoves.Count; i++)
+            Assert.True(rootMoves[i - 1].TbRank >= rootMoves[i].TbRank, "Le mosse devono restare ordinate per TbRank decrescente");
+
+        var e1h4 = rootMoves.Single(m => m.Move.FromSq == Square.E1 && m.Move.ToSq == Square.H4);
+        Assert.Equal(rootMoves[0].TbRank, e1h4.TbRank);
+    }
+
     /// <summary>Verifica indipendente delle tabelle combinatorie costruite da
     /// <see cref="TbConstants.BuildCombinatorialTables"/> (tbprobe.cpp:1545-1637): proprietà
     /// strutturali indipendenti dall'implementazione (Binomial = coefficienti binomiali standard,

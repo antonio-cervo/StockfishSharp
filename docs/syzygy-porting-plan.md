@@ -102,7 +102,26 @@ identico fino al calcolo del blocco/offset sparso, poi divergente proprio al cam
 (stesso buffer, puntatore avanzato di 4), non più un array "accorciato" con la propria
 numerazione indipendente.
 
-**Resta da fare**: TB9 (`root_probe`/`root_probe_wdl`/`rank_root_moves` — richiedono le vere
-`Search::RootMoves`, non presenti in questo porting) e TB10 (wiring: opzioni UCI
+**Resta da fare**: TB10 (wiring: opzioni UCI
 `SyzygyPath`/`SyzygyProbeDepth`/`Syzygy50MoveRule`/`SyzygyProbeLimit`, hook nel nodo di
 ricerca via `TbConfig` su `Search`, Step 7 di search.cpp).
+
+## TB9 FATTO E VERIFICATO (2026-09-06, stessa sessione)
+
+`RootProbe`/`RootProbeWdl`/`RankRootMoves` in `Tablebase.cs`, più `TbRootMove` (sostituto
+minimo di `Search::RootMove` — solo `Move`/`TbRank`/`TbScore`, non l'intero PV) in
+`TbTypes.cs`. `DtzIsDtm` (`Position::dtz_is_dtm`, position.h:346-349) come helper privato
+(non un metodo di `Position`, usato solo qui). `RankRootMoves` non ha `OptionsMap` (non
+presente in questo porting): le tre opzioni UCI (`Syzygy50MoveRule`/`SyzygyProbeDepth`/
+`SyzygyProbeLimit`) diventano parametri espliciti, da passare dal chiamante quando arriverà
+il wiring (TB10). `std::stable_sort` → LINQ `OrderByDescending` (garantito stabile).
+
+Verificato: `RankRootMovesPicksSameMoveAsOracle` — su KQvK, confronta con l'oracolo Stockfish
+reale (stesse opzioni UCI: Syzygy50MoveRule=true, SyzygyProbeDepth=1, SyzygyProbeLimit=7).
+L'oracolo sceglie `e1h4` ("mate 2"); il nostro port classifica **tre** mosse (Qb4/Qe5/Qh4)
+allo stesso `TbRank` massimo (DTZ=3, matto ugualmente veloce) — lo spareggio fra mosse
+equivalenti dipende dall'ordine di generazione delle mosse, che differisce naturalmente da
+un'implementazione all'altra (confermato sondando `RankRootMoves` direttamente: tutte e tre
+riportano `rank=262141`), quindi il test verifica che `e1h4` sia fra le mosse in cima a pari
+merito, non che sia esattamente la prima — la correttezza è nel trovare il DTZ minimo, non
+nel tie-break arbitrario. 109 test totali, nessuna regressione.

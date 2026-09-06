@@ -1,9 +1,9 @@
 // Porting di Stockfish::Tablebases — decompress_pairs (tbprobe.cpp:620-744), do_probe_table
 // (793-1021), probe_table (1428-1440), search&lt;CheckZeroingMoves&gt; (1455-1513), init
-// (1521-1683), probe_wdl/probe_dtz (1693-1784). Vedi docs/syzygy-porting-plan.md per le fasi
-// (qui: TB4, TB6, TB7, TB8) e le deviazioni dichiarate. TB9 (root_probe/rank_root_moves, che
-// richiedono le vere Search::RootMoves non ancora presenti in questo porting) e TB10 (wiring nel
-// nodo di ricerca + opzioni UCI) restano da fare.
+// (1521-1683), probe_wdl/probe_dtz (1693-1784), root_probe/root_probe_wdl/rank_root_moves
+// (1787-1965). Vedi docs/syzygy-porting-plan.md per le fasi (qui: TB4, TB6, TB7, TB8, TB9) e le
+// deviazioni dichiarate (per TB9: niente Search::RootMoves vere, vedi TbRootMove in TbTypes.cs).
+// TB10 (wiring nel nodo di ricerca + opzioni UCI) resta da fare.
 
 namespace StockfishSharp.Engine.Tablebases;
 
@@ -429,5 +429,180 @@ public static class Tablebase
         }
 
         return minDtz == 0xFFFF ? -1 : minDtz;
+    }
+
+    /// <summary><c>Position::dtz_is_dtm</c>, position.h:346-349 — non un metodo di
+    /// <c>Position</c> in questo porting (usato solo qui), tenuto come helper privato.</summary>
+    private static bool DtzIsDtm(Position pos)
+    {
+        int pieceCount = Bitboards.PopCount(pos.Pieces());
+        return pos.Pieces(PieceType.Pawn) == 0
+            && (pieceCount == 3 || (pieceCount == 4 && pos.Pieces(PieceType.Queen, PieceType.Rook) == 0));
+    }
+
+    /// <summary><c>Tablebases::root_probe</c>, tbprobe.cpp:1787-1863 — usa le tabelle DTZ per
+    /// ordinare le mosse alla radice. Ritorna <c>false</c> se un probe è fallito o è scaduto il
+    /// tempo (<paramref name="timeAbort"/>).</summary>
+    public static bool RootProbe(Position pos, List<TbRootMove> rootMoves, bool rule50, bool rankDtz, Func<bool> timeAbort)
+    {
+        ProbeState result = ProbeState.Ok;
+        var st = new StateInfo();
+
+        int cnt50 = pos.Rule50Count;
+        bool rep = pos.HasRepeated();
+        int bound = rule50 ? (TbConstants.MaxDtz / 2 - 100) : 1;
+
+        foreach (var m in rootMoves)
+        {
+            pos.DoMove(m.Move, st);
+
+            int dtz;
+            if (pos.Rule50Count == 0)
+            {
+                // Mossa che azzera il conteggio: dtz è uno fra -101/-1/0/1/101.
+                WdlScore wdl = (WdlScore)(-(int)ProbeWdl(pos, out result));
+                dtz = TbConstants.DtzBeforeZeroing(wdl);
+            }
+            else if ((rule50 && pos.IsDraw(1)) || pos.IsRepetition(1))
+            {
+                // Patta per ripetizione/50 mosse a un ply dalla radice: dev'essere una vera
+                // tripla ripetizione nella storia della partita.
+                dtz = 0;
+            }
+            else
+            {
+                dtz = -ProbeDtz(pos, out result);
+                dtz = dtz > 0 ? dtz + 1 : dtz < 0 ? dtz - 1 : dtz;
+            }
+
+            // Assicura che una mossa di matto riceva sempre dtz=1 (l'aggiustamento sopra la
+            // porta a 2 quando probe_dtz sulla posizione già matta ritorna -1, "il lato di
+            // turno è matto").
+            if (pos.Checkers() != 0 && dtz == 2)
+            {
+                List<Move> replies = [];
+                MoveGen.Generate(GenType.Legal, pos, replies);
+                if (replies.Count == 0)
+                    dtz = 1;
+            }
+
+            pos.UndoMove(m.Move);
+
+            if (timeAbort() || result == ProbeState.Fail)
+                return false;
+
+            // Le mosse migliori sono classificate più in alto. Le vittorie certe sono
+            // classificate alla pari. Le mosse perdenti sono alla pari a meno che non si
+            // profili una patta per 50 mosse.
+            int r = dtz > 0
+                ? (dtz + cnt50 <= 99 && !rep ? TbConstants.MaxDtz - (rankDtz ? dtz : 0)
+                                             : TbConstants.MaxDtz / 2 - (dtz + cnt50))
+                : dtz < 0
+                    ? (-dtz * 2 + cnt50 < 100 ? -TbConstants.MaxDtz - (rankDtz ? dtz : 0)
+                                              : -TbConstants.MaxDtz / 2 + (-dtz + cnt50))
+                    : 0;
+            m.TbRank = r;
+
+            // Punteggio da mostrare per questa mossa: almeno 1 cp per le vittorie "maledette",
+            // fino a 49 cp avvicinandosi a una vittoria vera.
+            m.TbScore = r >= bound ? Values.Mate - Ply.MaxPly - 1
+                : r > 0 ? Math.Max(3, r - (TbConstants.MaxDtz / 2 - 200)) * Values.Pawn / 200
+                : r == 0 ? Values.Draw
+                : r > -bound ? Math.Min(-3, r + (TbConstants.MaxDtz / 2 - 200)) * Values.Pawn / 200
+                : -Values.Mate + Ply.MaxPly + 1;
+        }
+
+        return true;
+    }
+
+    /// <summary><c>Tablebases::root_probe_wdl</c>, tbprobe.cpp:1866-1902 — riserva usata quando
+    /// mancano (in tutto o in parte) le tabelle DTZ.</summary>
+    public static bool RootProbeWdl(Position pos, List<TbRootMove> rootMoves, bool rule50)
+    {
+        int[] wdlToRank = [-TbConstants.MaxDtz, -TbConstants.MaxDtz + 101, 0, TbConstants.MaxDtz - 101, TbConstants.MaxDtz];
+
+        ProbeState result = ProbeState.Ok;
+        var st = new StateInfo();
+
+        foreach (var m in rootMoves)
+        {
+            pos.DoMove(m.Move, st);
+
+            WdlScore wdl = pos.IsDraw(1) ? WdlScore.Draw : (WdlScore)(-(int)ProbeWdl(pos, out result));
+
+            pos.UndoMove(m.Move);
+
+            if (result == ProbeState.Fail)
+                return false;
+
+            m.TbRank = wdlToRank[(int)wdl + 2];
+
+            if (!rule50)
+                wdl = wdl > WdlScore.Draw ? WdlScore.Win : wdl < WdlScore.Draw ? WdlScore.Loss : WdlScore.Draw;
+            m.TbScore = TbConstants.WdlToValue[(int)wdl + 2];
+        }
+
+        return true;
+    }
+
+    /// <summary><c>Tablebases::rank_root_moves</c>, tbprobe.cpp:1904-1965 — senza
+    /// <c>OptionsMap</c> (non presente in questo porting): le tre opzioni UCI diventano
+    /// parametri espliciti, passati dal chiamante (Flow A4/TB10).</summary>
+    public static TbConfig RankRootMoves(Position pos, List<TbRootMove> rootMoves,
+        bool syzygy50MoveRule, int syzygyProbeDepth, int syzygyProbeLimit,
+        bool rankDtz = false, Func<bool>? timeAbort = null)
+    {
+        timeAbort ??= static () => false;
+        var config = new TbConfig();
+        if (rootMoves.Count == 0) return config;
+
+        config.RootInTb = false;
+        config.UseRule50 = syzygy50MoveRule;
+        config.ProbeDepth = syzygyProbeDepth;
+        config.Cardinality = syzygyProbeLimit;
+
+        bool dtzAvailable = true;
+
+        // Le tabelle con meno pezzi di SyzygyProbeLimit sono sondate con probeDepth == 0.
+        if (config.Cardinality > MaxCardinality)
+        {
+            config.Cardinality = MaxCardinality;
+            config.ProbeDepth = 0;
+        }
+
+        if (config.Cardinality >= Bitboards.PopCount(pos.Pieces()) && !pos.CanCastle(CastlingRights.AnyCastling))
+        {
+            // Usa DTZ per ordinare le mosse se il matto è l'unica mossa che azzera il conteggio.
+            rankDtz = rankDtz || DtzIsDtm(pos);
+
+            config.RootInTb = RootProbe(pos, rootMoves, syzygy50MoveRule, rankDtz, timeAbort);
+
+            if (!config.RootInTb && !timeAbort())
+            {
+                // Le tabelle DTZ mancano: prova a ordinare le mosse con le tabelle WDL.
+                dtzAvailable = false;
+                config.RootInTb = RootProbeWdl(pos, rootMoves, syzygy50MoveRule);
+            }
+        }
+
+        if (config.RootInTb)
+        {
+            // std::stable_sort — LINQ OrderByDescending è garantito stabile.
+            var sorted = rootMoves.OrderByDescending(m => m.TbRank).ToList();
+            rootMoves.Clear();
+            rootMoves.AddRange(sorted);
+
+            // Sonda durante la ricerca solo se DTZ non è disponibile e si sta vincendo.
+            if (dtzAvailable || rootMoves[0].TbScore <= Values.Draw)
+                config.Cardinality = 0;
+        }
+        else
+        {
+            // Pulizia se sia root_probe() sia root_probe_wdl() sono falliti.
+            foreach (var m in rootMoves)
+                m.TbRank = 0;
+        }
+
+        return config;
     }
 }

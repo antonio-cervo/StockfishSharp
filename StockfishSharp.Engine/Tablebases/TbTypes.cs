@@ -33,6 +33,19 @@ public struct TbConfig
     public int ProbeDepth;
 }
 
+/// <summary>Sostituto minimo di <c>Search::RootMove</c> (search.h) per <see
+/// cref="Tablebase.RootProbe"/>/<see cref="Tablebase.RootProbeWdl"/>/<see
+/// cref="Tablebase.RankRootMoves"/> (TB9) — la struttura vera ha un intero PV
+/// (<c>std::vector&lt;Move&gt; pv</c>) più campi per MultiPV/aspiration windows (Flow A4, non
+/// ancora portato); qui basta la sola prima mossa (<c>m.pv[0]</c> nella fonte) più i due campi
+/// che TB9 effettivamente legge/scrive.</summary>
+public sealed class TbRootMove(Move move)
+{
+    public readonly Move Move = move;
+    public int TbRank;
+    public int TbScore;
+}
+
 /// <summary><c>TBFlag</c>, tbprobe.cpp:119-126.</summary>
 [Flags]
 public enum TbFlag : byte
