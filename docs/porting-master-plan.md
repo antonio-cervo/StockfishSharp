@@ -499,15 +499,21 @@ storica fra le `Position` clonate per thread).
 `dotnet test` 99/99; bench 1/2/4/8 thread — nodi/sec cresce (227k → 337k → 549k → 861k, non
 lineare: atteso, Lazy SMP non garantisce scaling lineare nemmeno nella fonte reale).
 
-### C2 — Tablebase Syzygy (`syzygy/`, 2.053 righe) — porting VERO, non un extra
-Mai aperto. Fa parte della fonte reale a tutti gli effetti: `tbprobe.h`+`.cpp` è integrato
-nativamente in Stockfish e usato direttamente in `search.cpp` (ordinamento delle mosse alla radice
-per tablebase) e nelle opzioni UCI (`SyzygyPath`/`Syzygy50MoveRule`/`SyzygyProbeDepth`/
-`SyzygyProbeLimit`, engine.cpp) — a differenza del libro di aperture (D1 sotto), qui l'obiettivo
-resta la trascrizione fedele. I file di dati fino a 5 pezzi sono già disponibili in
-`../ACMyChess/Syzygy/` (vedi [[acmychess-tablebase-plan]]). **Riserva** se il porting fedele di
-`tbprobe.cpp` risultasse troppo oneroso: un client pratico per lo stesso formato di file (come già
-fatto in ACMyChess) — ma questa resta un'ultima risorsa, non il piano.
+### C2 — Tablebase Syzygy (`syzygy/`, 2.053 righe) — porting VERO, non un extra — 🟡 TB1-TB8 FATTI
+
+Motore di probing WDL/DTZ completo e verificato (2026-09-06), dettaglio completo in
+`docs/syzygy-porting-plan.md`. `StockfishSharp.Engine/Tablebases/` — tipi/costanti/tabelle
+combinatorie, file/tabelle/registro hash, decompressione Huffman "Recursive Pairing",
+calcolo dell'indice di posizione, `ProbeWdl`/`ProbeDtz` pubblici. Verificato con l'oracolo
+Stockfish reale su 7 materiali diversi (con/senza pedoni, con/senza pezzo unico) + una
+verifica indipendente che segue `ProbeDtz` fino al matto vero. **Bug reale trovato e
+corretto** durante la verifica (confrontando con python-chess, installato al volo come terzo
+oracolo): un disallineamento di 4 byte nell'arrotondamento a 64 byte del `DataOffset`,
+introdotto "spogliando" l'array del magic number invece di tenerlo intero e avanzare il
+cursore di 4 come fa la fonte — dettagli in `docs/syzygy-porting-plan.md`. **Resta**: TB9
+(`root_probe`/`rank_root_moves`, richiedono le vere `Search::RootMoves` non presenti in
+questo porting) e TB10 (wiring: opzioni UCI, hook nel nodo di ricerca). I file di dati fino a
+5 pezzi sono già disponibili in `../ACMyChess/Syzygy/` (vedi [[acmychess-tablebase-plan]]).
 
 ### C3 — Utilità (`misc`, `memory`, `score`, `numa`, `tune`, `universal/`, ~1.500 righe)
 Portate finora solo le briciole che servivano (`PRNG` dentro `Attacks.cs`).
