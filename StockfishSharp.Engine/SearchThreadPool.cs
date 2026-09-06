@@ -31,12 +31,15 @@
 // stessa (punteggio - minimo + 14, preferenza al mate più corto/lungo quando decisivo) è portata
 // fedele.
 
+using StockfishSharp.Engine.Tablebases;
+
 namespace StockfishSharp.Engine;
 
 public sealed class SearchThreadPool
 {
     private readonly TranspositionTable _tt = new();
     private readonly List<Search> _searches = [];
+    private TbConfig _tbConfig;
 
     public int ThreadCount => _searches.Count;
 
@@ -48,7 +51,20 @@ public sealed class SearchThreadPool
         n = Math.Max(1, n);
         _searches.Clear();
         for (int i = 0; i < n; i++)
-            _searches.Add(new Search(_tt));
+        {
+            var s = new Search(_tt);
+            s.SetTbConfig(_tbConfig);
+            _searches.Add(s);
+        }
+    }
+
+    /// <summary>Propaga la configurazione Syzygy (TB10) a tutti i thread del pool — replicata,
+    /// non condivisa: ogni <see cref="Search"/> la legge sola-lettura durante la ricerca (stessa
+    /// tbConfig per ogni Search::Worker nella fonte, rank_root_moves/thread.cpp).</summary>
+    public void SetTbConfig(TbConfig config)
+    {
+        _tbConfig = config;
+        foreach (var s in _searches) s.SetTbConfig(config);
     }
 
     public void Resize(int hashMb) => _tt.Resize(hashMb);
@@ -176,6 +192,7 @@ public sealed class SearchThreadPool
             ScoreCp = best.ScoreCp,
             Depth = best.Depth,
             Nodes = results.Sum(r => r.Nodes), // Threads::nodes_searched, thread.cpp — somma su tutti i thread
+            TbHits = results.Sum(r => r.TbHits), // Threads::tb_hits(), thread.cpp — idem
         };
     }
 }

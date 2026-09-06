@@ -104,7 +104,7 @@ numerazione indipendente.
 
 **Resta da fare**: TB10 (wiring: opzioni UCI
 `SyzygyPath`/`SyzygyProbeDepth`/`Syzygy50MoveRule`/`SyzygyProbeLimit`, hook nel nodo di
-ricerca via `TbConfig` su `Search`, Step 7 di search.cpp).
+ricerca via `TbConfig` su `Search`, Step 7 di search.cpp) — vedi sotto, FATTO.
 
 ## TB9 FATTO E VERIFICATO (2026-09-06, stessa sessione)
 
@@ -125,3 +125,50 @@ un'implementazione all'altra (confermato sondando `RankRootMoves` direttamente: 
 riportano `rank=262141`), quindi il test verifica che `e1h4` sia fra le mosse in cima a pari
 merito, non che sia esattamente la prima — la correttezza è nel trovare il DTZ minimo, non
 nel tie-break arbitrario. 109 test totali, nessuna regressione.
+
+## TB10 FATTO E VERIFICATO (2026-09-06, stessa sessione) — Flusso C2 COMPLETO
+
+Wiring dello Step 7 di `search.cpp:922-973` (probe delle tablebase dentro l'albero di
+ricerca) in `Search.Negamax`, più le quattro opzioni UCI (`SyzygyPath`/`SyzygyProbeDepth`/
+`Syzygy50MoveRule`/`SyzygyProbeLimit`) in `StockfishSharp.Uci/Program.cs`.
+
+**`Search`**: nuovo campo `TbConfig _tbConfig` (default `Cardinality=0`, probing disattivato
+finché il livello UCI non chiama `SetTbConfig` dopo aver caricato almeno una tabella) e
+contatore `_tbHits` (azzerato a inizio `Search_`, riportato in `SearchResult.TbHits`).
+`SearchThreadPool.SetTbConfig` propaga la config a tutti i thread (replicata, non condivisa —
+ogni `Search` la legge sola-lettura) e la riapplica automaticamente ai thread ricreati da
+`SetThreadCount`; `GetBestResult` somma `TbHits` di tutti i thread (`Threads::tb_hits()`).
+
+**Step 7 in `Negamax`**: inserito subito dopo l'hindsight depth adjustment (stessa posizione
+relativa della fonte: dopo Step 5 static eval + hindsight, prima dello Step 8/9/ProbCut),
+prima del ramo `if (!inCheck)`. Deviazione dichiarata: la fonte aggiorna `bestValue`/
+`maxValue` (variabili condivise con tutto il ciclo mosse, dichiarate a Step 1) direttamente;
+in questo porting `value` (l'equivalente di `bestValue`) non esiste ancora a questo punto
+della funzione (dichiarato solo a Step 14, appena prima del ciclo mosse) — usati due
+`int?` locali (`tbBestValueFloor`/`tbMaxValueCap`) che vengono consumati esattamente dove la
+fonte li userebbe: `tbBestValueFloor` come valore iniziale di `value` invece di `-Infinity`
+(Step 1 della fonte), `tbMaxValueCap` come tetto (`value = min(value, tbMaxValueCap)`) subito
+dopo il bonus "countermove" di fine ciclo (Step 23) e prima dell'aggiornamento della
+correction history — stessa posizione relativa di `bestValue = min(bestValue, maxValue)`
+nella fonte (search.cpp:1611, prima di `update_correction_history` a riga 1637).
+
+**UCI**: `SyzygyPath` vuoto di default (nessuna tablebase, probing disattivato, come la
+fonte); `Syzygy50MoveRule`/`SyzygyProbeDepth`/`SyzygyProbeLimit` con gli stessi default della
+fonte (true/1/7). Ogni `setoption` sulle quattro opzioni richiama `UpdateTbConfig()`
+(`SyzygyPath` chiama anche `Tablebase.Init` prima, come `Tablebases::init` ad ogni cambio di
+path). Aggiunto anche `tbhits` alle righe `info` di `go`/`bench` (`SearchResult.TbHits`).
+
+**Verificato**: 109 test invariati (nessuna regressione — `_tbConfig.Cardinality=0` di
+default rende lo Step 7 un no-op finché non configurato). A mano via UCI: bench a thread
+singolo senza Syzygy configurato dà **507.992 nodi**, identico alla baseline storica (nessun
+effetto quando disattivato); con `SyzygyPath` impostato su una posizione KQvK, stesso
+`bestmove`/punteggio/nodi di quando disattivato ma `tbhits` diventa non-zero (conferma che il
+probe avviene senza alterare un risultato che la ricerca pura trova già correttamente a
+quella profondità); su KBBvK (4 pezzi, ricerca meno immediata) `tbhits` cresce con
+`SyzygyProbeLimit` più permissivo (35 con limite 5 contro 4 con default 7), a conferma che il
+cardinality/probeDepth configurati incidono davvero sul numero di probe.
+
+**Flusso C2 (Syzygy) è ora COMPLETO**: TB1-TB10 tutti fatti e verificati. Non porta
+`ponder`/pondering reale né l'estensione del PV oltre matto (`syzygy_extend_pv`,
+search.cpp:2150-2270) — quest'ultima richiede le vere `Search::RootMoves` con PV completo
+(stesso prerequisito mancante di TB9/MultiPV), lasciata come eventuale rifinitura futura.

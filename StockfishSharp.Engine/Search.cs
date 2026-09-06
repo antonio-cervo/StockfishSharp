@@ -76,6 +76,8 @@
 //
 // NON ancora portato: Lazy SMP (Flow C).
 
+using StockfishSharp.Engine.Tablebases;
+
 namespace StockfishSharp.Engine;
 
 public sealed class SearchResult
@@ -84,6 +86,7 @@ public sealed class SearchResult
     public int ScoreCp;
     public long Nodes;
     public int Depth;
+    public long TbHits;
 }
 
 public sealed class Search
@@ -109,6 +112,15 @@ public sealed class Search
     private readonly Nnue.AccumulatorStack _accumulatorStack = new();
     private CancellationToken _ct;
     private long _nodes;
+    private long _tbHits;
+
+    /// <summary>Equivalente di <c>Search::Worker::tbConfig</c> (search.cpp:922-973, Step 7) —
+    /// <c>Cardinality=0</c> di default (probing disattivato finché il livello UCI non chiama
+    /// <see cref="SetTbConfig"/>, tipicamente dopo aver caricato le tabelle con
+    /// <c>Tablebase.Init</c>).</summary>
+    private TbConfig _tbConfig;
+
+    public void SetTbConfig(TbConfig config) => _tbConfig = config;
 
     private const int Infinity = 32001; // VALUE_INFINITE della fonte, types.h:155
     private const int MateScore = 32000; // VALUE_MATE, types.h:157
@@ -372,6 +384,7 @@ public sealed class Search
         cts.CancelAfter(timeLimit);
         _ct = cts.Token;
         _nodes = 0;
+        _tbHits = 0;
         if (callNewSearch) _tt.NewSearch();
         _movePick.ResetForSearch(); // lowPlyHistory.fill(102), search.cpp:326
         _accumulatorStack.Reset(); // AccumulatorStack::reset, nnue_accumulator.cpp:71-77
@@ -440,6 +453,7 @@ public sealed class Search
         }
 
         result.Nodes = _nodes;
+        result.TbHits = _tbHits;
         return result;
     }
 
@@ -556,6 +570,61 @@ public sealed class Search
         // già buone per chi muove, un ply in meno evita di scavare inutilmente.
         if (priorReduction >= 3 && !opponentWorsening) depth++;
         if (priorReduction >= 2 && depth >= 2 && staticEval + _staticEvalHistory[ply + StackOffset - 1] > 166) depth--;
+
+        // Step 7. Sonda le tablebase — search.cpp:922-973. tbBestValueFloor/tbMaxValueCap
+        // sostituiscono l'aggiornamento diretto di bestValue/maxValue della fonte: qui "value" (il
+        // running best value del ciclo mosse) non esiste ancora a questo punto della funzione
+        // (dichiarato allo Step 14, appena prima del ciclo) — i due valori vengono consumati lì
+        // (floor come valore iniziale invece di -Infinity) e alla fine della funzione (cap prima
+        // del salvataggio in TT), esattamente come bestValue/maxValue nella fonte.
+        int? tbBestValueFloor = null;
+        int? tbMaxValueCap = null;
+        if (ply != 0 && excludedMove == default && _tbConfig.Cardinality != 0)
+        {
+            int tbPieceCount = Bitboards.PopCount(pos.Pieces());
+
+            if (tbPieceCount <= _tbConfig.Cardinality
+                && (tbPieceCount < _tbConfig.Cardinality || depth >= _tbConfig.ProbeDepth)
+                && pos.Rule50Count == 0 && !pos.CanCastle(CastlingRights.AnyCastling))
+            {
+                var wdl = Tablebase.ProbeWdl(pos, out var tbState);
+
+                if (tbState != ProbeState.Fail)
+                {
+                    _tbHits++;
+
+                    int drawScore = _tbConfig.UseRule50 ? 1 : 0;
+                    int tbValue = Values.Tb - ply;
+                    int wdlInt = (int)wdl;
+
+                    int tbResultValue = wdlInt < -drawScore ? -tbValue
+                        : wdlInt > drawScore ? tbValue
+                        : Values.Draw + (2 * wdlInt * drawScore);
+
+                    Bound tbBound = wdlInt < -drawScore ? Bound.Upper
+                        : wdlInt > drawScore ? Bound.Lower
+                        : Bound.Exact;
+
+                    if (tbBound == Bound.Exact || (tbBound == Bound.Lower ? tbResultValue >= beta : tbResultValue <= alpha))
+                    {
+                        _tt.Save(probe.WriteIndex, pos.Key, ValueToTt(tbResultValue, ply), ttPv, tbBound,
+                            Math.Min(Ply.MaxPly - 1, depth + 6), Move.None, Values.None);
+                        return tbResultValue;
+                    }
+
+                    if (isPvNode)
+                    {
+                        if (tbBound == Bound.Lower)
+                        {
+                            tbBestValueFloor = tbResultValue;
+                            alpha = Math.Max(alpha, tbResultValue);
+                        }
+                        else
+                            tbMaxValueCap = tbResultValue;
+                    }
+                }
+            }
+        }
 
         if (!inCheck)
         {
@@ -674,7 +743,7 @@ public sealed class Search
             _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
 
         int origAlpha = alpha;
-        int value = -Infinity;
+        int value = tbBestValueFloor ?? -Infinity; // Step 1 della fonte, search.cpp:769: bestValue = -VALUE_INFINITE (salvo il floor dello Step 7)
         Move? bestMove = null;
         int moveCount = 0; // search.cpp:1116
 
@@ -984,6 +1053,12 @@ public sealed class Search
                 }
             }
         }
+
+        // search.cpp:1611-1612: nei nodi PV, uno Step 7 che aveva impostato un tetto (posizione
+        // giudicata al più patta/persa dalle tablebase, "maxValue") non deve mai essere superato
+        // dal risultato del ciclo mosse.
+        if (isPvNode && tbMaxValueCap.HasValue)
+            value = Math.Min(value, tbMaxValueCap.Value);
 
         // search.cpp:1629-1638: aggiorna la correction history solo se la mossa migliore non è una
         // cattura e la direzione dell'errore (bestValue sopra/sotto la valutazione statica)

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using StockfishSharp.Engine;
+using StockfishSharp.Engine.Tablebases;
 using StockfishSharp.Uci;
 using File = StockfishSharp.Engine.File;
 
@@ -51,6 +52,28 @@ search.SetThreadCount(8);
 search.Resize(16);
 search.NewGame();
 var timeManagement = new TimeManagement();
+
+// Opzioni Syzygy (TB10, Config/rank_root_moves, engine.cpp) — SyzygyPath vuoto di default come
+// la fonte reale (nessuna tablebase caricata, probing disattivato). Gli altri tre default
+// (Syzygy50MoveRule=true, SyzygyProbeDepth=1, SyzygyProbeLimit=7) sono gli stessi della fonte.
+string syzygyPath = "";
+bool syzygy50MoveRule = true;
+int syzygyProbeDepth = 1;
+int syzygyProbeLimit = 7;
+
+// tbConfig.cardinality resta 0 (probing disattivato in ricerca) finché non è stato caricato
+// almeno un file — altrimenti ogni nodo tenterebbe un probe destinato a fallire sempre.
+void UpdateTbConfig()
+{
+    search.SetTbConfig(new TbConfig
+    {
+        Cardinality = string.IsNullOrEmpty(syzygyPath) ? 0 : syzygyProbeLimit,
+        ProbeDepth = syzygyProbeDepth,
+        UseRule50 = syzygy50MoveRule,
+        RootInTb = false,
+    });
+}
+UpdateTbConfig();
 int maxDepth = 30;
 
 // Una ricerca ("go") gira su un task in background invece che bloccare questo ciclo: un client
@@ -146,6 +169,10 @@ while (Console.ReadLine() is { } line)
             Console.WriteLine("option name Hash type spin default 16 min 1 max 4096");
             Console.WriteLine($"option name Threads type spin default 8 min 1 max {Environment.ProcessorCount}");
             Console.WriteLine("option name UCI_Chess960 type check default false");
+            Console.WriteLine("option name SyzygyPath type string default <empty>");
+            Console.WriteLine("option name SyzygyProbeDepth type spin default 1 min 1 max 100");
+            Console.WriteLine("option name Syzygy50MoveRule type check default true");
+            Console.WriteLine("option name SyzygyProbeLimit type spin default 7 min 0 max 7");
             Console.WriteLine("uciok");
             break;
 
@@ -241,6 +268,27 @@ void HandleSetOption(string[] toks)
     }
     else if (string.Equals(name, "UCI_Chess960", StringComparison.OrdinalIgnoreCase) && bool.TryParse(value, out bool chess960))
         isChess960 = chess960;
+    else if (string.Equals(name, "SyzygyPath", StringComparison.OrdinalIgnoreCase))
+    {
+        syzygyPath = value;
+        Tablebase.Init(syzygyPath); // Tablebases::init, chiamato ad ogni cambio di SyzygyPath
+        UpdateTbConfig();
+    }
+    else if (string.Equals(name, "SyzygyProbeDepth", StringComparison.OrdinalIgnoreCase) && int.TryParse(value, out int probeDepth))
+    {
+        syzygyProbeDepth = probeDepth;
+        UpdateTbConfig();
+    }
+    else if (string.Equals(name, "Syzygy50MoveRule", StringComparison.OrdinalIgnoreCase) && bool.TryParse(value, out bool rule50))
+    {
+        syzygy50MoveRule = rule50;
+        UpdateTbConfig();
+    }
+    else if (string.Equals(name, "SyzygyProbeLimit", StringComparison.OrdinalIgnoreCase) && int.TryParse(value, out int probeLimit))
+    {
+        syzygyProbeLimit = probeLimit;
+        UpdateTbConfig();
+    }
 }
 
 void HandlePosition(string[] toks)
@@ -394,7 +442,7 @@ void HandleGo(string[] toks)
     searchTask = Task.Run(() =>
     {
         var result = search.Search_(pos, depth, budget, ct);
-        Console.WriteLine($"info depth {result.Depth} score cp {result.ScoreCp} nodes {result.Nodes}");
+        Console.WriteLine($"info depth {result.Depth} score cp {result.ScoreCp} nodes {result.Nodes} tbhits {result.TbHits}");
 
         // Matto/stallo: la TT salva Move.None come bestMove (Search.cs, "bestMove ?? Move.None"),
         // quindi result.BestMove.HasValue è vero anche qui — senza questo controllo aggiuntivo
@@ -460,7 +508,7 @@ void HandleBench(string[] toks)
             : search.Search_(position, int.TryParse(limit, out int d) ? d : 13, TimeSpan.FromHours(1), CancellationToken.None);
 
         totalNodes += result.Nodes;
-        Console.WriteLine($"info depth {result.Depth} score cp {result.ScoreCp} nodes {result.Nodes}");
+        Console.WriteLine($"info depth {result.Depth} score cp {result.ScoreCp} nodes {result.Nodes} tbhits {result.TbHits}");
         Console.WriteLine(result.BestMove is { } bm && bm != Move.None ? $"bestmove {MoveToUci(bm)}" : "bestmove 0000");
     }
 
