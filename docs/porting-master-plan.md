@@ -9,7 +9,7 @@ Fonte: `../stockfish-upstream-reference/src/`, commit `edb0d9d` = **Stockfish 19
 ## Stato reale, in numeri
 
 **Sorgente totale**: 24.849 righe (`.cpp` + `.h`, escluso `incbin/`).
-**Righe lette finora**: ~6.600 → **27%**.
+**Righe lette finora**: ~7.060 (+463 `movepick.h`/`movepick.cpp`) → **28%**.
 
 Questo numero è il punto di partenza onesto del piano: quasi tre quarti del sorgente non è
 ancora stato aperto, e alcune parti già "consegnate" non sono porting veri (vedi Flusso A).
@@ -167,10 +167,43 @@ non lo sono. Verificato: 62/62 test, bestmove identico su tutte le posizioni di 
 nodi in calo su alcune posizioni (depth 10 startpos: 98585, meglio della baseline pre-history
 105924 — il sistema di history comincia a ripagare ora che è quasi completo).
 
-**Tutte le history di `history.h` sono ora almeno parzialmente portate.** Flow A2 resta aperto per:
-generazione a stadi (la fonte non genera tutte le mosse in una volta), i due usi mancanti di
-PawnHistory, e in `OrderMoves` solo ss-1 delle 6 continuation history è usata per l'ordinamento
-(statScore/reduction() vero, non ancora portato).
+**Tutte le history di `history.h` sono ora almeno parzialmente portate.**
+
+**Generazione a stadi vera FATTA** (`movepick.h`/`movepick.cpp`, 463 righe): nuova classe
+`MovePicker.cs` — `Stages` enum identico alla fonte (aritmetica su `stage` inclusa), entrambi i
+costruttori (ricerca principale/quiescenza e ProbCut), `Score<CAPTURES/QUIETS/EVASIONS>` fedeli
+(inclusa la formula quiete completa: main+pawn history, continuation history ai livelli 0,1,2,3,5
+— il livello 4/ss-5 saltato di proposito come nella fonte —, bonus scacco con SEE, bonus/malus
+"minacciato da pezzo di valore inferiore" via il nuovo `Position.AttacksBy`, bonus low-ply),
+`partial_insertion_sort` (solo ramo scalare, niente `MoveSorter` AVX-512) e `select<Pred>`.
+`MovePick.cs` torna a essere solo il contenitore delle history (il ruolo di `Worker` nella fonte);
+le vecchie killer move (euristica nostra, non della fonte) e il vecchio `OrderMoves` eager sono
+stati rimossi. `Negamax`/`Quiesce` ora consumano `mp.NextMove()` in un ciclo `while`, con
+`pos.Legal(m)` inline come nella fonte (generazione pseudo-legale) — **scoperto e corretto in
+questo passaggio**: il ciclo mosse non saltava mai `excludedMove` (il parametro per le Singular
+Extensions), un buco di fedeltà pre-esistente mai notato prima perché la lista `GenType.Legal`
+usata finora non aveva mai bisogno di quel salto esplicito. `moveCount` ora conta solo le mosse
+legali/non escluse (search.cpp:1116-1137), e il caso "0 mosse" è gestito a fine ciclo
+(search.cpp:1562-1566: matto/stallo, o `alpha` semplice se `excludedMove` era impostata) invece
+che con un controllo prima del ciclo. Il ciclo ProbCut (Step 12) resta com'era (genera catture +
+filtro SEE inline, non ancora passato a `mp`) — non necessario per la correttezza (l'ordine delle
+mosse lì incide solo su quale candidata causa il taglio per prima, non sul risultato).
+
+Verificato: 69/69 test; UCI a mano su 5 posizioni (apertura, una posizione tipo Kiwipete, una
+promozione a donna vincente `d7c8q`, un finale di torri, una posizione di mediogioco) con `git
+stash` prima/dopo — **stesso bestmove su tutte e 5**, inclusa `d7c8q` (punteggio di matto
+identico). Nodi/sec sono PEGGIORATI in questo passaggio (es. `d7c8q`: 2,29M nodi baseline contro
+5,07M nodi nuovi per una profondità raggiunta leggermente più bassa in tempo fisso) — costo delle
+allocazioni `List<Move>` fresche ad ogni stadio dentro `MovePicker` (una per CAPTURE_INIT, una per
+QUIET_INIT/EVASION_INIT, per ogni nodo), non ammortizzate come nella fonte (che scrive
+direttamente in un buffer `moves[MAX_MOVES]` sullo stack senza allocare). Correttezza confermata,
+prestazioni no — riutilizzare buffer invece di allocare è l'ottimizzazione naturale successiva, non
+fatta qui per restare dentro lo scopo di questo Step (generazione a stadi, non le sue prestazioni).
+
+Manca ancora in Flow A2: i due usi mancanti di PawnHistory (bonus da differenza di valutazione
+statica, bonus al countermove — legati a tecniche non ancora portate), e `reduction()`/`statScore`
+che oggi usano solo main+contHist[0,1] invece di sfruttare tutta l'informazione ora disponibile in
+`MovePicker`.
 
 ### A3 — Gestione del tempo (`timeman.h` 70 + `timeman.cpp` 144 = 214 righe) — ✅ FATTO
 

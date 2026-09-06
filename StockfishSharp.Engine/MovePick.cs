@@ -1,10 +1,10 @@
-// Ancora NON un porting diretto di src/movepick.cpp (383 righe: generazione a stadi, countermove)
-// — vedi docs/porting-plan.md/docs/porting-master-plan.md (Flow A2). Da src/history.h portate con
-// fedeltà main/capture/continuation history (sotto); mancano ancora pawn/low-ply/TT-move history.
-// Nota di fedeltà: la fonte reale (questa versione, letta in ../stockfish-upstream-reference) NON
-// usa più le killer move classiche — le ha eliminate a favore della sola history a più livelli.
-// Le killer restano qui come euristica aggiuntiva NOSTRA (non della fonte), da rivalutare/
-// rimuovere quando arriverà la generazione a stadi vera (countermove incluso).
+// Contenitore delle tabelle di history — corrisponde a ciò che in Stockfish vive dentro Worker
+// (mainHistory, lowPlyHistory, captureHistory, continuationHistory, ttMoveHistory, pawnHistory),
+// NON alla classe MovePicker della fonte: la generazione "a stadi" vera (src/movepick.cpp, Flow A2)
+// è in MovePicker.cs, che legge queste tabelle tramite i getter pubblici sotto invece di
+// possederle. Le vecchie killer move (euristica nostra, non della fonte — Stockfish le ha
+// eliminate a favore della sola history a più livelli) e il vecchio OrderMoves eager sono stati
+// rimossi quando MovePicker.cs ha sostituito quel percorso.
 //
 // Portato con fedeltà: ButterflyHistory (history.h:70-78,128 — aggiornamento "a gravità"
 // StatsEntry::operator<<, D=7183) e la formula di bonus/malus di update_all_stats
@@ -20,28 +20,27 @@
 // captureStage per ply (ContinuationRef, costruita da Search.cs e passata qui).
 //
 // CapturePieceToHistory portata con fedeltà (history.h:135, D=10692) — bonus/malus da
-// update_all_stats (search.cpp:1993-2011), usata anche in OrderMoves come termine aggiuntivo
-// (la fonte la userebbe dentro il vero MovePicker a stadi, non ancora portato).
+// update_all_stats (search.cpp:1993-2011) e usata da MovePicker.ScoreCaptures come termine di
+// ordinamento delle catture (movepick.cpp:224-226).
 //
 // LowPlyHistory portata con fedeltà (history.h:130-132, D=7183 come main history, LOW_PLY_
 // HISTORY_SIZE=5): a differenza delle altre si azzera (fill 102) a OGNI ricerca
 // (iterative_deepening, search.cpp:326), non a ogni nuova partita — vedi ResetForSearch, chiamata
-// da Search.Search_. Usata anche in OrderMoves (termine aggiuntivo per ply<5).
+// da Search.Search_. Usata da MovePicker.ScoreQuiets (termine aggiuntivo per ply<5).
 //
 // TTMoveHistory portata con fedeltà (history.h:196, D=8192): un solo contatore globale, bonus
-// quando la mossa migliore combacia con quella di TT (search.cpp:1574-1575). Non ancora usata in
-// nessuna formula (la fonte la usa nel margine di futility Step 9 e nella riduzione LMR, entrambi
-// non ancora a questo livello di dettaglio) — aggiornata comunque per essere pronta.
+// quando la mossa migliore combacia con quella di TT (search.cpp:1574-1575). Usata dalle Singular
+// Extensions in Search.cs (search.cpp:1260-1261/1279); non ancora nel margine di futility Step 9
+// né nella riduzione LMR (entrambi non ancora a questo livello di dettaglio nella fonte qui usata).
 //
 // PawnHistory portata PARZIALMENTE (history.h:146, D=8192, chiave = zobrist dei pedoni & 8191):
-// solo il punto di aggiornamento in update_quiet_histories (search.cpp:2056-2057). Gli altri due
-// usi della fonte — bonus di ordinamento da differenza di valutazione statica (search.cpp:978-986)
-// e bonus al "countermove" quieto su fail-low puro (search.cpp:1578-1601) — non sono ancora
-// portati, perché le tecniche a cui appartengono non lo sono.
+// il punto di aggiornamento in update_quiet_histories (search.cpp:2056-2057) e la lettura da
+// MovePicker.ScoreQuiets (movepick.cpp:232, tramite sharedHistory->pawn_entry nella fonte). Il
+// bonus al "countermove" quieto su fail-low puro (search.cpp:1578-1601) è portato
+// (ApplyCountermoveQuietBonus); il bonus di ordinamento da differenza di valutazione statica
+// (search.cpp:978-986) no, perché la tecnica a cui appartiene non lo è.
 //
-// NON portato: CorrectionHistory è in Search.cs (fatta); in OrderMoves la continuation history
-// usa solo ss-1 (non tutti e 6 i livelli) come termine d'ordinamento — la fonte la userebbe tutta
-// dentro il vero MovePicker a stadi/reduction(), non ancora portati.
+// NON portato: CorrectionHistory è in Search.cs (fatta).
 
 namespace StockfishSharp.Engine;
 
@@ -63,10 +62,6 @@ public sealed class MovePick
     private const int MainHistoryLimit = 7183; // ButterflyHistory D, history.h:128
     private const int PieceToHistoryLimit = 30000; // PieceToHistory D, history.h:138
     private const int CaptureHistoryLimit = 10692; // CapturePieceToHistory D, history.h:135
-
-    // Killer moves: 2 per ply, indicizzate per ply come in Stockfish (non per profondità residua)
-    // — vedi nota in testa al file: euristica nostra, non della fonte reale.
-    private readonly Move[,] _killers = new Move[MaxPly, 2];
 
     // ButterflyHistory, history.h:128 — Stats<i16,7183,COLOR_NB,UINT_16_HISTORY_SIZE>, indicizzata
     // [colore][move.raw()] esattamente come la fonte.
@@ -115,7 +110,6 @@ public sealed class MovePick
 
     public void Clear()
     {
-        Array.Clear(_killers);
         for (int c = 0; c < Colors.Nb; c++)
             for (int m = 0; m < 65536; m++)
                 _mainHistory[c, m] = -5; // Worker::clear(), search.cpp:691 — mainHistory.fill(-5)
@@ -161,19 +155,6 @@ public sealed class MovePick
         int clampedBonus = Math.Clamp(bonus, -limit, limit);
         int val = entry;
         entry = (short)(val + clampedBonus - (val * Math.Abs(clampedBonus) / limit));
-    }
-
-    /// <summary>Aggiorna solo le killer (euristica nostra, vedi nota in testa al file) — chiamata
-    /// al taglio beta, come <c>RecordCutoff</c> faceva prima di questo Step.</summary>
-    public void RecordKiller(Position pos, Move m, int ply)
-    {
-        if (pos.Capture(m)) return;
-
-        if (_killers[ply, 0] != m)
-        {
-            _killers[ply, 1] = _killers[ply, 0];
-            _killers[ply, 0] = m;
-        }
     }
 
     /// <summary><c>update_all_stats</c>, search.cpp:1957-1998 — solo il ramo delle mosse quiete
@@ -285,6 +266,15 @@ public sealed class MovePick
     public int GetCaptureHistory(Piece movedPiece, Square to, PieceType captured) =>
         _captureHistory[(byte)movedPiece, (byte)to, (byte)captured];
 
+    public int GetLowPlyHistoryValue(int ply, Move m) => _lowPlyHistory[ply, m.Raw];
+
+    public int GetPawnHistoryValue(Position pos, Piece pc, Square to) =>
+        _pawnHistory[pos.PawnKey & (PawnHistorySize - 1), (byte)pc, (byte)to];
+
+    /// <summary>Lettura pubblica di un livello di continuation history (0=ss-1..5=ss-6) — usata
+    /// da <see cref="MovePicker"/> per lo score delle mosse quiete (movepick.cpp:233-237).</summary>
+    public int GetContinuationHistory(ContinuationRef r, Piece pc, Square to) => ContinuationScore(r, pc, to);
+
     private int ContinuationScore(ContinuationRef r, Piece pc, Square to) =>
         r.IsOk ? _continuationHistory[r.InCheck ? 1 : 0, r.CaptureStage ? 1 : 0, (byte)r.Piece, (byte)r.To, (byte)pc, (byte)to] : 0;
 
@@ -329,45 +319,4 @@ public sealed class MovePick
         }
     }
 
-    /// <summary>Ordina le mosse in place: mossa TT (se presente) per prima, poi catture per SEE
-    /// decrescente (con CapturePieceToHistory come spareggio), poi le due killer di questo ply
-    /// (euristica nostra), poi le rimanenti mosse quiete per main history + continuation history
-    /// (solo ss-1, <c>contRefs[0]</c> — la fonte la userebbe tutta dentro il vero MovePicker a
-    /// stadi/reduction(), non ancora portati) decrescenti.</summary>
-    public void OrderMoves(Position pos, List<Move> moves, int ply, Move ttMove, ContinuationRef[] contRefs)
-    {
-        Color us = pos.SideToMove;
-        Move killer0 = _killers[ply, 0];
-        Move killer1 = _killers[ply, 1];
-        var ss1 = contRefs[0];
-
-        int Score(Move m)
-        {
-            if (m == ttMove) return int.MaxValue;
-
-            if (pos.Capture(m))
-            {
-                // Guadagno SEE come termine dominante (catture nettamente vincenti prima di quelle
-                // in pareggio/perdenti, sempre prima delle mosse quiete grazie all'offset fisso),
-                // più CapturePieceToHistory come spareggio fra catture di guadagno simile — la
-                // fonte li combinerebbe dentro il vero MovePicker a stadi, non ancora portato.
-                int gain = Values.PieceValue[(byte)pos.PieceOn(m.ToSq)] - Values.PieceValue[(byte)pos.PieceOn(m.FromSq)] / 100;
-                int captureHistoryScore = _captureHistory[(byte)pos.MovedPiece(m), (byte)m.ToSq, (byte)Types.TypeOf(pos.PieceOn(m.ToSq))];
-                return 1_000_000 + gain + (captureHistoryScore / 64);
-            }
-
-            if (m == killer0) return 900_000;
-            if (m == killer1) return 899_999;
-
-            Piece pc = pos.MovedPiece(m);
-            int score = _mainHistory[(byte)us, m.Raw] + _pawnHistory[pos.PawnKey & (PawnHistorySize - 1), (byte)pc, (byte)m.ToSq];
-            if (ply < LowPlyHistorySize)
-                score += _lowPlyHistory[ply, m.Raw];
-            if (ss1.IsOk)
-                score += _continuationHistory[ss1.InCheck ? 1 : 0, ss1.CaptureStage ? 1 : 0, (byte)ss1.Piece, (byte)ss1.To, (byte)pc, (byte)m.ToSq];
-            return score;
-        }
-
-        moves.Sort((a, b) => Score(b).CompareTo(Score(a)));
-    }
 }

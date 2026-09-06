@@ -559,24 +559,24 @@ public sealed class Search
                 var probCutCandidates = new List<Move>();
                 MoveGen.Generate(GenType.Captures, pos, probCutCandidates);
 
-                foreach (var m in probCutCandidates)
+                foreach (var pcMove in probCutCandidates)
                 {
-                    if (!pos.Legal(m)) continue;
-                    if (!pos.SeeGe(m, probCutBeta - staticEval)) continue;
+                    if (!pos.Legal(pcMove)) continue;
+                    if (!pos.SeeGe(pcMove, probCutBeta - staticEval)) continue;
 
                     var pcSt = new StateInfo();
-                    pos.DoMove(m, pcSt);
+                    pos.DoMove(pcMove, pcSt);
 
                     int pcValue = -Quiesce(pos, -probCutBeta, -probCutBeta + 1, ply + 1);
 
                     if (pcValue >= probCutBeta && probCutDepth > 0)
                         pcValue = -Negamax(pos, probCutDepth, ply + 1, -probCutBeta, -probCutBeta + 1, cutNode: !cutNode);
 
-                    pos.UndoMove(m);
+                    pos.UndoMove(pcMove);
 
                     if (pcValue >= probCutBeta)
                     {
-                        _tt.Save(probe.WriteIndex, pos.Key, ValueToTt(pcValue, ply), ttPv, Bound.Lower, probCutDepth + 1, m, unadjustedStaticEval);
+                        _tt.Save(probe.WriteIndex, pos.Key, ValueToTt(pcValue, ply), ttPv, Bound.Lower, probCutDepth + 1, pcMove, unadjustedStaticEval);
                         if (!Values.IsDecisive(pcValue)) return pcValue - (probCutBeta - beta);
                     }
                 }
@@ -592,18 +592,13 @@ public sealed class Search
             && !Values.IsDecisive(beta) && !Values.IsDecisive(ttScore))
             return probCutBeta13;
 
-        var moves = new List<Move>();
-        MoveGen.Generate(GenType.Legal, pos, moves);
-
-        if (moves.Count == 0)
-            return inCheck ? -(MateScore - ply) : 0;
-
         var contRefs = BuildContinuationRefs(ply);
-        _movePick.OrderMoves(pos, moves, ply, probe.Data.Move, contRefs);
+        var mp = new MovePicker(pos, _movePick, probe.Data.Move, depth, ply, contRefs);
 
         int origAlpha = alpha;
         int value = -Infinity;
         Move? bestMove = null;
+        int moveCount = 0; // search.cpp:1116
 
         // search.cpp:761-762/1543-1551: mosse quiete/catture provate ma non risultate la
         // migliore, per aggiornare le loro statistiche di ordinamento a fine ciclo (Step 23).
@@ -611,17 +606,19 @@ public sealed class Search
         var capturesSearched = new List<Move>();
         const int SearchedListCapacity = 32; // SEARCHEDLIST_CAPACITY, search.cpp:73
 
-        // mp.skip_quiet_moves(), search.cpp:1169-1170 — la fonte usa un generatore a stadi che
-        // smette di produrre mosse quiete; qui, con la lista già generata per intero, si saltano
-        // semplicemente le quiete rimanenti una volta superata la soglia.
-        bool skipQuietMoves = false;
-
-        for (int i = 0; i < moves.Count; i++)
+        // Step 14. Generazione a stadi vera (MovePicker, movepick.cpp) invece della lista
+        // pre-generata+ordinata: mp.NextMove() emette mosse pseudo-legali una alla volta
+        // nell'ordine di merito stimato, search.cpp:1118-1129.
+        Move m;
+        while ((m = mp.NextMove()) != Move.None)
         {
-            Move m = moves[i];
-            bool captureStage = pos.CaptureStage(m);
-            if (skipQuietMoves && !captureStage) continue;
+            if (m == excludedMove) continue;
+            if (!pos.Legal(m)) continue;
 
+            moveCount++;
+            _moveCountHistory[ply + StackOffset] = moveCount; // Stack::moveCount, search.cpp:1137
+
+            bool captureStage = pos.CaptureStage(m);
             bool givesCheck = pos.GivesCheck(m);
 
             // Stack::currentMove per la continuation history del ply successivo (MovePick, i suoi
@@ -636,8 +633,6 @@ public sealed class Search
             // Step 18 (prima parte, prima di fare la mossa), search.cpp:1152-1162: r è in
             // "milliply" (/1024 per ply interi). "delta" qui è l'ampiezza LOCALE alfa-beta di
             // QUESTO nodo (diversa da _rootDelta).
-            int moveCount = i + 1;
-            _moveCountHistory[ply + StackOffset] = moveCount; // Stack::moveCount, search.cpp:1137
             int newDepth = depth - 1;
             int localDelta = beta - alpha;
             int r = Reduction(improving, depth, moveCount, localDelta);
@@ -666,10 +661,11 @@ public sealed class Search
             // questa posizione.
             if (ply != 0 && !Values.IsLoss(value) && pos.NonPawnMaterial(pos.SideToMove) != 0)
             {
-                // search.cpp:1168-1170 — late move pruning: oltre questa soglia si smette di
-                // provare mosse quiete a questo nodo (le catture restanti si provano comunque).
+                // search.cpp:1168-1170 — late move pruning: oltre questa soglia mp smette di
+                // generare/emettere mosse quiete a questo nodo (le catture restanti si provano
+                // comunque) — MovePicker.SkipQuietMoves, non più un flag di filtro locale.
                 if (moveCount >= (3 + (depth * depth)) / (improving ? 1 : 2))
-                    skipQuietMoves = true;
+                    mp.SkipQuietMoves();
 
                 int lmrDepth = newDepth - (r / 1024);
 
@@ -838,7 +834,6 @@ public sealed class Search
                     alpha = score;
                     if (alpha >= beta)
                     {
-                        _movePick.RecordKiller(pos, m, ply);
                         _cutoffCntHistory[ply + StackOffset]++; // search.cpp:1529 (extension<2||PvNode semplificato a sempre vero, niente estensioni qui)
                         break;
                     }
@@ -849,7 +844,7 @@ public sealed class Search
             // aggiornarne le statistiche dopo" — qui bestMove riflette già l'eventuale
             // aggiornamento appena fatto sopra, quindi la mossa che ha appena causato il taglio
             // beta (bestMove) non entra mai in queste liste (il break sopra la esclude comunque).
-            if (i + 1 <= SearchedListCapacity && m != bestMove)
+            if (moveCount <= SearchedListCapacity && m != bestMove)
             {
                 if (captureStage) capturesSearched.Add(m); else quietsSearched.Add(m);
             }
@@ -860,7 +855,15 @@ public sealed class Search
         if (value >= beta && !Values.IsDecisive(value) && !Values.IsDecisive(alpha))
             value = ((value * depth) + beta) / (depth + 1);
 
-        if (bestMove != null)
+        // search.cpp:1562-1566: nessuna mossa pseudo-legale generata da mp è risultata legale (o
+        // l'unica legale era quella esclusa da una ricerca Singular Extensions) — matto, stallo, o
+        // (nella ricerca di verifica con excludedMove impostata) solo un fail-low, non un matto
+        // vero.
+        if (moveCount == 0)
+        {
+            value = excludedMove != default ? alpha : inCheck ? -(MateScore - ply) : 0;
+        }
+        else if (bestMove != null)
         {
             _movePick.UpdateStats(pos, ply, bestMove.Value, quietsSearched, capturesSearched, depth, probe.Data.Move, isPvNode, contRefs, inCheck);
         }
@@ -934,31 +937,29 @@ public sealed class Search
             if (standPat > alpha) alpha = standPat;
         }
 
-        // Sempre mosse LEGALI (non solo pseudo-legali): una cattura pseudo-legale può comunque
-        // scoprire scacco al proprio re (pezzo inchiodato) — generare direttamente le legali
-        // costa un po' di più ma evita quel caso limite senza un controllo a parte.
-        var moves = new List<Move>();
-        MoveGen.Generate(GenType.Legal, pos, moves);
-
-        var candidates = new List<Move>();
-        foreach (var m in moves)
-        {
-            if (inCheck) { candidates.Add(m); continue; }
-            if (!pos.Capture(m)) continue;
-            if (!pos.SeeGe(m)) continue;
-            candidates.Add(m);
-        }
-
-        if (inCheck && candidates.Count == 0)
-            return -(MateScore - ply);
-
+        // MovePicker con depth=DEPTH_QS (0): sotto scacco genera le evasioni (tutte, come
+        // "candidates" faceva prima aggiungendole indiscriminatamente); altrimenti solo le
+        // catture (stadio QCAPTURE) — search.cpp:1766-1770. Restituisce mosse pseudo-legali: il
+        // filtro di legalità/SEE resta nel ciclo sotto, come nella fonte (search.cpp:1778-1820).
         // Continuation history non tracciata in quiescenza (Quiesce non scrive
-        // _currentMoveHistory/_movedPieceHistory) — array vuoto disattiva il termine, resta solo
-        // main history + killer/SEE come prima di questo Step.
-        _movePick.OrderMoves(pos, candidates, ply, Move.None, EmptyContinuationRefs);
+        // _currentMoveHistory/_movedPieceHistory) — contRefs vuoti disattiva il termine nella
+        // formula di score, come già prima di questo Step.
+        var mp = new MovePicker(pos, _movePick, Move.None, Ply.DepthQs, ply, EmptyContinuationRefs);
 
-        foreach (var m in candidates)
+        int moveCount = 0;
+        Move m;
+        while ((m = mp.NextMove()) != Move.None)
         {
+            if (!pos.Legal(m)) continue;
+
+            if (!inCheck)
+            {
+                if (!pos.Capture(m)) continue;
+                if (!pos.SeeGe(m)) continue;
+            }
+
+            moveCount++;
+
             var st = new StateInfo();
             pos.DoMove(m, st);
             int score = -Quiesce(pos, -beta, -alpha, ply + 1);
@@ -967,6 +968,9 @@ public sealed class Search
             if (score >= beta) return beta;
             if (score > alpha) alpha = score;
         }
+
+        if (inCheck && moveCount == 0)
+            return -(MateScore - ply);
 
         return alpha;
     }

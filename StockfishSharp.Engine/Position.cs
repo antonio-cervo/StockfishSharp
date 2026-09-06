@@ -87,6 +87,31 @@ public sealed class Position
 
     public ulong CheckSquaresOf(PieceType pt) => _st.CheckSquares[(byte)pt];
 
+    /// <summary>Case attaccate da tutti i pezzi di tipo <paramref name="pt"/> e colore
+    /// <paramref name="c"/> — <c>Position::attacks_by</c>, position.h:296-309. Per i pedoni usa lo
+    /// spostamento di massa della bitboard (niente ciclo per pezzo); per gli altri tipi itera ogni
+    /// pezzo e unisce i suoi attacchi (con l'occupazione reale, per gli scorrevoli).</summary>
+    public ulong AttacksBy(PieceType pt, Color c)
+    {
+        if (pt == PieceType.Pawn)
+        {
+            ulong pawns = Pieces(c, PieceType.Pawn);
+            return c == Color.White
+                ? Bitboards.Shift(pawns, Direction.NorthWest) | Bitboards.Shift(pawns, Direction.NorthEast)
+                : Bitboards.Shift(pawns, Direction.SouthWest) | Bitboards.Shift(pawns, Direction.SouthEast);
+        }
+
+        ulong threats = 0;
+        ulong attackers = Pieces(c, pt);
+        while (attackers != 0)
+        {
+            Square s = Bitboards.PopLsb(ref attackers);
+            threats |= Attacks.AttacksBb(pt, s, Pieces());
+        }
+
+        return threats;
+    }
+
     public ulong Pinners(Color c) => _st.Pinners[(byte)c];
 
     public ulong AttackersTo(Square s) => AttackersTo(s, Pieces());
