@@ -23,13 +23,13 @@
 //
 // Semplificazione deliberata nella scelta del "miglior thread" (ThreadPool::get_best_thread,
 // thread.cpp:357-408): la fonte vota sulla RootMove completa (pv/inexactLower/inexactUpper) di
-// ogni thread — una struttura che questo porting non ha ancora (RootMoves complete sono anche il
-// prerequisito di MultiPV, Flow A4, non ancora portato). Qui si usa SearchResult.BestMove/ScoreCp
-// come proxy di rootMoves[0].pv[0]/.score (la nostra ricerca completa sempre l'ultima iterazione a
-// finestra piena, quindi "IsInexact" è sempre falso per costruzione — non serve rappresentarlo) e
-// SearchResult.Depth come proxy della lunghezza del PV per lo spareggio finale. La formula di voto
-// stessa (punteggio - minimo + 14, preferenza al mate più corto/lungo quando decisivo) è portata
-// fedele.
+// ogni thread. RootMove/RootMoves ora ESISTONO con fedeltà (StockfishSharp.Engine/RootMove.cs,
+// 2026-09-06) ma restano PRIVATE a ogni Search — GetBestResult qui sotto vota ancora su
+// SearchResult.BestMove/ScoreCp/Pv/SelDepth (i campi pubblici esposti da Search_) come proxy di
+// rootMoves[0].pv[0]/.score/.pv/.selDepth (la nostra ricerca completa sempre l'ultima iterazione a
+// finestra piena, quindi "IsInexact" è sempre falso per costruzione — non serve rappresentarlo).
+// La formula di voto stessa (punteggio - minimo + 14, preferenza al mate più corto/lungo quando
+// decisivo) è portata fedele.
 
 using StockfishSharp.Engine.Tablebases;
 
@@ -39,7 +39,7 @@ public sealed class SearchThreadPool
 {
     private readonly TranspositionTable _tt = new();
     private readonly List<Search> _searches = [];
-    private TbConfig _tbConfig;
+    private (bool useRule50, int probeDepth, int probeLimit) _syzygyOptions = (true, 1, 7);
 
     public int ThreadCount => _searches.Count;
 
@@ -53,18 +53,21 @@ public sealed class SearchThreadPool
         for (int i = 0; i < n; i++)
         {
             var s = new Search(_tt);
-            s.SetTbConfig(_tbConfig);
+            s.SetSyzygyOptions(_syzygyOptions.useRule50, _syzygyOptions.probeDepth, _syzygyOptions.probeLimit);
             _searches.Add(s);
         }
     }
 
-    /// <summary>Propaga la configurazione Syzygy (TB10) a tutti i thread del pool — replicata,
-    /// non condivisa: ogni <see cref="Search"/> la legge sola-lettura durante la ricerca (stessa
-    /// tbConfig per ogni Search::Worker nella fonte, rank_root_moves/thread.cpp).</summary>
-    public void SetTbConfig(TbConfig config)
+    /// <summary>Propaga le opzioni UCI Syzygy grezze a tutti i thread del pool — ognuno le
+    /// ricombina indipendentemente con <see cref="Tablebase.MaxCardinality"/> e la
+    /// posizione corrente via <see cref="Tablebase.RankRootMoves"/> a ogni ricerca
+    /// (thread.cpp:323 lo fa una volta sola a livello di pool e lo distribuisce; qui ogni thread
+    /// lo ricalcola da sé sulla stessa posizione clonata — stesso risultato deterministico, solo
+    /// lavoro ridondante fra thread, nessuna differenza di correttezza).</summary>
+    public void SetSyzygyOptions(bool useRule50, int probeDepth, int probeLimit)
     {
-        _tbConfig = config;
-        foreach (var s in _searches) s.SetTbConfig(config);
+        _syzygyOptions = (useRule50, probeDepth, probeLimit);
+        foreach (var s in _searches) s.SetSyzygyOptions(useRule50, probeDepth, probeLimit);
     }
 
     public void Resize(int hashMb) => _tt.Resize(hashMb);

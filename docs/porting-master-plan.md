@@ -528,19 +528,45 @@ oracolo): un disallineamento di 4 byte nell'arrotondamento a 64 byte del `DataOf
 introdotto "spogliando" l'array del magic number invece di tenerlo intero e avanzare il
 cursore di 4 come fa la fonte — dettagli in `docs/syzygy-porting-plan.md`. **TB9**
 (`root_probe`/`root_probe_wdl`/`rank_root_moves`, ordinamento delle mosse alla radice via
-DTZ/WDL) fatto e verificato con `TbRootMove` come sostituto minimo delle vere
-`Search::RootMoves` non presenti in questo porting. **TB10** (Step 7 di search.cpp dentro
-`Negamax` + le 4 opzioni UCI `SyzygyPath`/`SyzygyProbeDepth`/`Syzygy50MoveRule`/
-`SyzygyProbeLimit`) fatto e verificato: bench senza Syzygy configurato invariato (507.992
-nodi, nessun effetto quando disattivato), `tbhits` cresce coerentemente col cardinality
-configurato. **Flusso C2 completo.** I file di dati fino a 5 pezzi sono già disponibili in
+DTZ/WDL) fatto e verificato — inizialmente con `TbRootMove` come sostituto minimo delle vere
+`Search::RootMoves`, **ora (2026-09-06) wired sulle vere `RootMove.TbRank`/`.TbScore`** (vedi
+nota sotto). **TB10** (Step 7 di search.cpp dentro `Negamax` + le 4 opzioni UCI
+`SyzygyPath`/`SyzygyProbeDepth`/`Syzygy50MoveRule`/`SyzygyProbeLimit`) fatto e verificato: bench
+senza Syzygy configurato invariato, `tbhits` cresce coerentemente col cardinality configurato.
+**Flusso C2 completo.** I file di dati fino a 5 pezzi sono già disponibili in
 `../ACMyChess/Syzygy/` (vedi [[acmychess-tablebase-plan]]).
 
-**Nota post-RootMoves (2026-09-06)**: con `Search::RootMoves` ora portate con fedeltà (vedi
-sezione dedicata più sotto), `TB9` resta comunque su `TbRootMove` come sostituto minimo — wired su
-`RootMove.TbRank`/`.TbScore` sarebbe ora possibile (i campi esistono già, sempre a 0) ma
-richiederebbe portare anche `Tablebases::rank_root_moves` per intero (thread.cpp:323, chiamato da
-`start_thinking` prima di ogni ricerca): non fatto oggi, resta un pezzo separato.
+**TB9 wired sulle vere RootMoves (2026-09-06)**: `Tablebase.RootProbe`/`RootProbeWdl`/
+`RankRootMoves` operano ora su `List<RootMove>` (leggono/scrivono `m.Pv[0]`/`.TbRank`/`.TbScore`
+direttamente sulla struttura reale) invece del sostituto `TbRootMove` (rimosso da `TbTypes.cs`).
+`Search_` chiama `Tablebase.RankRootMoves` subito dopo aver popolato `_rootMoves` da tutte le
+mosse legali, PRIMA del controllo "nessuna mossa legale" — stesso ordine di
+`ThreadPool::start_thinking` (thread.cpp:323), che chiama `rank_root_moves` prima che
+`start_searching` controlli `rootMoves.empty()`. Il `TbConfig` risultante (compresa
+`Cardinality`, eventualmente azzerata quando DTZ ha già risolto la radice — "Probe during
+search only if DTZ is not available and we are winning") diventa la config usata dal probing
+"in-tree" di TB10: le due fasi ora condividono la stessa struttura, come nella fonte.
+
+Aggiunto anche il filtro radice per gruppo di `tbRank` (search.cpp:1131-1135, `pvFirst`/`pvLast`,
+nuovi campi `Search._pvFirst`/`_pvLast` ricalcolati una volta per profondità): quando la radice è
+in tablebase, il ciclo mosse di `Negamax(ply=0)` ora SALTA le mosse di rango inferiore invece di
+cercarle comunque — prima mancava, quindi TB9 ordinava le mosse ma la ricerca le esplorava tutte
+allo stesso modo. Senza tablebase attiva (il caso comune) `tbRank` è uniforme per tutte le mosse
+e il filtro non esclude mai nulla — verificato bit-esatto: bench senza Syzygy configurato,
+nessuna differenza nel numero di nodi rispetto a prima di questo wiring.
+
+Le opzioni UCI Syzygy (Program.cs) non calcolano più a mano una `Cardinality` approssimata
+(`syzygyPath vuoto ? 0 : probeLimit`, un caso speciale usato PRIMA che `RankRootMoves` fosse
+wired): ora passano solo i tre valori grezzi (`SetSyzygyOptions`, propagato da
+`SearchThreadPool` a ogni `Search`), e `RankRootMoves` li combina da sé con
+`Tablebase.MaxCardinality` (0 finché `Tablebase.Init` non ha caricato tabelle) esattamente come
+fa la fonte — il caso "nessun path configurato" ora si risolve da solo, senza bisogno di un `if`
+esplicito nel layer UCI.
+
+Verificato dal vivo via UCI: KQvK (`4k3/8/4K3/8/8/8/8/4Q3 w`, la stessa posizione del test TB9)
+sceglie `e1h4` con PV `e1h4 e8f8 h4h8` (matto in 2, stessa mossa dell'oracolo reale) e `tbhits=0`
+(DTZ già disponibile e vincente, probing in-tree correttamente disattivato); bench 1 e 4 thread
+senza eccezioni.
 
 ### C3 — Utilità (`misc`, `memory`, `score`, `numa`, `tune`, `universal/`, ~1.500 righe)
 Portate finora solo le briciole che servivano (`PRNG` dentro `Attacks.cs`).
@@ -721,9 +747,10 @@ esattamente il tipo di "impalcatura pratica mai riconciliata con la fonte" che l
 
 **Deliberatamente non fatto oggi** (dichiarato esplicitamente, non dimenticato): il ciclo MultiPV
 (search.cpp:360-503, qui `multiPV` resta fissato a 1 — `_pvIdx` è sempre 0), Skill Level, il filtro
-"searchmoves", `Tablebases::rank_root_moves` (TB9 resta su `TbRootMove`, vedi nota in Flusso C2),
-`bestMoveChanges`/`totBestMoveChanges` (accumulato fedelmente ma non consumato: la gestione tempo
-adattiva reale che lo userebbe resta un pezzo separato non portato).
+"searchmoves", `bestMoveChanges`/`totBestMoveChanges` (accumulato fedelmente ma non consumato: la
+gestione tempo adattiva reale che lo userebbe resta un pezzo separato non portato).
+`Tablebases::rank_root_moves` (TB9) è stato invece wired sulle vere RootMoves subito dopo, stesso
+giorno — vedi la nota dedicata nel Flusso C2.
 
 **Verifica**: `dotnet test` 109/109 (nessuna regressione); bench 1 thread e 4 thread (Lazy SMP) su
 tutte le 51 posizioni di default, nessuna eccezione, PV plausibili su ogni posizione incluse le 2

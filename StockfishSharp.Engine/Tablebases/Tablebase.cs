@@ -1,9 +1,10 @@
 // Porting di Stockfish::Tablebases — decompress_pairs (tbprobe.cpp:620-744), do_probe_table
 // (793-1021), probe_table (1428-1440), search&lt;CheckZeroingMoves&gt; (1455-1513), init
 // (1521-1683), probe_wdl/probe_dtz (1693-1784), root_probe/root_probe_wdl/rank_root_moves
-// (1787-1965). Vedi docs/syzygy-porting-plan.md per le fasi (qui: TB4, TB6, TB7, TB8, TB9) e le
-// deviazioni dichiarate (per TB9: niente Search::RootMoves vere, vedi TbRootMove in TbTypes.cs).
-// TB10 (wiring nel nodo di ricerca + opzioni UCI) resta da fare.
+// (1787-1965). Vedi docs/syzygy-porting-plan.md per le fasi (qui: TB4, TB6, TB7, TB8, TB9, TB10).
+// root_probe/root_probe_wdl/rank_root_moves operano ora sulle vere RootMove/RootMoves
+// (StockfishSharp.Engine/RootMove.cs, portate 2026-09-06) — inizialmente (TB9) usavano un
+// sostituto minimo (TbRootMove) perché RootMoves non esisteva ancora in questo porting.
 
 namespace StockfishSharp.Engine.Tablebases;
 
@@ -443,7 +444,7 @@ public static class Tablebase
     /// <summary><c>Tablebases::root_probe</c>, tbprobe.cpp:1787-1863 — usa le tabelle DTZ per
     /// ordinare le mosse alla radice. Ritorna <c>false</c> se un probe è fallito o è scaduto il
     /// tempo (<paramref name="timeAbort"/>).</summary>
-    public static bool RootProbe(Position pos, List<TbRootMove> rootMoves, bool rule50, bool rankDtz, Func<bool> timeAbort)
+    public static bool RootProbe(Position pos, List<RootMove> rootMoves, bool rule50, bool rankDtz, Func<bool> timeAbort)
     {
         ProbeState result = ProbeState.Ok;
         var st = new StateInfo();
@@ -454,7 +455,7 @@ public static class Tablebase
 
         foreach (var m in rootMoves)
         {
-            pos.DoMove(m.Move, st);
+            pos.DoMove(m.Pv[0], st);
 
             int dtz;
             if (pos.Rule50Count == 0)
@@ -486,7 +487,7 @@ public static class Tablebase
                     dtz = 1;
             }
 
-            pos.UndoMove(m.Move);
+            pos.UndoMove(m.Pv[0]);
 
             if (timeAbort() || result == ProbeState.Fail)
                 return false;
@@ -517,7 +518,7 @@ public static class Tablebase
 
     /// <summary><c>Tablebases::root_probe_wdl</c>, tbprobe.cpp:1866-1902 — riserva usata quando
     /// mancano (in tutto o in parte) le tabelle DTZ.</summary>
-    public static bool RootProbeWdl(Position pos, List<TbRootMove> rootMoves, bool rule50)
+    public static bool RootProbeWdl(Position pos, List<RootMove> rootMoves, bool rule50)
     {
         int[] wdlToRank = [-TbConstants.MaxDtz, -TbConstants.MaxDtz + 101, 0, TbConstants.MaxDtz - 101, TbConstants.MaxDtz];
 
@@ -526,11 +527,11 @@ public static class Tablebase
 
         foreach (var m in rootMoves)
         {
-            pos.DoMove(m.Move, st);
+            pos.DoMove(m.Pv[0], st);
 
             WdlScore wdl = pos.IsDraw(1) ? WdlScore.Draw : (WdlScore)(-(int)ProbeWdl(pos, out result));
 
-            pos.UndoMove(m.Move);
+            pos.UndoMove(m.Pv[0]);
 
             if (result == ProbeState.Fail)
                 return false;
@@ -548,7 +549,7 @@ public static class Tablebase
     /// <summary><c>Tablebases::rank_root_moves</c>, tbprobe.cpp:1904-1965 — senza
     /// <c>OptionsMap</c> (non presente in questo porting): le tre opzioni UCI diventano
     /// parametri espliciti, passati dal chiamante (Flow A4/TB10).</summary>
-    public static TbConfig RankRootMoves(Position pos, List<TbRootMove> rootMoves,
+    public static TbConfig RankRootMoves(Position pos, List<RootMove> rootMoves,
         bool syzygy50MoveRule, int syzygyProbeDepth, int syzygyProbeLimit,
         bool rankDtz = false, Func<bool>? timeAbort = null)
     {

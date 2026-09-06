@@ -136,6 +136,13 @@ public sealed class Search
     /// (l'opzione UCI) verrà aggiunto.</summary>
     private readonly int _pvIdx;
 
+    /// <summary><c>Search::Worker::pvFirst</c>/<c>pvLast</c>, search.h — delimitano, dentro
+    /// <see cref="_rootMoves"/>, il gruppo di mosse di pari "tbRank" attualmente in gioco per
+    /// <see cref="_pvIdx"/> (search.cpp:362-368). Ricalcolati una volta per profondità in
+    /// <see cref="Search_"/>, letti da <see cref="Negamax"/> per filtrare il ciclo mosse radice.</summary>
+    private int _pvFirst;
+    private int _pvLast;
+
     /// <summary><c>Search::Worker::selDepth</c>, search.h — azzerato a ogni profondità
     /// (iterative_deepening, search.cpp:373), aggiornato dal primo nodo PV di ogni ramo che
     /// raggiunge un nuovo ply massimo (search.cpp:781-783).</summary>
@@ -148,13 +155,28 @@ public sealed class Search
     /// CancellationToken esterno (vedi Program.cs/ComputeBudget).</summary>
     private ulong _bestMoveChanges;
 
-    /// <summary>Equivalente di <c>Search::Worker::tbConfig</c> (search.cpp:922-973, Step 7) —
-    /// <c>Cardinality=0</c> di default (probing disattivato finché il livello UCI non chiama
-    /// <see cref="SetTbConfig"/>, tipicamente dopo aver caricato le tabelle con
-    /// <c>Tablebase.Init</c>).</summary>
+    /// <summary>Equivalente di <c>Search::Worker::tbConfig</c> (search.cpp:922-973, Step 7) — non
+    /// più impostato dall'esterno: ricalcolato da <see cref="Tablebase.RankRootMoves"/> a ogni
+    /// <see cref="Search_"/> (<c>ThreadPool::start_thinking</c>, thread.cpp:323, chiamato a ogni
+    /// "go"), che lo deriva dalle opzioni UCI grezze sotto combinate con
+    /// <see cref="Tablebase.MaxCardinality"/> (quante tabelle sono davvero caricate) e il numero
+    /// di pezzi della posizione corrente — <c>Cardinality=0</c> risulta automaticamente finché
+    /// <c>Tablebase.Init</c> non ha caricato nulla, senza bisogno di un caso speciale esplicito.</summary>
     private TbConfig _tbConfig;
 
-    public void SetTbConfig(TbConfig config) => _tbConfig = config;
+    // Opzioni UCI Syzygy grezze (SyzygyPath è gestito a parte da Tablebase.Init — carica le
+    // tabelle e aggiorna MaxCardinality, letto indirettamente da RankRootMoves). Default identici
+    // a engine.cpp:117-123 ("SyzygyProbeDepth" 1, "Syzygy50MoveRule" true, "SyzygyProbeLimit" 7).
+    private bool _syzygyUseRule50 = true;
+    private int _syzygyProbeDepth = 1;
+    private int _syzygyProbeLimit = 7;
+
+    public void SetSyzygyOptions(bool useRule50, int probeDepth, int probeLimit)
+    {
+        _syzygyUseRule50 = useRule50;
+        _syzygyProbeDepth = probeDepth;
+        _syzygyProbeLimit = probeLimit;
+    }
 
     private const int Infinity = 32001; // VALUE_INFINITE della fonte, types.h:155
     private const int MateScore = 32000; // VALUE_MATE, types.h:157
@@ -466,6 +488,14 @@ public sealed class Search
         foreach (var rlm in rootLegalMoves)
             _rootMoves.Add(new RootMove(rlm));
 
+        // Tablebases::rank_root_moves, thread.cpp:323 — chiamato SEMPRE (anche a lista vuota:
+        // RankRootMoves gestisce quel caso da sé, ritornando la config di default) subito dopo
+        // aver popolato rootMoves, PRIMA del controllo "nessuna mossa legale" sotto (stesso ordine
+        // della fonte: start_thinking chiama rank_root_moves, start_searching controlla
+        // rootMoves.empty() solo più tardi). TB9 (ordinamento/classificazione) e TB10 (probing
+        // "in-tree", Step 7 di Negamax) condividono così la stessa Config, come nella fonte.
+        _tbConfig = Tablebase.RankRootMoves(pos, _rootMoves, _syzygyUseRule50, _syzygyProbeDepth, _syzygyProbeLimit);
+
         // start_searching(), search.cpp:207-213: nessuna mossa legale (matto o stallo), nessuna
         // ricerca da fare.
         if (_rootMoves.Count == 0)
@@ -493,6 +523,20 @@ public sealed class Search
                     prm.PreviousPv = [.. prm.Pv];
                     prm.PreviousScoreExact = i == _pvIdx;
                 }
+
+                // search.cpp:362-368 — pvFirst/pvLast delimitano il gruppo di mosse di pari
+                // "tbRank" a cui la ricerca radice si limita per questo pvIdx: con TB9
+                // (Tablebase.RankRootMoves) ora wired, quando la radice è in tablebase le mosse di
+                // rango inferiore (perdenti o che convertono più lentamente) restano nell'array
+                // ma NON vengono più cercate finché quelle di rango pari/superiore non sono
+                // esaurite — esattamente come la fonte. Senza tablebase attiva tbRank è uniforme
+                // (0 per tutte), quindi il gruppo copre sempre l'intero array: nessuna differenza
+                // di comportamento nel caso comune.
+                _pvFirst = _pvIdx;
+                _pvLast = _pvIdx;
+                for (_pvLast++; _pvLast < _rootMoves.Count; _pvLast++)
+                    if (_rootMoves[_pvLast].TbRank != _rootMoves[_pvFirst].TbRank)
+                        break;
 
                 // search.cpp:376-383 — ampiezza dell'aspiration window e optimism dalla vera media
                 // mobile pesata per "effort" della mossa radice corrente (RootMove.cs), non più dal
@@ -878,6 +922,13 @@ public sealed class Search
         {
             if (m == excludedMove) continue;
             if (!pos.Legal(m)) continue;
+
+            // search.cpp:1131-1135 — alla radice, rispetta il gruppo di tbRank corrente
+            // (_pvFirst.._pvLast, TB9): una mossa di rango inferiore non viene nemmeno provata
+            // finché quelle di rango pari/superiore non sono tutte esaurite. Senza tablebase
+            // attiva _pvFirst=0/_pvLast=numero di mosse: questo filtro non esclude mai nulla.
+            if (ply == 0 && !RootMoveInRange(m))
+                continue;
 
             moveCount++;
             _moveCountHistory[ply + StackOffset] = moveCount; // Stack::moveCount, search.cpp:1137
@@ -1364,6 +1415,17 @@ public sealed class Search
         Move m2 = _currentMoveHistory[ply + StackOffset - 2]; // (ss-2)->currentMove
         Move m4 = _currentMoveHistory[ply + StackOffset - 4]; // (ss-4)->currentMove
         return m.FromSq == m2.ToSq && m2.FromSq == m4.ToSq;
+    }
+
+    /// <summary><c>std::count(rootMoves.begin()+pvIdx, rootMoves.begin()+pvLast, move)</c>,
+    /// search.cpp:1134 — vero se <paramref name="m"/> è una delle mosse del gruppo
+    /// <see cref="_pvFirst"/>.._pvLast corrente (TB9/searchmoves).</summary>
+    private bool RootMoveInRange(Move m)
+    {
+        for (int i = _pvFirst; i < _pvLast; i++)
+            if (_rootMoves[i].Matches(m))
+                return true;
+        return false;
     }
 
     private static bool HasNonPawnMaterial(Position pos, Color c)

@@ -54,27 +54,19 @@ search.Resize(16);
 search.NewGame();
 var timeManagement = new TimeManagement();
 
-// Opzioni Syzygy (TB10, Config/rank_root_moves, engine.cpp) — SyzygyPath vuoto di default come
-// la fonte reale (nessuna tablebase caricata, probing disattivato). Gli altri tre default
-// (Syzygy50MoveRule=true, SyzygyProbeDepth=1, SyzygyProbeLimit=7) sono gli stessi della fonte.
+// Opzioni Syzygy (TB9+TB10, rank_root_moves/Config, engine.cpp) — SyzygyPath vuoto di default
+// come la fonte reale (nessuna tablebase caricata: Tablebase.MaxCardinality resta 0 finché
+// Tablebase.Init non ne carica almeno una, quindi Tablebase.RankRootMoves disattiva da sé il
+// probing — non serve più un caso speciale esplicito qui come prima di TB9). Gli altri tre
+// default (Syzygy50MoveRule=true, SyzygyProbeDepth=1, SyzygyProbeLimit=7) sono gli stessi della
+// fonte (engine.cpp:117-123).
 string syzygyPath = "";
 bool syzygy50MoveRule = true;
 int syzygyProbeDepth = 1;
 int syzygyProbeLimit = 7;
 
-// tbConfig.cardinality resta 0 (probing disattivato in ricerca) finché non è stato caricato
-// almeno un file — altrimenti ogni nodo tenterebbe un probe destinato a fallire sempre.
-void UpdateTbConfig()
-{
-    search.SetTbConfig(new TbConfig
-    {
-        Cardinality = string.IsNullOrEmpty(syzygyPath) ? 0 : syzygyProbeLimit,
-        ProbeDepth = syzygyProbeDepth,
-        UseRule50 = syzygy50MoveRule,
-        RootInTb = false,
-    });
-}
-UpdateTbConfig();
+void UpdateSyzygyOptions() => search.SetSyzygyOptions(syzygy50MoveRule, syzygyProbeDepth, syzygyProbeLimit);
+UpdateSyzygyOptions();
 int maxDepth = 30;
 
 // Una ricerca ("go") gira su un task in background invece che bloccare questo ciclo: un client
@@ -273,22 +265,22 @@ void HandleSetOption(string[] toks)
     {
         syzygyPath = value;
         Tablebase.Init(syzygyPath); // Tablebases::init, chiamato ad ogni cambio di SyzygyPath
-        UpdateTbConfig();
+        UpdateSyzygyOptions();
     }
     else if (string.Equals(name, "SyzygyProbeDepth", StringComparison.OrdinalIgnoreCase) && int.TryParse(value, out int probeDepth))
     {
         syzygyProbeDepth = probeDepth;
-        UpdateTbConfig();
+        UpdateSyzygyOptions();
     }
     else if (string.Equals(name, "Syzygy50MoveRule", StringComparison.OrdinalIgnoreCase) && bool.TryParse(value, out bool rule50))
     {
         syzygy50MoveRule = rule50;
-        UpdateTbConfig();
+        UpdateSyzygyOptions();
     }
     else if (string.Equals(name, "SyzygyProbeLimit", StringComparison.OrdinalIgnoreCase) && int.TryParse(value, out int probeLimit))
     {
         syzygyProbeLimit = probeLimit;
-        UpdateTbConfig();
+        UpdateSyzygyOptions();
     }
 }
 

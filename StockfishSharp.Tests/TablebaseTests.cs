@@ -133,7 +133,7 @@ public class TablebaseTests
 
         List<Move> legalMoves = [];
         MoveGen.Generate(GenType.Legal, pos, legalMoves);
-        var rootMoves = legalMoves.Select(m => new TbRootMove(m)).ToList();
+        var rootMoves = legalMoves.Select(m => new RootMove(m)).ToList();
 
         var config = Tablebase.RankRootMoves(pos, rootMoves, syzygy50MoveRule: true, syzygyProbeDepth: 1, syzygyProbeLimit: 7);
 
@@ -143,7 +143,7 @@ public class TablebaseTests
         for (int i = 1; i < rootMoves.Count; i++)
             Assert.True(rootMoves[i - 1].TbRank >= rootMoves[i].TbRank, "Le mosse devono restare ordinate per TbRank decrescente");
 
-        var e1h4 = rootMoves.Single(m => m.Move.FromSq == Square.E1 && m.Move.ToSq == Square.H4);
+        var e1h4 = rootMoves.Single(m => m.Pv[0].FromSq == Square.E1 && m.Pv[0].ToSq == Square.H4);
         Assert.Equal(rootMoves[0].TbRank, e1h4.TbRank);
     }
 
