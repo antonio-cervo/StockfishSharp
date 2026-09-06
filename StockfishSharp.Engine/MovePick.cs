@@ -226,6 +226,25 @@ public sealed class MovePick
             UpdateHistory(ref _ttMoveHistory, bestMove == ttMove ? 918 : -747, TtMoveHistoryLimit);
     }
 
+    /// <summary>Ramo "bonus per il countermove quieto che ha causato il fail-low puro",
+    /// search.cpp:1594-1601 — chiamato da Search.cs quando nessuna mossa del nodo corrente supera
+    /// alpha. <paramref name="parentContRefs"/>/<paramref name="parentInCheck"/> sono
+    /// (ss-1)-&gt;(ss-2..ss-7), non quelli del nodo corrente.</summary>
+    public void ApplyCountermoveQuietBonus(Position pos, Piece prevPiece, Square prevSq, Move parentMove,
+        ContinuationRef[] parentContRefs, bool parentInCheck, int scaledBonus, Color opponent)
+    {
+        UpdateContinuationHistories(parentContRefs, parentInCheck, prevPiece, prevSq, scaledBonus * 263 / 16384);
+        UpdateHistory(ref _mainHistory[(byte)opponent, parentMove.Raw], scaledBonus * 215 / 32768, MainHistoryLimit);
+
+        if (Types.TypeOf(prevPiece) != PieceType.Pawn && parentMove.TypeOf != MoveType.Promotion)
+            UpdateHistory(ref _pawnHistory[pos.PawnKey & (PawnHistorySize - 1), (byte)prevPiece, (byte)prevSq], scaledBonus * 324 / 8192, PawnHistoryLimit);
+    }
+
+    /// <summary>Ramo "bonus per il countermove di cattura che ha causato il fail-low puro",
+    /// search.cpp:1603-1609.</summary>
+    public void ApplyCountermoveCaptureBonus(Piece prevPiece, Square prevSq, PieceType capturedType) =>
+        UpdateHistory(ref _captureHistory[(byte)prevPiece, (byte)prevSq, (byte)capturedType], 892, CaptureHistoryLimit);
+
     /// <summary><c>ss-&gt;statScore</c>, search.cpp:1342-1349 — usato da Reduction() in Search.cs
     /// per rifinire la riduzione LMR in base a quanto la history "approva" la mossa. Per le
     /// catture usa CapturePieceToHistory; per le mosse quiete combina main history + le prime due

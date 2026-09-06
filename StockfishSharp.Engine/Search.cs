@@ -57,7 +57,14 @@
 // Step 16 include già multi-cut (il ramo "singularScore>=beta" che pota l'intero sottoalbero) ed
 // estensione negativa (il ramo "else if ttValue>=beta||cutNode").
 //
-// NON ancora portati: countermove, hindsight depth adjustment da priorReduction, Lazy SMP.
+// Step 23, ramo "bonus per il countermove che ha causato il fail-low puro" (search.cpp:1578-1609)
+// ora portato: quando nessuna mossa del nodo batte alpha, premia (se quieta) o rinforza (se
+// cattura) la mossa del GENITORE che ci ha portato qui. Richiede due nuove cronologie per ply
+// (statScore, moveCount) e Position.CapturedPiece() (già esisteva per l'undo, riusata qui).
+// Miglioramento incrementale sul caveat dello Step 15/16: la posizione di prova resta stabile su
+// d7c8q a depth 7-10 (prima solo 8-10), ancora non a depth 6 e 12 — residuo non risolto.
+//
+// NON ancora portati: hindsight depth adjustment da priorReduction, Lazy SMP.
 
 namespace StockfishSharp.Engine;
 
@@ -95,6 +102,10 @@ public sealed class Search
     private readonly Piece[] _movedPieceHistory = new Piece[Ply.MaxPly + StackOffset + 1];
     private readonly bool[] _inCheckHistory = new bool[Ply.MaxPly + StackOffset + 1];
     private readonly bool[] _captureStageHistory = new bool[Ply.MaxPly + StackOffset + 1];
+    // Stack::statScore/moveCount della fonte — per il bonus "countermove" di Step 23
+    // (search.cpp:1578-1601), che legge (ss-1)->statScore e (ss-1)->moveCount.
+    private readonly int[] _statScoreHistory = new int[Ply.MaxPly + StackOffset + 1];
+    private readonly int[] _moveCountHistory = new int[Ply.MaxPly + StackOffset + 1];
     // Stack::cutoffCnt della fonte — quanti tagli beta ha causato il nodo a QUESTO ply, azzerato
     // dal nodo due ply più in alto (Step 1, search.cpp:810: "(ss+2)->cutoffCnt=0") prima di
     // iniziare il proprio ciclo mosse, e letto dal genitore immediato (ss+1) in Step 18 per la
@@ -298,6 +309,8 @@ public sealed class Search
         Array.Clear(_inCheckHistory);
         Array.Clear(_captureStageHistory);
         Array.Clear(_cutoffCntHistory);
+        Array.Clear(_statScoreHistory);
+        Array.Clear(_moveCountHistory);
         _lastCompletedScore = -Infinity;
 
         var result = new SearchResult();
@@ -573,7 +586,8 @@ public sealed class Search
             // "milliply" (/1024 per ply interi). "delta" qui è l'ampiezza LOCALE alfa-beta di
             // QUESTO nodo (diversa da _rootDelta).
             int moveCount = i + 1;
-            int newDepth = depth - 1; // nessuna estensione (Singular Extensions non portate)
+            _moveCountHistory[ply + StackOffset] = moveCount; // Stack::moveCount, search.cpp:1137
+            int newDepth = depth - 1;
             int localDelta = beta - alpha;
             int r = Reduction(improving, depth, moveCount, localDelta);
             if (ttPv) r += 929;
@@ -714,6 +728,7 @@ public sealed class Search
             else if (m == probe.Data.Move) r -= 2179;
 
             int statScore = _movePick.ComputeStatScore(pos, m, captureStage, contRefs);
+            _statScoreHistory[ply + StackOffset] = statScore; // Stack::statScore, search.cpp:1342-1349
             r -= statScore * 439 / 4096;
 
             if (!captureStage && !Values.IsDecisive(alpha))
@@ -793,7 +808,46 @@ public sealed class Search
             value = ((value * depth) + beta) / (depth + 1);
 
         if (bestMove != null)
+        {
             _movePick.UpdateStats(pos, ply, bestMove.Value, quietsSearched, capturesSearched, depth, probe.Data.Move, isPvNode, contRefs, inCheck);
+        }
+        else if (ply != 0)
+        {
+            // Step 23, ramo "bonus per il countermove che ha causato il fail-low puro"
+            // (search.cpp:1578-1609): nessuna mossa di QUESTO nodo ha battuto alpha, quindi la
+            // mossa del genitore (ss-1) che ci ha portato qui va probabilmente premiata (se
+            // quieta) o già lo è a sufficienza dal materiale guadagnato (se cattura).
+            Move parentMove = _currentMoveHistory[ply + StackOffset - 1];
+            if (parentMove.IsOk)
+            {
+                Square prevSq = parentMove.ToSq;
+                Piece prevPiece = pos.PieceOn(prevSq); // il pezzo del genitore, ora su prevSq
+                bool priorCapture = _captureStageHistory[ply + StackOffset - 1];
+
+                if (!priorCapture)
+                {
+                    int parentInCheckInt = _inCheckHistory[ply + StackOffset - 1] ? 1 : 0;
+                    int bonusScale = -241;
+                    bonusScale -= _statScoreHistory[ply + StackOffset - 1] / 98;
+                    bonusScale += Math.Min(59 * depth, 420);
+                    bonusScale += 186 * (_moveCountHistory[ply + StackOffset - 1] > 9 ? 1 : 0);
+                    bonusScale += 142 * ((!inCheck && value <= staticEval - 106) ? 1 : 0);
+                    bonusScale += 159 * ((parentInCheckInt == 0 && value <= -_staticEvalHistory[ply + StackOffset - 1] - 68) ? 1 : 0);
+                    bonusScale = Math.Max(bonusScale, 0);
+
+                    int scaledBonus = Math.Min((150 * depth) - 85, 1337) * bonusScale;
+
+                    var parentContRefs = BuildContinuationRefs(ply - 1);
+                    _movePick.ApplyCountermoveQuietBonus(pos, prevPiece, prevSq, parentMove,
+                        parentContRefs, _inCheckHistory[ply + StackOffset - 1], scaledBonus, Types.Opposite(pos.SideToMove));
+                }
+                else
+                {
+                    PieceType capturedType = Types.TypeOf(pos.CapturedPiece());
+                    _movePick.ApplyCountermoveCaptureBonus(prevPiece, prevSq, capturedType);
+                }
+            }
+        }
 
         // search.cpp:1629-1638: aggiorna la correction history solo se la mossa migliore non è una
         // cattura e la direzione dell'errore (bestValue sopra/sotto la valutazione statica)

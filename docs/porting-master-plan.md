@@ -80,8 +80,14 @@ ancora dare `d7c8r` a depth 9) — non risolto, probabile conseguenza delle part
 alla stabilità fin dalle prime iterazioni. Verificato: 62/62 test, nessuna nuova regressione sulle
 altre posizioni di test.
 
-**Manca ancora**: countermove, l'hindsight depth adjustment da `priorReduction`, tutta la taratura
-fine dei margini rimasti, la struttura
+**Bonus "countermove" su fail-low puro FATTO** (search.cpp:1578-1609, l'ultimo ramo mancante dello
+Step 23): premia la mossa del genitore quando nessuna mossa del nodo corrente batte alpha.
+Miglioramento incrementale sul caveat: la posizione di prova resta stabile su `d7c8q` a depth 7-10
+(prima solo 8-10), ancora non a depth 6 e 12 — residuo non risolto, atteso richiedere la
+generazione a stadi vera e/o il resto della history in `OrderMoves` per chiudersi del tutto.
+
+**Manca ancora**: l'hindsight depth adjustment da `priorReduction`, tutta la taratura fine dei
+margini rimasti, la struttura
 `Worker`/`RootMove`/`Stack` completa della fonte (qui minimizzata a quanto serve). L'aspiration
 window usa lo score dell'iterazione precedente al posto della media mobile pesata per "effort"
 della fonte (richiede bookkeeping per-root-move non ancora presente). `followPV` (segue la riga
