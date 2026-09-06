@@ -70,6 +70,16 @@ public sealed class SearchThreadPool
         foreach (var s in _searches) s.SetSyzygyOptions(useRule50, probeDepth, probeLimit);
     }
 
+    /// <summary>Inoltra al thread principale (indice 0) — l'unico che consulta mai questi valori
+    /// per la gestione tempo adattiva, vedi <see cref="Search.SetPreviousScores"/> — un
+    /// aggiornamento di bestPreviousScore/bestPreviousAverageScore che non viene da una ricerca
+    /// vera (es. una mossa di libro giocata dal chiamante: Program.cs).</summary>
+    public void SetPreviousScores(int score, int averageScore)
+    {
+        if (_searches.Count == 0) SetThreadCount(1);
+        _searches[0].SetPreviousScores(score, averageScore);
+    }
+
     public void Resize(int hashMb) => _tt.Resize(hashMb);
 
     public void NewGame()

@@ -369,6 +369,25 @@ void HandleGo(string[] toks)
         Move? bookMove = book?.TryGetMove(position);
         if (bookMove.HasValue)
         {
+            // Il libro salta Search_ per intero, quindi bestPreviousScore/bestPreviousAverageScore
+            // (search.h:311-312, gestione tempo adattiva — search.cpp:568-618) restano al
+            // sentinella VALUE_INFINITE di "partita appena iniziata" (ThreadPool::clear,
+            // thread.cpp:273-277) finché il motore non esce dal libro. Nella fonte reale questo
+            // scenario si verifica SOLO alla mossa 1 (Stockfish non ha un libro incorporato); con
+            // un libro esterno che gioca le prime mosse senza mai chiamare "go" avrebbe lo STESSO
+            // comportamento — qui però, uscendo dal libro a un ply qualunque della partita, la
+            // formula (search.cpp:573-576) legge quel sentinella come "il punteggio è appena
+            // crollato" e usa il moltiplicatore di tempo MASSIMO per l'INTERA prima ricerca vera
+            // (bestPreviousAverageScore si aggiorna solo a fine Search_, mai durante il ciclo
+            // depth) — sintomo reale osservato dal vivo: la prima mossa fuori libro impiega
+            // moltissimo. Fix: una valutazione statica istantanea della posizione (non una
+            // ricerca vera) al posto del sentinella è una base enormemente più sensata per la
+            // formula — piccola scorciatoia pratica dichiarata qui esplicitamente, al confine fra
+            // il libro (già pratico, Flow D1) e la gestione tempo (fedele): non tocca la formula
+            // portata, sistema solo l'interazione con questa funzionalità non di fonte.
+            int bookEval = Evaluate.StaticEval(position);
+            search.SetPreviousScores(bookEval, bookEval);
+
             Console.WriteLine($"bestmove {MoveToUci(bookMove.Value)}");
             return;
         }
