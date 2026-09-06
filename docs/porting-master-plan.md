@@ -302,8 +302,32 @@ combaciare esattamente con "esiste una mossa dopo la quale `IsDraw` diventa vera
 regressione sulle posizioni di test esistenti, verificato a mano che una tripla ripetizione reale
 via UCI riporta un punteggio drasticamente ridotto rispetto al materiale in campo.
 
-**Manca ancora**: `pos_is_ok`, `material_key_is_ok`, `flip`, `dtz_is_dtm` (debug/tablebase), tutta
-la macchina `update_piece_threats`/`DirtyThreats` — quest'ultima è **prerequisito di N9**.
+**`update_piece_threats`/`DirtyThreats` FATTO** (position.cpp:1189-1291, solo il ramo scalare —
+niente `write_multiple_dirties` AVX-512ICL): nuovo `DirtyThreat.cs` (struct con campi diretti
+invece del bit-packing a 32 bit della fonte, che lì serve solo per le istruzioni SIMD non portate)
+e `Position.UpdatePieceThreats`, che calcola sia le minacce dirette che un pezzo genera/riceve da
+una casa sia quelle "scoperte" da sliders la cui linea di vista passa per quella casa (via
+`ProcessSliders`/`RayPass`, già presente dal porting precedente). `PutPiece`/`RemovePiece`/
+`MovePiece`/`SwapPiece`/`DoCastling`/`DoMove` (già strutturati con questi helper dal porting
+originale, con un commento che segnalava esplicitamente "dts aggiunto nella fase NNUE") ora
+accettano tutti un `List&lt;DirtyThreat&gt;?` opzionale (default null, nessun costo per i chiamanti
+esistenti — l'unica ricerca in produzione non lo passa ancora).
+
+Verificato in modo indipendente (stesso principio già usato per SEE/perft/l'accumulatore NNUE):
+nuovo `DirtyThreatsTests.cs`, una funzione "brute force" (nessun raggio/scoperto, verifica diretta
+pezzo-per-pezzo con gli attacchi standard + la regola dichiarativa "chi può minacciare chi" della
+feature) calcola l'insieme completo delle minacce prima e dopo ogni mossa; applicando il diff dei
+`DirtyThreat` generati all'insieme "prima" si ottiene esattamente l'insieme "dopo" — su 6 posizioni
+(incluse 2 con arrocco disponibile, una con promozione imminente) alla radice, più verifica
+ricorsiva fino a profondità 2 su Kiwipete e sulla "Position 4" standard (arrocco+promozione+cattura
+in sequenza). 77/77 test totali; `bench 16 1 8` con `git stash` prima/dopo — nodi IDENTICI (il
+refactor di RemovePiece/PutPiece/MovePiece/SwapPiece per accettare il parametro opzionale non
+cambia alcun comportamento quando non usato, come da progetto).
+
+**Manca ancora**: `pos_is_ok`, `material_key_is_ok`, `flip`, `dtz_is_dtm` (debug/tablebase) —
+minori, non prerequisiti di nulla. Il vero prerequisito di N9 era `DirtyThreats`, ora fatto: N9
+(aggiornamento incrementale dell'accumulatore, che consuma sia questo che `DirtyPiece`/
+`DirtyPawnPairs`, ancora da aggiungere) può procedere.
 
 ---
 

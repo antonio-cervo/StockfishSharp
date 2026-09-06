@@ -112,6 +112,108 @@ public sealed class Position
         return threats;
     }
 
+    /// <summary><c>can_slider_threat</c>, position.cpp:1189-1191 — una regina è minacciata da uno
+    /// slider SOLO se lo slider è a sua volta una regina (limita la combinatoria della feature
+    /// FullThreats); ogni altro bersaglio può essere minacciato da qualunque slider che lo veda.</summary>
+    private static bool CanSliderThreat(Piece threatenedPc, Piece slider) =>
+        Types.TypeOf(threatenedPc) != PieceType.Queen || Types.TypeOf(slider) == PieceType.Queen;
+
+    /// <summary>Porting fedele di <c>Position::update_piece_threats&lt;ComputeRay&gt;</c>,
+    /// position.cpp:1193-1291 (solo il ramo scalare — la variante AVX-512ICL con
+    /// write_multiple_dirties, dietro #ifdef USE_AVX512ICL, non è portata, stesso trattamento di
+    /// ogni altro codice SIMD-specifico in questo porting). Popola <paramref name="dts"/> con i
+    /// cambiamenti di minaccia causati dall'aggiunta (<paramref name="putPiece"/>=true) o dalla
+    /// rimozione (=false) del pezzo <paramref name="pc"/> sulla casa <paramref name="s"/> — sia le
+    /// minacce dirette che <paramref name="pc"/> genera/riceve da <paramref name="s"/>, sia quelle
+    /// "scoperte" da sliders la cui linea di vista passa per <paramref name="s"/> (quando
+    /// <paramref name="computeRay"/> è vero — la fonte lo pone a falso solo in
+    /// <c>swap_piece</c>, dove la casa non è mai vuota e quindi non può esserci nulla da
+    /// scoprire). <paramref name="noRaysContaining"/> (usato solo da <c>move_piece</c>) esclude i
+    /// raggi che contengono SIA la casa di partenza che quella di arrivo dello stesso pezzo in
+    /// movimento — altrimenti il proprio spostamento lungo la propria retta genererebbe uno
+    /// "scoperto" fittizio.</summary>
+    private void UpdatePieceThreats(Piece pc, bool putPiece, Square s, List<DirtyThreat> dts,
+        bool computeRay = true, ulong noRaysContaining = ulong.MaxValue)
+    {
+        ulong occupied = Pieces();
+        ulong bAttacks = Attacks.AttacksBb(PieceType.Bishop, s, occupied);
+        ulong rAttacks = Attacks.AttacksBb(PieceType.Rook, s, occupied);
+        ulong sliderAttacks = bAttacks | rAttacks;
+        ulong occupiedNoK = occupied ^ Pieces(PieceType.King);
+        PieceType pt = Types.TypeOf(pc);
+        ulong sliders = (Pieces(PieceType.Bishop, PieceType.Queen) & bAttacks) | (Pieces(PieceType.Rook, PieceType.Queen) & rAttacks);
+
+        void ProcessSliders(bool addDirectAttacks)
+        {
+            ulong b = sliders;
+            while (b != 0)
+            {
+                Square sliderSq = Bitboards.PopLsb(ref b);
+                Piece slider = PieceOn(sliderSq);
+
+                ulong ray = Attacks.RayPass(sliderSq, s);
+                ulong discovered = ray & sliderAttacks & occupiedNoK;
+
+                if (discovered != 0 && (ray & noRaysContaining) != noRaysContaining)
+                {
+                    Square threatenedSq = Bitboards.Lsb(discovered);
+                    Piece threatenedPc = PieceOn(threatenedSq);
+                    if (CanSliderThreat(threatenedPc, slider))
+                        dts.Add(new DirtyThreat(slider, threatenedPc, sliderSq, threatenedSq, !putPiece));
+                }
+
+                if (addDirectAttacks && CanSliderThreat(pc, slider))
+                    dts.Add(new DirtyThreat(slider, pc, sliderSq, s, putPiece));
+            }
+        }
+
+        // I re non emettono mai minacce dirette (position.cpp:1231-1237) — ma possono comunque
+        // "scoprire" una minaccia altrui muovendosi, da cui la chiamata a ProcessSliders qui sotto.
+        if (pt == PieceType.King)
+        {
+            if (computeRay) ProcessSliders(false);
+            return;
+        }
+
+        ulong threatTargets = pt == PieceType.Pawn ? Pieces(PieceType.Knight, PieceType.Rook)
+            : pt is PieceType.Bishop or PieceType.Rook
+                ? Pieces(PieceType.Pawn) | Pieces(PieceType.Knight) | Pieces(PieceType.Bishop) | Pieces(PieceType.Rook)
+                : occupiedNoK;
+
+        ulong threatened = (pt switch
+        {
+            PieceType.Bishop => bAttacks,
+            PieceType.Rook => rAttacks,
+            PieceType.Queen => sliderAttacks,
+            PieceType.Pawn => Attacks.PawnAttacksBb(s, Types.ColorOf(pc)),
+            _ => Attacks.AttacksBb(pt, s),
+        }) & threatTargets;
+
+        ulong incomingThreats = Attacks.AttacksBb(PieceType.Knight, s) & Pieces(PieceType.Knight);
+        if (pt is PieceType.Knight or PieceType.Rook)
+            incomingThreats |= (Attacks.PawnAttacksBb(s, Color.White) & Pieces(Color.Black, PieceType.Pawn))
+                              | (Attacks.PawnAttacksBb(s, Color.Black) & Pieces(Color.White, PieceType.Pawn));
+
+        while (threatened != 0)
+        {
+            Square threatenedSq = Bitboards.PopLsb(ref threatened);
+            Piece threatenedPc = PieceOn(threatenedSq);
+            dts.Add(new DirtyThreat(pc, threatenedPc, s, threatenedSq, putPiece));
+        }
+
+        if (computeRay)
+            ProcessSliders(true);
+        else
+            incomingThreats |= pt == PieceType.Queen ? sliders & Pieces(PieceType.Queen) : sliders;
+
+        while (incomingThreats != 0)
+        {
+            Square srcSq = Bitboards.PopLsb(ref incomingThreats);
+            Piece srcPc = PieceOn(srcSq);
+            dts.Add(new DirtyThreat(srcPc, pc, srcSq, s, putPiece));
+        }
+    }
+
     public ulong Pinners(Color c) => _st.Pinners[(byte)c];
 
     public ulong AttackersTo(Square s) => AttackersTo(s, Pieces());
@@ -434,10 +536,12 @@ public sealed class Position
 
     public StateInfo State => _st;
 
-    // --- Modifica della scacchiera — position.h:381-421, senza i parametri NNUE "dts"/"dp" (vedi
-    // nota in cima al file: aggiunti nella fase NNUE) ---
+    // --- Modifica della scacchiera — position.h:381-421. Il parametro NNUE "dts" (facoltativo,
+    // null di default e per tutti i chiamanti finora) è ora presente — vedi UpdatePieceThreats
+    // sopra e DirtyThreat.cs; "dp" (DirtyPiece, per l'accumulatore incrementale N9) resta ancora
+    // da aggiungere. ---
 
-    private void PutPiece(Piece pc, Square s)
+    private void PutPiece(Piece pc, Square s, List<DirtyThreat>? dts = null)
     {
         _board[(byte)s] = pc;
         _byTypeBB[(byte)PieceType.AllPieces] |= Bitboards.SquareBB(s);
@@ -445,11 +549,16 @@ public sealed class Position
         _byColorBB[(byte)Types.ColorOf(pc)] |= Bitboards.SquareBB(s);
         _pieceCount[(byte)pc]++;
         _pieceCount[(byte)Types.MakePiece(Types.ColorOf(pc), PieceType.AllPieces)]++;
+
+        if (dts != null) UpdatePieceThreats(pc, true, s, dts);
     }
 
-    private void RemovePiece(Square s)
+    private void RemovePiece(Square s, List<DirtyThreat>? dts = null)
     {
         Piece pc = _board[(byte)s];
+
+        if (dts != null) UpdatePieceThreats(pc, false, s, dts);
+
         _byTypeBB[(byte)PieceType.AllPieces] ^= Bitboards.SquareBB(s);
         _byTypeBB[(byte)Types.TypeOf(pc)] ^= Bitboards.SquareBB(s);
         _byColorBB[(byte)Types.ColorOf(pc)] ^= Bitboards.SquareBB(s);
@@ -458,21 +567,37 @@ public sealed class Position
         _pieceCount[(byte)Types.MakePiece(Types.ColorOf(pc), PieceType.AllPieces)]--;
     }
 
-    private void MovePiece(Square from, Square to)
+    private void MovePiece(Square from, Square to, List<DirtyThreat>? dts = null)
     {
         Piece pc = _board[(byte)from];
         ulong fromTo = Bitboards.SquareBB(from) | Bitboards.SquareBB(to);
+
+        // noRaysContaining=fromTo esclude i raggi che vedono ENTRAMBE le case: altrimenti il
+        // pezzo che si sposta lungo la propria retta scoprirebbe una minaccia fittizia verso se
+        // stesso — position.h:406-421.
+        if (dts != null) UpdatePieceThreats(pc, false, from, dts, noRaysContaining: fromTo);
+
         _byTypeBB[(byte)PieceType.AllPieces] ^= fromTo;
         _byTypeBB[(byte)Types.TypeOf(pc)] ^= fromTo;
         _byColorBB[(byte)Types.ColorOf(pc)] ^= fromTo;
         _board[(byte)from] = Piece.None;
         _board[(byte)to] = pc;
+
+        if (dts != null) UpdatePieceThreats(pc, true, to, dts, noRaysContaining: fromTo);
     }
 
-    private void SwapPiece(Square s, Piece pc)
+    private void SwapPiece(Square s, Piece pc, List<DirtyThreat>? dts = null)
     {
+        Piece old = _board[(byte)s];
+
         RemovePiece(s);
+        // ComputeRay=false, position.h:423-435: la casa s non è mai vuota durante lo swap (il
+        // pezzo catturato lascia il posto direttamente al nuovo), quindi non può esserci nulla da
+        // "scoprire" attraverso di essa — l'unica differenza è chi la occupa.
+        if (dts != null) UpdatePieceThreats(old, false, s, dts, computeRay: false);
+
         PutPiece(pc, s);
+        if (dts != null) UpdatePieceThreats(pc, true, s, dts, computeRay: false);
     }
 
     // --- Impostazione da FEN — position.cpp:169-443 ---
@@ -763,7 +888,12 @@ public sealed class Position
     /// nota in cima al file).</summary>
     public void DoMove(Move m, StateInfo newSt) => DoMove(m, newSt, GivesCheck(m));
 
-    public void DoMove(Move m, StateInfo newSt, bool givesCheck)
+    /// <summary><paramref name="dirtyThreats"/> (facoltativo, null di default) raccoglie i
+    /// cambiamenti di minaccia FullThreats causati da questa mossa — vedi UpdatePieceThreats.
+    /// Nessun costo per i chiamanti esistenti (che non lo passano): resta il comportamento
+    /// originale, l'unico ramo condizionale aggiunto è dentro RemovePiece/PutPiece/MovePiece/
+    /// SwapPiece stessi.</summary>
+    public void DoMove(Move m, StateInfo newSt, bool givesCheck, List<DirtyThreat>? dirtyThreats = null)
     {
         ulong k = _st.Key ^ Zobrist.Side;
 
@@ -784,7 +914,7 @@ public sealed class Position
 
         if (m.TypeOf == MoveType.Castling)
         {
-            DoCastling(true, us, from, ref to, out Square rfrom, out Square rto);
+            DoCastling(true, us, from, ref to, out Square rfrom, out Square rto, dirtyThreats);
             k ^= Zobrist.Psq[(byte)captured, (byte)rfrom] ^ Zobrist.Psq[(byte)captured, (byte)rto];
             _st.NonPawnKey[(byte)us] ^= Zobrist.Psq[(byte)captured, (byte)rfrom] ^ Zobrist.Psq[(byte)captured, (byte)rto];
             captured = Piece.None;
@@ -798,7 +928,7 @@ public sealed class Position
                 if (m.TypeOf == MoveType.EnPassant)
                 {
                     capsq = Types.SubDirection(capsq, Types.PawnPush(us));
-                    RemovePiece(capsq);
+                    RemovePiece(capsq, dirtyThreats);
                 }
 
                 _st.PawnKey ^= Zobrist.Psq[(byte)captured, (byte)capsq];
@@ -882,17 +1012,17 @@ public sealed class Position
 
             if (captured != Piece.None && m.TypeOf != MoveType.EnPassant)
             {
-                RemovePiece(from);
-                SwapPiece(to, toPc);
+                RemovePiece(from, dirtyThreats);
+                SwapPiece(to, toPc, dirtyThreats);
             }
             else if (pc == toPc)
             {
-                MovePiece(from, to);
+                MovePiece(from, to, dirtyThreats);
             }
             else
             {
-                RemovePiece(from);
-                PutPiece(toPc, to);
+                RemovePiece(from, dirtyThreats);
+                PutPiece(toPc, to, dirtyThreats);
             }
         }
 
@@ -1085,16 +1215,18 @@ public sealed class Position
     /// <summary>Esegue/disfa un arrocco — <c>Position::do_castling&lt;Do&gt;</c>,
     /// position.cpp:1311-1339. Rimuove entrambi i pezzi prima di riposizionarli (le case possono
     /// sovrapporsi in Chess960, es. la torre già sulla casa di arrivo del re).</summary>
-    private void DoCastling(bool doIt, Color us, Square from, ref Square to, out Square rfrom, out Square rto)
+    private void DoCastling(bool doIt, Color us, Square from, ref Square to, out Square rfrom, out Square rto, List<DirtyThreat>? dts = null)
     {
         bool kingSide = to > from;
         rfrom = to; // l'arrocco è codificato come "il re cattura la propria torre"
         rto = Types.RelativeSquare(us, kingSide ? Square.F1 : Square.D1);
         to = Types.RelativeSquare(us, kingSide ? Square.G1 : Square.C1);
 
-        RemovePiece(doIt ? from : to);
-        RemovePiece(doIt ? rfrom : rto);
-        PutPiece(Types.MakePiece(us, PieceType.King), doIt ? to : from);
-        PutPiece(Types.MakePiece(us, PieceType.Rook), doIt ? rto : rfrom);
+        // Rimuove entrambi i pezzi prima di rimetterli — in Chess960 le case potrebbero
+        // sovrapporsi (position.cpp:1334 "Remove both pieces first since squares could overlap").
+        RemovePiece(doIt ? from : to, dts);
+        RemovePiece(doIt ? rfrom : rto, dts);
+        PutPiece(Types.MakePiece(us, PieceType.King), doIt ? to : from, dts);
+        PutPiece(Types.MakePiece(us, PieceType.Rook), doIt ? rto : rfrom, dts);
     }
 }
