@@ -218,6 +218,49 @@ public sealed class MovePick
             UpdateHistory(ref _ttMoveHistory, bestMove == ttMove ? 918 : -747, TtMoveHistoryLimit);
     }
 
+    /// <summary><c>ss-&gt;statScore</c>, search.cpp:1342-1349 — usato da Reduction() in Search.cs
+    /// per rifinire la riduzione LMR in base a quanto la history "approva" la mossa. Per le
+    /// catture usa CapturePieceToHistory; per le mosse quiete combina main history + le prime due
+    /// continuation history (ss-1, ss-2 — <paramref name="contRefs"/>[0]/[1]).</summary>
+    public int ComputeStatScore(Position pos, Move m, bool captureStage, ContinuationRef[] contRefs)
+    {
+        if (captureStage)
+        {
+            Piece movedPiece = pos.MovedPiece(m);
+            PieceType capturedPiece = Types.TypeOf(pos.PieceOn(m.ToSq));
+            return (873 * Values.PieceValue[(byte)pos.PieceOn(m.ToSq)] / 128)
+                + _captureHistory[(byte)movedPiece, (byte)m.ToSq, (byte)capturedPiece];
+        }
+
+        Color us = pos.SideToMove;
+        Piece pc = pos.MovedPiece(m);
+        int mainScore = _mainHistory[(byte)us, m.Raw];
+        int cont0 = ContinuationScore(contRefs[0], pc, m.ToSq);
+        int cont1 = ContinuationScore(contRefs[1], pc, m.ToSq);
+
+        return ((2252 * mainScore) + (1126 * cont0) + (1093 * cont1)) / 1024;
+    }
+
+    /// <summary>Somma di contHist[0]+contHist[1]+pawn_entry per una mossa quieta — usata dallo
+    /// Step 15 (potatura a profondità bassa, search.cpp:1200-1202) in Search.cs.</summary>
+    public int ComputeQuietPruningHistory(Position pos, Move m, ContinuationRef[] contRefs)
+    {
+        Piece pc = pos.MovedPiece(m);
+        Square to = m.ToSq;
+        int cont0 = ContinuationScore(contRefs[0], pc, to);
+        int cont1 = ContinuationScore(contRefs[1], pc, to);
+        int pawnScore = _pawnHistory[pos.PawnKey & (PawnHistorySize - 1), (byte)pc, (byte)to];
+        return cont0 + cont1 + pawnScore;
+    }
+
+    public int GetMainHistoryRaw(Color us, Move m) => _mainHistory[(byte)us, m.Raw];
+
+    public int GetCaptureHistory(Piece movedPiece, Square to, PieceType captured) =>
+        _captureHistory[(byte)movedPiece, (byte)to, (byte)captured];
+
+    private int ContinuationScore(ContinuationRef r, Piece pc, Square to) =>
+        r.IsOk ? _continuationHistory[r.InCheck ? 1 : 0, r.CaptureStage ? 1 : 0, (byte)r.Piece, (byte)r.To, (byte)pc, (byte)to] : 0;
+
     /// <summary><c>update_quiet_histories</c>, search.cpp:2045-2056 — main history, low-ply
     /// history (solo ply&lt;5) e continuation history (vedi nota in testa al file per pawn
     /// history non portata).</summary>

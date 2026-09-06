@@ -33,11 +33,24 @@
 // quando una mossa supera davvero alpha (search.cpp:1518-1520), non ogni volta che migliora il
 // punteggio grezzo — un nodo "fail-low puro" (nessuna mossa batte alpha) ora lascia bestMove a
 // null come nella fonte, invece di premiare arbitrariamente la prima mossa provata.
-// NON ancora portati (candidati per i prossimi Step): Singular Extensions, la vera formula di
-// riduzione LMR (reduction(), che dipende da una tabella reductions[]/rootDelta/statScore non
-// ancora portati — qui LMR resta una riduzione fissa di 1), countermove, PawnHistory,
-// LowPlyHistory, TTMoveHistory (vedi MovePick.cs), Lazy SMP (multi-thread), hindsight depth
-// adjustment da priorReduction.
+// La vera formula di riduzione LMR (reduction(), search.cpp:1885-1888 — tabella reductions[]
+// logaritmica + rootDelta + statScore da MovePick) e lo Step 15 (potatura a profondità bassa:
+// late move pruning, futility/SEE per catture, futility+potatura da history+SEE per mosse quiete,
+// search.cpp:1164-1232) sono ora portati, ricontrollati riga per riga contro la fonte.
+//
+// ⚠️ CAVEAT sullo Step 15: su una posizione con una promozione a donna vincente (verificata contro
+// l'oracolo come d7c8q in commit precedenti) la mossa scelta oscilla fra profondità vicine (6-9→q,
+// 10→r, 12→q) invece di restare stabile come fa l'oracolo reale (d7c8q ad ogni profondità,
+// verificato). Senza questo Step la stabilità torna. Nessun errore di trascrizione trovato dopo
+// due controlli riga per riga (incluso verificare che il "return 0>=threshold" di see_ge sulle
+// mosse non-Normal è il comportamento REALE della fonte per le promozioni, non una nostra
+// semplificazione — position.cpp:1393-1395). Ipotesi più probabile: nella fonte questo Step lavora
+// in coppia con le Singular Extensions (sotto, non ancora portate) come rete di sicurezza contro
+// esattamente questo tipo di instabilità — portarlo da solo può essere legittimamente più
+// instabile a profondità basse. Vedi il commento sul posto in Negamax per il dettaglio.
+//
+// NON ancora portati (candidati per i prossimi Step): Singular Extensions (vedi caveat sopra —
+// priorità alta), multi-cut, countermove, hindsight depth adjustment da priorReduction, Lazy SMP.
 
 namespace StockfishSharp.Engine;
 
@@ -63,8 +76,6 @@ public sealed class Search
     private const int NullMoveReduction = 3;
     private const int ReverseFutilityMaxDepth = 6;
     private const int ReverseFutilityMarginPerDepth = 90;
-    private const int LmrMinDepth = 3;
-    private const int LmrMinMoveIndex = 3;
 
     // Stack della fonte (search.cpp:289-298: stack[MAX_PLY+10], ss=stack+7) ridotto ai soli campi
     // che servono qui: valutazione statica (improving/opponentWorsening), mossa/pezzo mosso/scacco
@@ -77,6 +88,31 @@ public sealed class Search
     private readonly Piece[] _movedPieceHistory = new Piece[Ply.MaxPly + StackOffset + 1];
     private readonly bool[] _inCheckHistory = new bool[Ply.MaxPly + StackOffset + 1];
     private readonly bool[] _captureStageHistory = new bool[Ply.MaxPly + StackOffset + 1];
+    // Stack::cutoffCnt della fonte — quanti tagli beta ha causato il nodo a QUESTO ply, azzerato
+    // dal nodo due ply più in alto (Step 1, search.cpp:810: "(ss+2)->cutoffCnt=0") prima di
+    // iniziare il proprio ciclo mosse, e letto dal genitore immediato (ss+1) in Step 18 per la
+    // riduzione LMR.
+    private readonly int[] _cutoffCntHistory = new int[Ply.MaxPly + StackOffset + 3];
+
+    // reductions[], search.cpp:712-713 — tabella logaritmica precalcolata, usata da Reduction().
+    private static readonly int[] Reductions = BuildReductions();
+    private static int[] BuildReductions()
+    {
+        var r = new int[Ply.MaxMoves];
+        for (int i = 1; i < r.Length; i++)
+            r[i] = (int)(2872 / 128.0 * Math.Log(i));
+        return r;
+    }
+
+    // lmrDivisor[], search.cpp:55-56 — usato dallo Step 15 per scalare il contributo della
+    // history quieta a "lmrDepth" (indice = min(depth,16)-1).
+    private static readonly int[] LmrDivisor =
+        [3637, 2787, 2761, 2939, 3171, 3347, 3147, 2762, 2772, 3106, 3107, 3060, 3112, 2991, 3090, 3542];
+
+    // rootDelta, search.cpp:394 — ampiezza della finestra di aspiration alla radice PER QUESTO
+    // tentativo (si allarga durante il ciclo fallisce-alto/basso), usata da Reduction() come
+    // termine di confronto con l'ampiezza locale del nodo corrente.
+    private int _rootDelta = Infinity;
 
     // Usati da Step 9 (futility pruning) per "seekMate" — vedi nota di semplificazione in testa
     // al file: qui è il punteggio/la profondità dell'ULTIMA iterazione completata, non del root
@@ -194,6 +230,17 @@ public sealed class Search
         entry = (short)(val + clampedBonus - (val * Math.Abs(clampedBonus) / CorrectionHistoryLimit));
     }
 
+    /// <summary><c>Search::Worker::reduction</c>, search.cpp:1885-1888 — quanto ridurre la
+    /// profondità per una mossa, in "milliply" (da dividere per 1024 per ottenere ply interi).
+    /// <paramref name="delta"/> è l'ampiezza LOCALE della finestra alfa-beta al nodo corrente
+    /// (non <see cref="_rootDelta"/>, l'ampiezza alla radice — il rapporto fra le due è uno dei
+    /// termini della formula).</summary>
+    private int Reduction(bool improving, int depth, int moveNumber, int delta)
+    {
+        int reductionScale = Reductions[Math.Min(depth, Ply.MaxMoves - 1)] * Reductions[Math.Min(moveNumber, Ply.MaxMoves - 1)];
+        return reductionScale - (delta * 577 / _rootDelta) + ((improving ? 0 : 1) * reductionScale * 197 / 512) + 982;
+    }
+
     /// <summary><c>value_to_tt</c>, search.cpp:1911: converte un punteggio di matto/tablebase da
     /// "distanza dal nodo corrente" a "distanza dalla radice" prima di salvarlo in TT — altrimenti
     /// una entry scritta a un ply diverso da dove viene poi letta darebbe una distanza di matto
@@ -243,6 +290,7 @@ public sealed class Search
         Array.Clear(_movedPieceHistory);
         Array.Clear(_inCheckHistory);
         Array.Clear(_captureStageHistory);
+        Array.Clear(_cutoffCntHistory);
         _lastCompletedScore = -Infinity;
 
         var result = new SearchResult();
@@ -263,6 +311,7 @@ public sealed class Search
                 int bestValue;
                 while (true)
                 {
+                    _rootDelta = beta - alpha; // search.cpp:394, ricalcolato a ogni tentativo
                     bestValue = Negamax(pos, depth, 0, alpha, beta, cutNode: false);
 
                     if (bestValue <= alpha)
@@ -305,6 +354,7 @@ public sealed class Search
         if ((_nodes & 2047) == 0) _ct.ThrowIfCancellationRequested();
 
         bool isPvNode = beta - alpha > 1;
+        bool allNode = !isPvNode && !cutNode; // search.cpp:726 — !(PvNode||cutNode)
 
         // Mate distance pruning — esatta, non euristica: da questo ply il miglior esito possibile
         // è dare matto alla prossima mossa, il peggiore essere già sotto matto.
@@ -324,6 +374,11 @@ public sealed class Search
         if (depth <= 0) return Quiesce(pos, alpha, beta, ply);
 
         bool inCheck = pos.Checkers() != 0;
+
+        // search.cpp:810 — "(ss+2)->cutoffCnt=0": azzera il contatore di tagli beta a due ply più
+        // in basso, che i NIPOTI (letto come "(ss+1)" dai figli quando calcolano la loro
+        // riduzione LMR in Step 18) accumuleranno nel corso del ciclo mosse di questo nodo.
+        _cutoffCntHistory[ply + StackOffset + 2] = 0;
 
         var probe = _tt.Probe(pos.Key);
         int ttScore = probe.Found ? ValueFromTt(probe.Data.Value, ply, pos.Rule50Count) : Values.None;
@@ -408,9 +463,8 @@ public sealed class Search
             // Step 11. Internal iterative reduction — search.cpp:1048-1052: a profondità
             // sufficiente, riduce la profondità nei nodi PV/Cut senza una mossa in TT (una TT
             // vuota qui è un segnale che questo nodo non è mai stato esplorato a sufficienza).
-            // "allNode" nella fonte è !(PvNode||cutNode); "followPV" (segue la riga principale
-            // dell'iterazione precedente) non è portato — condizione qui leggermente più ampia.
-            bool allNode = !isPvNode && !cutNode;
+            // "followPV" (segue la riga principale dell'iterazione precedente) non è portato —
+            // condizione qui leggermente più ampia.
             if (!allNode && depth >= 6 && (!probe.Found || probe.Data.Move == Move.None))
                 depth--;
 
@@ -477,11 +531,17 @@ public sealed class Search
         var capturesSearched = new List<Move>();
         const int SearchedListCapacity = 32; // SEARCHEDLIST_CAPACITY, search.cpp:73
 
+        // mp.skip_quiet_moves(), search.cpp:1169-1170 — la fonte usa un generatore a stadi che
+        // smette di produrre mosse quiete; qui, con la lista già generata per intero, si saltano
+        // semplicemente le quiete rimanenti una volta superata la soglia.
+        bool skipQuietMoves = false;
+
         for (int i = 0; i < moves.Count; i++)
         {
             Move m = moves[i];
-            bool tactical = pos.Capture(m) || m.TypeOf == MoveType.Promotion;
             bool captureStage = pos.CaptureStage(m);
+            if (skipQuietMoves && !captureStage) continue;
+
             bool givesCheck = pos.GivesCheck(m);
 
             // Stack::currentMove per la continuation history del ply successivo (MovePick, i suoi
@@ -493,28 +553,143 @@ public sealed class Search
             _inCheckHistory[ply + StackOffset] = inCheck;
             _captureStageHistory[ply + StackOffset] = captureStage;
 
+            // Step 18 (prima parte, prima di fare la mossa), search.cpp:1152-1162: r è in
+            // "milliply" (/1024 per ply interi). "delta" qui è l'ampiezza LOCALE alfa-beta di
+            // QUESTO nodo (diversa da _rootDelta).
+            int moveCount = i + 1;
+            int newDepth = depth - 1; // nessuna estensione (Singular Extensions non portate)
+            int localDelta = beta - alpha;
+            int r = Reduction(improving, depth, moveCount, localDelta);
+            if (ttPv) r += 929;
+
+            // Step 15. Potatura a profondità bassa — search.cpp:1164-1232, trascritta e
+            // ri-confrontata riga per riga con la fonte (incluso il caso limite di see_ge sulle
+            // mosse non-Normal: "return 0>=threshold" È il comportamento REALE della fonte per
+            // le promozioni, non una nostra semplificazione — position.cpp:1393-1395). "followPV"
+            // (segue la riga principale dell'iterazione precedente) non è portato: qui questa
+            // potatura si applica sempre alle mosse quiete, piccola differenza dalla fonte.
+            //
+            // CAVEAT osservato: su una posizione con una promozione a donna vincente (d7c8q,
+            // combaciante con l'oracolo nei commit precedenti), con questo Step attivo la mossa
+            // scelta oscilla fra profondità vicine (6-9→q, 10→r, 12→q) invece di restare stabile
+            // come fa l'oracolo reale (d7c8q a ogni profondità, verificato). SENZA questo Step la
+            // stabilità torna (costante 6-10). Ipotesi più probabile dopo un secondo confronto
+            // riga-per-riga (nessun errore di trascrizione trovato): nella fonte questo Step
+            // lavora IN COPPIA con le Singular Extensions (Step 16, sotto — non ancora portate),
+            // che ri-verificano con una ricerca ridotta se la mossa "ovviamente migliore" lo è
+            // davvero, proprio per correggere i casi in cui la potatura aggressiva di questo Step
+            // sceglie male a profondità bassa. Portarlo da solo, senza quella rete di sicurezza,
+            // può quindi essere legittimamente più instabile a profondità basse — analogo a
+            // quanto osservato in Flow A2 (i nodi non calavano finché il sistema di history non
+            // era quasi completo). Prossimo passo naturale: Singular Extensions, poi riverificare
+            // questa posizione.
+            if (ply != 0 && !Values.IsLoss(value) && pos.NonPawnMaterial(pos.SideToMove) != 0)
+            {
+                // search.cpp:1168-1170 — late move pruning: oltre questa soglia si smette di
+                // provare mosse quiete a questo nodo (le catture restanti si provano comunque).
+                if (moveCount >= (3 + (depth * depth)) / (improving ? 1 : 2))
+                    skipQuietMoves = true;
+
+                int lmrDepth = newDepth - (r / 1024);
+
+                if (captureStage || givesCheck)
+                {
+                    Piece capturedForPrune = pos.PieceOn(m.ToSq);
+                    int captHist = _movePick.GetCaptureHistory(pos.MovedPiece(m), m.ToSq, Types.TypeOf(capturedForPrune));
+
+                    if (!givesCheck && lmrDepth < 8)
+                    {
+                        int futilityValue = staticEval + 234 + (247 * lmrDepth) + Values.PieceValue[(byte)capturedForPrune] + (134 * captHist / 1024);
+                        if (futilityValue <= alpha) continue;
+                    }
+
+                    int margin = (177 * depth) + (captHist * 34 / 1024);
+                    if ((alpha >= Values.Draw || pos.NonPawnMaterial(pos.SideToMove) != Values.PieceValue[(byte)pos.MovedPiece(m)])
+                        && !pos.SeeGe(m, -margin))
+                        continue;
+                }
+                else
+                {
+                    int dIndex = Math.Min(depth, LmrDivisor.Length) - 1;
+                    int history = _movePick.ComputeQuietPruningHistory(pos, m, contRefs);
+
+                    if (history < -4136 * depth) continue;
+
+                    history += 69 * _movePick.GetMainHistoryRaw(pos.SideToMove, m) / 32;
+                    lmrDepth += history / LmrDivisor[dIndex];
+
+                    int futilityValue2 = staticEval + (119 * lmrDepth) + (90 * (staticEval > alpha ? 1 : 0)) + 164;
+
+                    if (!inCheck && lmrDepth < 12 && futilityValue2 <= alpha)
+                    {
+                        if (value <= futilityValue2 && !Values.IsDecisive(value) && !Values.IsWin(futilityValue2))
+                            value = futilityValue2;
+                        continue;
+                    }
+
+                    lmrDepth = Math.Max(lmrDepth, 0);
+                    if (!pos.SeeGe(m, -23 * lmrDepth * lmrDepth)) continue;
+                }
+            }
+
             var st = new StateInfo();
             pos.DoMove(m, st, givesCheck);
+
+            // Step 18 (continua dopo aver fatto la mossa), search.cpp:1316-1359.
+            if (ttPv)
+                r -= 3023 + (isPvNode ? 1004 : 0) + (Values.IsValid(ttScore) && ttScore > alpha ? 885 : 0)
+                    + (probe.Data.Depth >= depth ? 816 + (cutNode ? 940 : 0) : 0);
+            r += 697;
+            r -= moveCount * 65;
+            r -= Math.Abs(correctionValue) / 26310;
+            if (cutNode) r += 4026 + (probe.Data.Move == Move.None ? 933 : 0);
+            if (ttCapture) r += 1079;
+
+            int childCutoffCnt = _cutoffCntHistory[ply + StackOffset + 1];
+            if (childCutoffCnt > 1) r += 264 + (childCutoffCnt > 2 ? 1095 : 0) + (allNode ? 1138 : 0);
+            else if (m == probe.Data.Move) r -= 2179;
+
+            int statScore = _movePick.ComputeStatScore(pos, m, captureStage, contRefs);
+            r -= statScore * 439 / 4096;
+
+            if (!captureStage && !Values.IsDecisive(alpha))
+                r += 3 * Math.Clamp(alpha - eval, -64, 96);
+
+            if (allNode) r += r * 276 / ((256 * depth) + 268);
 
             // cutNode del figlio — search.cpp:1372/1387/1403/1422: la ricerca a finestra piena di
             // "Step 20" (solo nei nodi PV, sulla prima mossa o dopo un fallimento alto) passa
             // sempre cutNode=false; la ricerca a finestra nulla (Step 18/19) passa true quando è
             // ridotta da LMR, altrimenti !cutNode del genitore.
             int score;
-            if (i == 0)
+            if (depth >= 2 && moveCount > 1)
             {
-                score = -Negamax(pos, depth - 1, ply + 1, -beta, -alpha, cutNode: isPvNode ? false : !cutNode);
+                int d = Math.Max(1, Math.Min(newDepth - (r / 1024), newDepth + 2)) + (isPvNode ? 1 : 0);
+                score = -Negamax(pos, d, ply + 1, -(alpha + 1), -alpha, cutNode: true);
+
+                if (score > alpha)
+                {
+                    bool doDeeperSearch = d < newDepth && score > value + 53;
+                    bool doShallowerSearch = score < value + 8;
+                    int researchDepth = newDepth + (doDeeperSearch ? 1 : 0) - (doShallowerSearch ? 1 : 0);
+
+                    if (researchDepth > d)
+                        score = -Negamax(pos, researchDepth, ply + 1, -beta, -alpha, cutNode: !cutNode);
+                }
+            }
+            else if (!isPvNode || moveCount > 1)
+            {
+                int rNoTt = r + (probe.Data.Move == Move.None ? 1127 : 0);
+                int searchDepth = newDepth - (rNoTt > 5234 ? 1 : 0) - (rNoTt > 5487 && newDepth > 2 ? 1 : 0);
+                score = -Negamax(pos, searchDepth, ply + 1, -(alpha + 1), -alpha, cutNode: !cutNode);
             }
             else
             {
-                bool lmrEligible = depth >= LmrMinDepth && i >= LmrMinMoveIndex && !inCheck && !tactical && !givesCheck;
-                int reduction = lmrEligible ? 1 : 0;
-                int probeDepth = Math.Max(0, depth - 1 - reduction);
-
-                score = -Negamax(pos, probeDepth, ply + 1, -alpha - 1, -alpha, cutNode: lmrEligible ? true : !cutNode);
-                if (score > alpha)
-                    score = -Negamax(pos, depth - 1, ply + 1, -beta, -alpha, cutNode: false);
+                score = -Infinity; // PV, prima mossa: sovrascritto incondizionatamente sotto (Step 20)
             }
+
+            if (isPvNode && (moveCount == 1 || score > alpha))
+                score = -Negamax(pos, newDepth, ply + 1, -beta, -alpha, cutNode: false);
 
             pos.UndoMove(m);
 
@@ -532,6 +707,7 @@ public sealed class Search
                     if (alpha >= beta)
                     {
                         _movePick.RecordKiller(pos, m, ply);
+                        _cutoffCntHistory[ply + StackOffset]++; // search.cpp:1529 (extension<2||PvNode semplificato a sempre vero, niente estensioni qui)
                         break;
                     }
                 }

@@ -59,15 +59,25 @@ identico su tutte le posizioni di test prima/dopo; punteggi leggermente diversi 
 posizioni (atteso e corretto: la correction history esiste apposta per correggere la valutazione
 statica, quindi il suo effetto sul punteggio non è un segno di regressione).
 
-**Manca ancora**: Singular Extensions, multi-cut, l'hindsight depth adjustment da
-`priorReduction`, la vera
-formula di riduzione LMR (`reduction()`, dipende da una tabella `reductions[]`/`rootDelta`/
-`statScore` non ancora portati — oggi LMR resta una riduzione fissa di 1), tutta la taratura fine
-dei margini rimasti, la struttura `Worker`/`RootMove`/`Stack` completa della fonte (qui
-minimizzata a quanto serve). L'aspiration window usa lo score dell'iterazione precedente al posto
-della media mobile pesata per "effort" della fonte (richiede bookkeeping per-root-move non ancora
-presente). `followPV` (segue la riga principale dell'iterazione precedente) non è portato — la
-condizione di IIR qui è quindi leggermente più ampia di quella esatta della fonte.
+**Reduction() (formula LMR vera) e Step 15 (potatura a profondità bassa) FATTI**, ricontrollati
+riga per riga contro `search.cpp:1152-1232`/`1885-1888` due volte. `reduction()` è stabile e
+verificato (nessuna regressione, nodi drasticamente ridotti — es. Kiwipete depth 10: da 98585 a
+~9275). Lo **Step 15 ha un caveat aperto**: su una posizione con una promozione a donna vincente
+(verificata contro l'oracolo come `d7c8q` nei commit precedenti) la mossa oscilla fra profondità
+vicine invece di restare stabile come fa l'oracolo reale. Trascrizione ricontrollata riga per riga
+due volte, nessun errore trovato (incluso confermare che `see_ge` per le mosse non-Normal fa
+davvero `return 0>=threshold` nella fonte, non una nostra semplificazione). Ipotesi più probabile:
+lo Step 15 lavora in coppia con le Singular Extensions come rete di sicurezza — portarlo da solo
+può essere legittimamente più instabile a profondità basse. **Singular Extensions è quindi la
+priorità immediata**, sia per fedeltà sia per verificare/risolvere questo caveat.
+
+**Manca ancora**: Singular Extensions (priorità alta, vedi sopra), multi-cut, l'hindsight depth
+adjustment da `priorReduction`, tutta la taratura fine dei margini rimasti, la struttura
+`Worker`/`RootMove`/`Stack` completa della fonte (qui minimizzata a quanto serve). L'aspiration
+window usa lo score dell'iterazione precedente al posto della media mobile pesata per "effort"
+della fonte (richiede bookkeeping per-root-move non ancora presente). `followPV` (segue la riga
+principale dell'iterazione precedente) non è portato — la condizione di IIR e dello Step 15 qui è
+quindi leggermente più ampia di quella esatta della fonte.
 
 ⚠️ È il file più grande del progetto. Da solo vale più di tutto quello portato finora — ogni
 tecnica va aggiunta e verificata una alla volta (nessuna regressione sui test esistenti + confronto
