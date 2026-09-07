@@ -46,7 +46,11 @@ public static class NnueEvaluate
             acc = NnueAccumulator.ComputeFromScratch(net, pos);
         }
 
-        byte[] transformed = NnueLayers.TransformBothPerspectives(acc, pos.SideToMove);
+        // Buffer sullo stack come nella fonte (`transformedFeatures` è un array locale in
+        // Network::evaluate, network.cpp) — nessuna allocazione sull'heap sul percorso caldo:
+        // questa funzione viene chiamata praticamente a ogni nodo.
+        Span<byte> transformed = stackalloc byte[NnueArchitecture.L1];
+        NnueLayers.TransformBothPerspectives(acc, pos.SideToMove, transformed);
 
         int psqt = acc.MaterialPsqt(pos.SideToMove, bucket);
         int positional = NnueLayers.Propagate(net.LayerStacks[bucket], transformed) / NnueCommon.OutputScale;
