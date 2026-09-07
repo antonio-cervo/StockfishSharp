@@ -54,6 +54,10 @@ internal struct TTEntry
 
     public readonly bool IsOccupied => Depth8 != 0;
 
+    /// <summary><c>TTWriter::penalize</c>, tt.cpp:156-159 — opera direttamente su
+    /// <c>depth8</c> (il campo grezzo, non la profondita' logica).</summary>
+    public void Penalize(int penalty) => Depth8 = (byte)Math.Max(Depth8 - penalty, 0);
+
     public readonly TTData Read() => new(
         new Move(Move16),
         Value16,
@@ -145,6 +149,12 @@ public sealed class TranspositionTable
 
     public void Save(int writeIndex, ulong key, int value, bool pv, Bound bound, int depth, Move move, int eval) =>
         _entries[writeIndex].Save(key, value, pv, bound, depth, move, eval, _generation);
+
+    /// <summary>Marca una entry come inutile decrementandone la profondita' memorizzata —
+    /// <c>TTWriter::penalize</c>, tt.cpp:155-159. Il <c>Math.Max(..., 0)</c> della fonte protegge
+    /// da underflow dovuti a letture concorrenti: 0 significa "non occupata".</summary>
+    public void Penalize(int writeIndex, int penalty) =>
+        _entries[writeIndex].Penalize(penalty);
 
     /// <summary>Frazione (permille) di entry occupate — <c>hashfull</c>, tt.cpp:242-250. Solo per
     /// diagnostica UCI ("info hashfull").</summary>

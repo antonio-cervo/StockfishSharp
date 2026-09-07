@@ -1329,6 +1329,53 @@ conclusione sbagliata: togliendone il 96% si guadagna il 25%. Il costo non e' il
 economico) ma l'azzeramento della memoria e l'inquinamento continuo della cache, che diventano
 significativi solo quando il volume scende sotto una certa soglia.
 
+## Caccia ai passi numerati mai ispezionati: 13 discrepanze, parita' di nodi (2026-09-07)
+
+Continuando il metodo che aveva gia' pagato (enumerare i `// Step N` della fonte e verificarli UNO
+PER UNO invece di fidarsi di cosa il piano dichiarava "fatto"), ispezionati i passi 1, 3, 4, 6, 17,
+18, 19, 21, 22, 24 della ricerca principale. Trovate **13 discrepanze reali**:
+
+| Passo | Discrepanza |
+|---|---|
+| **22** | `depth -= 3` dopo un miglioramento di alpha (search.cpp:1533-1535) - **mai portato**. Agisce fra profondita' 4 e 11, dove vive la maggior parte dell'albero: la singola correzione piu' pesante di tutte |
+| **22** | `inc` (promozione delle mosse a pari punteggio, search.cpp:1508-1510) non portato; `cutoffCnt` incrementato sempre invece che su `extension < 2` oppure `PvNode` |
+| **6** | Era un abbozzo di 5 righe contro 50 della fonte: mancavano ENTRAMBE le guardie (`ttData.depth > depth - (ttData.value <= beta)` e `cutNode == (ttData.value >= beta)` oppure `depth > 4`), gli aggiornamenti di history sul taglio, la verifica del taglio a `depth>=7` giocando la mossa di TT, il rimedio `rule50 < 96`, e il `penalize` della entry inutile |
+| **6** | Stava anche nel posto sbagliato: prima dello Step 5 e dell'hindsight adjustment, quindi tutte le sue soglie leggevano una `depth` non aggiustata |
+| **18** | Ri-ricerca dopo LMR a finestra PIENA (`-beta`) invece che nulla (`-(alpha+1)`) - nei nodi PV la stessa ricerca veniva poi rifatta identica dallo Step 20 |
+| **18** | `newDepth` non veniva mutato (variabile locale separata), quindi lo Step 20 ripartiva dalla profondita' non aggiustata buttando via il verdetto della ricerca ridotta |
+| **18** | "Post LMR continuation history updates" (bonus 1334, search.cpp:1389-1390) mai portato |
+| **18** | Un `is_valid` di troppo sul termine 885: nella fonte `VALUE_NONE == 32002 > alpha` e' VERO, quindi il termine si applica anche su TT miss |
+| **3** | Mate distance pruning con bound sbagliato (`mate_in(ply)` invece di `mate_in(ply+1)`) **e applicato anche alla radice**, dove la fonte lo tiene dentro `if (!rootNode)` |
+| **1** | `ss->moveCount = 0` e `ss->statScore = 0` (search.cpp:778 e 809) mai portati: un nodo che esce prima del ciclo mosse lasciava allo stesso ply i valori stantii di un fratello gia' cercato - e sono proprio i valori letti dai due rami che guardano "com'e' andato il genitore" |
+| **4** | `ttCapture` usava `capture` invece di `capture_stage`; `ss->ttPv` non ereditata durante la ricerca di verifica delle Singular Extensions |
+| **23** | `priorCapture` dal nostro flag `captureStage` invece che da `pos.captured_piece()` (differiscono su una promozione a donna senza cattura) |
+| **Lazy SMP** | `threadIdx` non esisteva: tutti i thread partivano dalla STESSA finestra di aspirazione invece di `5 + threadIdx % 8` (search.cpp:376) - una delle poche fonti di diversita' del Lazy SMP, quindi i thread duplicavano lavoro |
+
+**Come sono state trovate**: non leggendo il codice a caso, ma seguendo una misura. Il confronto
+posizione-per-posizione contro l'oracolo sulle 51 posizioni di bench ha mostrato che il divario
+**non era uniforme**: su Kiwipete eravamo persino MEGLIO (97.542 contro 119.236), ma esplodeva su
+poche posizioni ad altissimo fattore di ramificazione - la #40 (`K7/8/8/BNQNQNB1/...`) a **57x**, la
+#10 a 29x. Quel profilo indica una potatura per numero di mossa mancante, ed e' esattamente il
+`depth -= 3` dello Step 22.
+
+**Falsa pista utile, da ricordare**: le prime correzioni (Step 6 fedele) hanno FATTO SALIRE i nodi
+del 27%, e l'istinto era scartarle. La misura giusta ha evitato l'errore: instrumentando il tasso di
+tagli sulla prima mossa si e' visto che l'ordinamento MIGLIORAVA (85,87% -> 86,47%), quindi i nodi in
+piu' non venivano da li' ma da riduzioni che si accorciavano. Erano correzioni giuste a cui mancava
+ancora la loro contropartita (il `depth -= 3`). Stessa lezione gia' registrata due volte su questo
+progetto: non scartare una tecnica trascritta fedelmente prima di aver cercato la tecnica-compagna.
+
+**Risultato**: `bench 16 1 13` da 4.945.987 a **2.511.612 nodi (-49%)**, tempo da 11.264 a **5.643 ms
+(-50%)**. L'oracolo sulla stessa bench fa 2.497.913 nodi: **rapporto 1,005x, parita' di nodi con
+Stockfish vero** (era 1,98x stamattina e 4,40x prima della quiescenza fedele). Le posizioni
+patologiche: #40 da 57x a **1,15x**, #39 da 9x a **0,69x** (meglio dell'oracolo), #43 da 8,5x a 1,25x.
+Sul confronto posizione-per-posizione a TT fredda l'aggregato passa da 2,47x a **1,21x**, e la #10
+ora sceglie la STESSA mossa dell'oracolo. 113/113 test.
+
+**Cosa resta del divario di velocita'**: solo il rapporto grezzo nodi/secondo, ~3,6x (442.418 contro
+~1,6M dell'oracolo) - cioe' ormai solo C# contro C++, non piu' un buco di porting. Il divario totale
+misurato a inizio giornata era 29,5x.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:

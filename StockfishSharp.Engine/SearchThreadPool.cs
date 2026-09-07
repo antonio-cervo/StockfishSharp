@@ -52,7 +52,7 @@ public sealed class SearchThreadPool
         _searches.Clear();
         for (int i = 0; i < n; i++)
         {
-            var s = new Search(_tt);
+            var s = new Search(_tt, _searches.Count); // threadIdx, search.cpp:173
             s.SetSyzygyOptions(_syzygyOptions.useRule50, _syzygyOptions.probeDepth, _syzygyOptions.probeLimit);
             _searches.Add(s);
         }

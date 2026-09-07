@@ -124,9 +124,17 @@ public sealed class Search
     /// della fonte condividono davvero (thread.h: <c>Search::SharedState</c> la passa per
     /// riferimento a ogni Worker). Senza argomento, il comportamento resta quello di sempre (TT
     /// privata, uso a thread singolo).</summary>
-    public Search(TranspositionTable? sharedTt = null)
+    /// <summary><c>Search::Worker::threadIdx</c>, search.cpp:173 — indice di questo thread nel
+    /// pool. Serve a UNA cosa sola nella fonte (search.cpp:376), ma importante: ogni thread parte
+    /// da una finestra di aspirazione leggermente diversa ("5 + threadIdx % 8"), che e' una delle
+    /// poche fonti di DIVERSITA' del Lazy SMP — senza, tutti i thread cercano la stessa finestra e
+    /// duplicano lavoro invece di esplorare parti diverse dell'albero.</summary>
+    private readonly int _threadIdx;
+
+    public Search(TranspositionTable? sharedTt = null, int threadIdx = 0)
     {
         _tt = sharedTt ?? new TranspositionTable();
+        _threadIdx = threadIdx;
     }
     // N9 — accumulatore NNUE aggiornato in modo incrementale invece di ricalcolato da zero a ogni
     // Evaluate.StaticEval; sincronizzato con la ricerca via Push()/Pop() attorno a ogni DoMove/
@@ -284,6 +292,13 @@ public sealed class Search
     // Stack::followPV della fonte — vedi la nota sopra la sua unica lettura/scrittura in Negamax.
     private readonly bool[] _followPvHistory = new bool[Ply.MaxPly + StackOffset + 1];
     private readonly bool[] _captureStageHistory = new bool[Ply.MaxPly + StackOffset + 1];
+
+    // Stack::ttPv della fonte. Serve per ply (non come variabile locale) perche' la ricerca di
+    // verifica delle Singular Extensions richiama Negamax allo STESSO ply con excludedMove
+    // impostata, e li' la fonte NON ricalcola ttPv: lo eredita dalla chiamata esterna
+    // (search.cpp:822, "ss->ttPv = excludedMove ? ss->ttPv : ...").
+    private readonly bool[] _ttPvHistory = new bool[Ply.MaxPly + StackOffset + 1];
+
     // Stack::statScore/moveCount della fonte — per il bonus "countermove" di Step 23
     // (search.cpp:1578-1601), che legge (ss-1)->statScore e (ss-1)->moveCount.
     private readonly int[] _statScoreHistory = new int[Ply.MaxPly + StackOffset + 1];
@@ -776,7 +791,7 @@ public sealed class Search
                 // mobile pesata per "effort" della mossa radice corrente (RootMove.cs), non più dal
                 // valore grezzo dell'iterazione precedente.
                 var pvRootMove = _rootMoves[_pvIdx];
-                int delta = 5 + (0 % 8) + (int)(Math.Abs(pvRootMove.MeanSquaredScore) / 10193); // threadIdx=0, thread singolo
+                int delta = 5 + (_threadIdx % 8) + (int)(Math.Abs(pvRootMove.MeanSquaredScore) / 10193); // search.cpp:376
                 int avg = pvRootMove.AverageScore;
                 int alpha = Math.Max(avg - delta, -Infinity);
                 int beta = Math.Min(avg + delta, Infinity);
@@ -1026,21 +1041,20 @@ public sealed class Search
         {
             if (pos.IsDraw(ply) || ply >= Ply.MaxPly)
                 return ply >= Ply.MaxPly && pos.Checkers() == 0 ? Evaluate.StaticEval(pos, _accumulatorStack, Optimism(pos.SideToMove)) : ValueDraw();
-        }
 
-        // Mate distance pruning — esatta, non euristica: da questo ply il miglior esito possibile
-        // è dare matto alla prossima mossa, il peggiore essere già sotto matto.
-        int matingValue = MateScore - ply;
-        if (matingValue < beta)
-        {
-            beta = matingValue;
-            if (alpha >= matingValue) return matingValue;
-        }
-        int matedValue = -MateScore + ply;
-        if (matedValue > alpha)
-        {
-            alpha = matedValue;
-            if (beta <= matedValue) return matedValue;
+            // Step 3. Mate distance pruning — search.cpp:797-799. Esatta, non euristica: da
+            // questo ply il miglior esito possibile è dare matto alla PROSSIMA mossa, il peggiore
+            // essere già sotto matto adesso.
+            //
+            // Trascrizione corretta il 2026-09-07: il limite superiore della fonte è
+            // "mate_in(ss->ply + 1)" (= MATE - ply - 1), non "mate_in(ss->ply)" — questo porting
+            // usava un beta di un punto più largo, quindi tagliava meno proprio nelle posizioni di
+            // matto. Anche la forma è tornata quella della fonte (due clamp + un solo controllo
+            // "alpha >= beta" che ritorna alpha), invece di due rami separati che ritornavano il
+            // valore di matto.
+            alpha = Math.Max(-MateScore + ply, alpha);   // mated_in(ss->ply)
+            beta = Math.Min(MateScore - ply - 1, beta);  // mate_in(ss->ply + 1)
+            if (alpha >= beta) return alpha;
         }
 
         if (depth <= 0) return Quiesce(pos, alpha, beta, ply, isPvNode); // search.cpp:731
@@ -1061,6 +1075,17 @@ public sealed class Search
         // riduzione LMR in Step 18) accumuleranno nel corso del ciclo mosse di questo nodo.
         _cutoffCntHistory[ply + StackOffset + 2] = 0;
 
+        // search.cpp:778 ("ss->moveCount = 0") e :809 ("ss->statScore = 0") — MAI PORTATI fino al
+        // 2026-09-07. Nella fonte sono campi dello Stack azzerati all'ingresso di OGNI nodo;
+        // questo porting li scriveva solo dentro il ciclo mosse, quindi un nodo che esce prima
+        // (taglio da TT, null-move, razoring, tuffo in quiescenza...) lasciava allo stesso ply i
+        // valori stantii di un fratello gia' cercato. Chi li legge sono i due rami che guardano
+        // "com'e' andato il GENITORE": il malus alle mosse quiete provate presto (Step 6) e la
+        // scala del bonus countermove su fail-low puro (Step 23) — entrambi leggevano quindi il
+        // moveCount/statScore di un nodo che non era il proprio genitore.
+        _moveCountHistory[ply + StackOffset] = 0;
+        _statScoreHistory[ply + StackOffset] = 0;
+
         // search.cpp:807-808 — "consuma" la riduzione che il GENITORE ha applicato per arrivare
         // qui con LMR (0 se non è stata una ricerca ridotta), poi la azzera: serve solo una volta,
         // all'hindsight depth adjustment sotto.
@@ -1069,7 +1094,10 @@ public sealed class Search
 
         var probe = _tt.Probe(pos.Key);
         int ttScore = probe.Found ? ValueFromTt(probe.Data.Value, ply, pos.Rule50Count) : Values.None;
-        bool ttPv = isPvNode || (probe.Found && probe.Data.IsPv);
+        bool ttPv = excludedMove != default
+            ? _ttPvHistory[ply + StackOffset]
+            : isPvNode || (probe.Found && probe.Data.IsPv);
+        _ttPvHistory[ply + StackOffset] = ttPv;
 
         // search.cpp:820 — "ttData.move = rootNode ? rootMoves[pvIdx].pv[0] : ttHit ? ttData.move
         // : Move::none();": alla radice la mossa usata per l'ordinamento di MovePicker e per tutti
@@ -1079,16 +1107,11 @@ public sealed class Search
         // assente). Valore/profondità/bound/eval della TT restano invece sempre quelli
         // effettivamente sondati, SOLO la mossa è sostituita.
         Move ttMove = ply == 0 ? _rootMoves[_pvIdx].Pv[0] : probe.Found ? probe.Data.Move : Move.None;
-        bool ttCapture = ttMove != Move.None && pos.Capture(ttMove);
+        // search.cpp:824 usa capture_stage (che comprende anche le promozioni a donna su casa
+        // vuota), non capture. Alimenta la riduzione LMR e i margini delle Singular Extensions.
+        bool ttCapture = ttMove != Move.None && pos.CaptureStage(ttMove);
 
         int correctionValue = CorrectionValue(pos, ply);
-
-        if (excludedMove == default && !isPvNode && probe.Found && probe.Data.Depth >= depth && Values.IsValid(ttScore))
-        {
-            if (probe.Data.Bound == Bound.Exact) return ttScore;
-            if (probe.Data.Bound == Bound.Lower && ttScore >= beta) return ttScore;
-            if (probe.Data.Bound == Bound.Upper && ttScore <= alpha) return ttScore;
-        }
 
         // Step 5. Valutazione statica — to_corrected_static_eval applica ora la vera correction
         // history (CorrectionValue sopra), non più un segnaposto a 0.
@@ -1131,6 +1154,99 @@ public sealed class Search
         // già buone per chi muove, un ply in meno evita di scavare inutilmente.
         if (priorReduction >= 3 && !opponentWorsening) depth++;
         if (priorReduction >= 2 && depth >= 2 && staticEval + _staticEvalHistory[ply + StackOffset - 1] > 166) depth--;
+
+        // POSIZIONE: nella fonte lo Step 6 sta QUI (search.cpp:872), dopo lo Step 5 e dopo
+        // l'hindsight adjustment appena sopra — non prima come stava in questo porting fino al
+        // 2026-09-07. La differenza non e' cosmetica: tutte le soglie dello Step 6 (depth > 4,
+        // depth >= 7, depth > 5, il bonus 112*depth) leggono la profondita' GIA' aggiustata, e la
+        // scrittura in TT della sola valutazione statica (Step 5, ramo "!probe.Found") avviene
+        // prima dell'eventuale taglio, non dopo.
+        // Step 6. Taglio anticipato da transposition table nei nodi non-PV — search.cpp:872-921.
+        // PORTATO FEDELMENTE il 2026-09-07. Prima c'era l'abbozzo del primissimo commit del
+        // progetto: tre confronti Exact/Lower/Upper con "Depth >= depth" e nient'altro. Rispetto
+        // alla fonte tagliava di PIU' (nessuna delle due guardie sotto) e senza nessuno dei tre
+        // effetti collaterali: gli aggiornamenti di history sul taglio, la verifica del taglio a
+        // profondita' alta, e l'invecchiamento della entry quando il taglio non scatta.
+        //
+        // Le due guardie mancanti:
+        //  - "ttData.depth > depth - (ttData.value <= beta)": chiede UN PLY IN PIU' di profondita'
+        //    memorizzata quando il valore in TT e' sopra beta (il caso in cui un taglio errato
+        //    costa di piu');
+        //  - "cutNode == (ttData.value >= beta) || depth > 4": sotto profondita' 5 non ci si fida
+        //    di una entry che "va contro" l'aspettativa del nodo (un cutNode che dovrebbe fallire
+        //    alto e trova un fail-low, o viceversa) — sono i casi in cui la entry e' piu' spesso
+        //    frutto di una finestra di ricerca diversa.
+        if (!isPvNode && excludedMove == default
+            && probe.Data.Depth > depth - (ttScore <= beta ? 1 : 0)
+            && Values.IsValid(ttScore)
+            && (probe.Data.Bound & (ttScore >= beta ? Bound.Lower : Bound.Upper)) != Bound.None
+            && (cutNode == (ttScore >= beta) || depth > 4))
+        {
+            // Se la mossa di TT e' quieta e fa fallire alto, premiala nell'ordinamento: la TT ci
+            // sta risparmiando l'intero sottoalbero, ma senza questo la mossa non verrebbe mai
+            // realmente cercata e le history non ne saprebbero nulla.
+            if (ttMove != Move.None && ttScore >= beta)
+            {
+                if (!ttCapture)
+                {
+                    var cutContRefs = _contRefsBufs[ply];
+                    FillContinuationRefs(ply, cutContRefs);
+                    _movePick.ApplyTtCutoffQuietBonus(pos, ply, ttMove, Math.Min(112 * depth, 695), cutContRefs, inCheck);
+                }
+
+                // Malus extra alle mosse quiete provate presto dal genitore.
+                Move ttCutPrevMove = _currentMoveHistory[ply + StackOffset - 1];
+                if (ttCutPrevMove.IsOk && _moveCountHistory[ply + StackOffset - 1] < 5
+                    && pos.CapturedPiece() == Piece.None)
+                {
+                    Square ttCutPrevSq = ttCutPrevMove.ToSq;
+                    var ttCutPrevContRefs = _parentContRefsBufs[ply];
+                    FillContinuationRefs(ply - 1, ttCutPrevContRefs);
+                    _movePick.ApplyTtCutoffPrevPenalty(ttCutPrevContRefs, _inCheckHistory[ply + StackOffset - 1],
+                        pos.PieceOn(ttCutPrevSq), ttCutPrevSq, -2210);
+                }
+            }
+
+            // Rimedio parziale al "graph history interaction problem": con un contatore della
+            // regola delle 50 mosse molto alto il valore in TT puo' essere stato calcolato in un
+            // contesto in cui la patta era piu' lontana, quindi non si taglia affatto.
+            if (pos.Rule50Count < 96)
+            {
+                if (depth >= 7 && ttMove != Move.None && pos.PseudoLegal(ttMove) && pos.Legal(ttMove)
+                    && !Values.IsDecisive(ttScore))
+                {
+                    // Verifica il taglio giocando davvero la mossa di TT e sondando la posizione
+                    // risultante: ci si fida solo se anche da li' il valore conferma il taglio.
+                    // "do_move grezzo" come nella fonte (pos.do_move a due argomenti): qui non si
+                    // valuta nulla, quindi l'accumulatore NNUE non va spinto.
+                    var ttCutSt = _stateInfoPool[ply];
+                    pos.DoMove(ttMove, ttCutSt);
+                    var nextProbe = _tt.Probe(pos.Key);
+                    pos.UndoMove(ttMove);
+
+                    // La fonte confronta il valore GREZZO della entry successiva (nessun
+                    // value_from_tt): serve solo il segno rispetto a beta, non un punteggio
+                    // riferito a questo ply.
+                    if (!Values.IsValid(nextProbe.Data.Value)) return ttScore;
+                    if ((ttScore >= beta) == (-nextProbe.Data.Value >= beta)) return ttScore;
+                }
+                else
+                return ttScore;
+            }
+        }
+        // Nessun taglio: se l'UNICO motivo per cui non e' scattato e' che il bound della entry sta
+        // dalla parte sbagliata rispetto alla finestra di aspirazione, quella entry non servira'
+        // piu' a nessuno — si invecchia invece di lasciarla occupare spazio (search.cpp:915-921).
+        else if (!isPvNode && excludedMove == default
+            && probe.Data.Depth > depth - (ttScore <= beta ? 1 : 0)
+            && Values.IsValid(ttScore)
+            && probe.Data.Bound != Bound.Exact
+            && (probe.Data.Bound & (ttScore >= beta ? Bound.Upper : Bound.Lower)) != Bound.None
+            && depth > 5)
+        {
+            _tt.Penalize(probe.WriteIndex, 1);
+        }
+
 
         // Step 7. Sonda le tablebase — search.cpp:922-973. tbBestValueFloor/tbMaxValueCap
         // sostituiscono l'aggiornamento diretto di bestValue/maxValue della fonte: qui "value" (il
@@ -1535,7 +1651,8 @@ public sealed class Search
 
             // Step 18 (continua dopo aver fatto la mossa), search.cpp:1316-1359.
             if (ttPv)
-                r -= 3023 + (isPvNode ? 1004 : 0) + (Values.IsValid(ttScore) && ttScore > alpha ? 885 : 0)
+                r -= 3023 + (isPvNode ? 1004 : 0) + (ttScore > alpha ? 885 : 0) // niente is_valid: nella fonte VALUE_NONE==32002 > alpha
+                    
                     + (probe.Data.Depth >= depth ? 816 + (cutNode ? 940 : 0) : 0);
             r += 697;
             r -= moveCount * 65;
@@ -1572,10 +1689,24 @@ public sealed class Search
                 {
                     bool doDeeperSearch = d < newDepth && score > value + 53;
                     bool doShallowerSearch = score < value + 8;
-                    int researchDepth = newDepth + (doDeeperSearch ? 1 : 0) - (doShallowerSearch ? 1 : 0);
 
-                    if (researchDepth > d)
-                        score = -Negamax(pos, researchDepth, ply + 1, -beta, -alpha, cutNode: !cutNode);
+                    // search.cpp:1383 — la fonte MUTA newDepth, non usa una variabile separata:
+                    // l'aggiustamento resta visibile allo Step 20 sotto, che nei nodi PV rifara'
+                    // la ricerca a finestra piena proprio a QUESTA profondita'. Con una locale
+                    // (com'era qui fino al 2026-09-07) lo Step 20 ripartiva dalla profondita' non
+                    // aggiustata, buttando via il verdetto della ricerca ridotta appena fatta.
+                    newDepth += (doDeeperSearch ? 1 : 0) - (doShallowerSearch ? 1 : 0);
+
+                    // search.cpp:1386 — finestra NULLA "-(alpha+1), -alpha", non "-beta": nei
+                    // nodi non-PV e' la stessa cosa (beta==alpha+1), ma nei nodi PV questa era una
+                    // ricerca a finestra PIENA, ripetuta subito dopo identica dallo Step 20.
+                    if (newDepth > d)
+                        score = -Negamax(pos, newDepth, ply + 1, -(alpha + 1), -alpha, cutNode: !cutNode);
+
+                    // search.cpp:1389-1390 "Post LMR continuation history updates" — MAI PORTATO
+                    // fino al 2026-09-07: la mossa che ha superato alpha in ricerca ridotta viene
+                    // premiata sulle continuation history del nodo corrente.
+                    _movePick.ApplyPostLmrBonus(contRefs, inCheck, pos.MovedPiece(m), m.ToSq);
                 }
             }
             else if (!isPvNode || moveCount > 1)
@@ -1661,14 +1792,22 @@ public sealed class Search
                 }
             }
 
-            // Step 22, search.cpp:1514-1541: bestMove si aggiorna SOLO quando la mossa supera
+            // Step 22, search.cpp:1508-1541: bestMove si aggiorna SOLO quando la mossa supera
             // davvero alpha — un fail-low puro (nessuna mossa batte alpha) lascia bestMove a null,
-            // esattamente come nella fonte (lì "inc", un fattore di parità che promuove mosse a
-            // pari punteggio, non è portato: raffinamento minore, non struttura).
-            if (score > value)
+            // esattamente come nella fonte.
+            //
+            // "inc" (search.cpp:1508-1510), portato il 2026-09-07 dopo essere stato dichiarato
+            // "raffinamento minore non portato": quando una mossa PAREGGIA il miglior punteggio
+            // trovato finora, ogni tanto (un nodo su otto, dal bit del contatore nodi) la si
+            // promuove fingendo che superi alpha di un soffio — rompe le parità in modo che il
+            // motore non resti sempre incollato alla prima mossa a pari merito.
+            int inc = (score == value && ply + 2 >= _rootDepth && (_nodes & 14) == 0
+                       && !Values.IsWin(Math.Abs(score) + 1)) ? 1 : 0;
+
+            if (score + inc > value)
             {
                 value = score;
-                if (score > alpha)
+                if (score + inc > alpha)
                 {
                     bestMove = m;
 
@@ -1681,12 +1820,24 @@ public sealed class Search
                         _pvBuf[ply].AddRange(_pvBuf[ply + 1]);
                     }
 
-                    alpha = score;
-                    if (alpha >= beta)
+                    if (score >= beta)
                     {
-                        _cutoffCntHistory[ply + StackOffset]++; // search.cpp:1529 (extension<2||PvNode semplificato a sempre vero, niente estensioni qui)
+                        _cutoffCntHistory[ply + StackOffset] += (extension < 2 || isPvNode) ? 1 : 0; // search.cpp:1529
                         break;
                     }
+
+                    // search.cpp:1533-1535 "Reduce other moves if we have found at least one score
+                    // improvement" — MAI PORTATO fino al 2026-09-07. Appena una mossa migliora
+                    // alpha senza far fallire alto, la fonte ABBASSA DI 3 la profondita' del nodo
+                    // per TUTTE le mosse restanti: avendo gia' in mano un miglioramento, le altre
+                    // vanno solo confutate, non approfondite. Muta il parametro "depth", quindi si
+                    // ripercuote su newDepth, su Reduction() e sulle soglie dello Step 15 di ogni
+                    // mossa successiva di questo nodo. E' una potatura molto ampia (agisce fra
+                    // profondita' 4 e 11, dove vive la maggior parte dell'albero).
+                    if (depth > 3 && depth < 12 && !Values.IsDecisive(score))
+                        depth -= 3;
+
+                    alpha = score;
                 }
             }
 
@@ -1728,7 +1879,12 @@ public sealed class Search
             {
                 Square prevSq = parentMove.ToSq;
                 Piece prevPiece = pos.PieceOn(prevSq); // il pezzo del genitore, ora su prevSq
-                bool priorCapture = _captureStageHistory[ply + StackOffset - 1];
+                // search.cpp:766 — "priorCapture = pos.captured_piece()": e' il PEZZO
+                // realmente catturato dalla mossa che ci ha portati qui, non il nostro flag
+                // captureStage (che e' vero anche per una promozione a donna su casa vuota, dove
+                // non c'e' nessun pezzo catturato e il ramo "else" sotto finirebbe a indicizzare
+                // la capture history con PieceType.None).
+                bool priorCapture = pos.CapturedPiece() != Piece.None;
 
                 if (!priorCapture)
                 {
@@ -1783,7 +1939,12 @@ public sealed class Search
         if (excludedMove == default && !(ply == 0 && _pvIdx != 0))
         {
             var flag = value <= origAlpha ? Bound.Upper : value >= beta ? Bound.Lower : Bound.Exact;
-            _tt.Save(probe.WriteIndex, pos.Key, ValueToTt(value, ply), ttPv, flag, depth, bestMove ?? Move.None, unadjustedStaticEval);
+            // search.cpp:1626 — "moveCount != 0 ? depth : std::min(MAX_PLY - 1, depth + 6)": un
+            // nodo senza NESSUNA mossa legale (matto/stallo) e' un fatto definitivo, non una
+            // stima a profondita' "depth", quindi si memorizza con profondita' maggiorata perche'
+            // resista alla sostituzione.
+            int savedDepth = moveCount != 0 ? depth : Math.Min(Ply.MaxPly - 1, depth + 6);
+            _tt.Save(probe.WriteIndex, pos.Key, ValueToTt(value, ply), ttPv, flag, savedDepth, bestMove ?? Move.None, unadjustedStaticEval);
         }
 
         return value;

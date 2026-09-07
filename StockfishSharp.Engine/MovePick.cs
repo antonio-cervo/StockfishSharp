@@ -207,6 +207,25 @@ public sealed class MovePick
             UpdateHistory(ref _ttMoveHistory, bestMove == ttMove ? 918 : -747, TtMoveHistoryLimit);
     }
 
+    /// <summary>"Post LMR continuation history updates" (Step 18, search.cpp:1390) — bonus fisso
+    /// alla mossa la cui ricerca ridotta ha superato alpha, applicato sulle continuation history
+    /// del nodo CORRENTE (ss, non ss-1).</summary>
+    public void ApplyPostLmrBonus(ContinuationRef[] contRefs, bool currentInCheck, Piece pc, Square to) =>
+        UpdateContinuationHistories(contRefs, currentInCheck, pc, to, 1334);
+
+    /// <summary>Aggiornamenti di ordinamento su TAGLIO DA TRANSPOSITION TABLE (Step 6,
+    /// search.cpp:879-883) — la mossa di TT quieta che fa fallire alto viene premiata anche se non
+    /// e' mai stata realmente cercata: senza questo, ogni taglio da TT sarebbe informazione persa
+    /// per le history. Stesso <c>update_quiet_histories</c> usato dallo Step 23.</summary>
+    public void ApplyTtCutoffQuietBonus(Position pos, int ply, Move ttMove, int bonus, ContinuationRef[] contRefs, bool currentInCheck) =>
+        UpdateQuietHistory(pos, ply, ttMove, bonus, contRefs, currentInCheck);
+
+    /// <summary>"Extra penalty for early quiet moves of the previous ply" (Step 6,
+    /// search.cpp:886-887): se il taglio arriva presto nel ciclo mosse del genitore, la mossa del
+    /// genitore era probabilmente cattiva.</summary>
+    public void ApplyTtCutoffPrevPenalty(ContinuationRef[] prevContRefs, bool prevInCheck, Piece prevPiece, Square prevSq, int bonus) =>
+        UpdateContinuationHistories(prevContRefs, prevInCheck, prevPiece, prevSq, bonus);
+
     /// <summary>Ramo "bonus per il countermove quieto che ha causato il fail-low puro",
     /// search.cpp:1594-1601 — chiamato da Search.cs quando nessuna mossa del nodo corrente supera
     /// alpha. <paramref name="parentContRefs"/>/<paramref name="parentInCheck"/> sono
