@@ -731,7 +731,7 @@ void HandleGo(string[] toks)
     {
         var result = search.Search_(pos, depth, budget, ct, optimumMs: optimumMs,
             isPondering: isPondering, maximumMsOverride: maximumMsOverride);
-        Console.WriteLine($"info depth {result.Depth} seldepth {result.SelDepth} score cp {result.ScoreCp} nodes {result.Nodes} tbhits {result.TbHits} pv {FormatPv(result.Pv)}");
+        Console.WriteLine($"info depth {result.Depth} seldepth {result.SelDepth} score {StockfishSharp.Uci.UciScore.Format(result.ScoreCp, position)} nodes {result.Nodes} tbhits {result.TbHits} pv {FormatPv(result.Pv)}");
 
         WaitWhilePondering();
         PrintBestmove(result.BestMove, result.Pv);
@@ -792,7 +792,7 @@ void HandleBench(string[] toks)
             : search.Search_(position, int.TryParse(limit, out int d) ? d : 13, TimeSpan.FromHours(1), CancellationToken.None);
 
         totalNodes += result.Nodes;
-        Console.WriteLine($"info depth {result.Depth} seldepth {result.SelDepth} score cp {result.ScoreCp} nodes {result.Nodes} tbhits {result.TbHits} pv {FormatPv(result.Pv)}");
+        Console.WriteLine($"info depth {result.Depth} seldepth {result.SelDepth} score {StockfishSharp.Uci.UciScore.Format(result.ScoreCp, position)} nodes {result.Nodes} tbhits {result.TbHits} pv {FormatPv(result.Pv)}");
         Console.WriteLine(result.BestMove is { } bm && bm != Move.None ? $"bestmove {MoveToUci(bm)}" : "bestmove 0000");
     }
 

@@ -96,22 +96,51 @@ internal struct TTEntry
     }
 }
 
+/// <summary>Un cluster: 3 entry da 10 byte piu' 2 byte di padding, per un totale di 32 byte esatti
+/// — <c>struct Cluster</c>, tt.cpp:170-175, dove la fonte mette un <c>static_assert(sizeof(Cluster)
+/// == 32, "Suboptimal Cluster size")</c>. Quei 2 byte NON sono spreco: portano il cluster a mezza
+/// cache line, cosi' le tre entry sondate insieme non scavalcano mai due linee di cache — e la
+/// probe della TT e' l'accesso casuale piu' frequente del motore.
+///
+/// Fino al 2026-09-07 questo porting non aveva il cluster affatto: allocava un <c>TTEntry[]</c>
+/// piatto e calcolava <c>clusterCount = mbSize*1MB / (3*10)</c>, cioe' diviso 30 invece di 32. A
+/// parita' di "Hash" dichiarato allocava quindi il 6,67% di entry IN PIU' della fonte (con Hash 16:
+/// 559.240 cluster contro 524.288), il che rendeva ogni confronto di nodi contro l'oracolo
+/// leggermente a nostro favore.</summary>
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, Size = 32)]
+internal struct Cluster
+{
+    public TTEntry E0;
+    public TTEntry E1;
+    public TTEntry E2;
+}
+
 public sealed class TranspositionTable
 {
     private const int ClusterSize = 3;
 
-    private TTEntry[] _entries = [];
+    private Cluster[] _clusters = [];
     private int _clusterCount;
     private byte _generation;
 
+    /// <summary>Accesso per riferimento alla i-esima entry di un cluster. Le tre entry sono
+    /// contigue in memoria (layout sequenziale, 10 byte l'una), quindi l'aritmetica di riferimento
+    /// e' valida — equivale a <c>&amp;cluster.entry[i]</c> della fonte.</summary>
+    private ref TTEntry EntryAt(int flatIndex)
+    {
+        ref Cluster c = ref _clusters[flatIndex / ClusterSize];
+        return ref System.Runtime.CompilerServices.Unsafe.Add(ref c.E0, flatIndex % ClusterSize);
+    }
+
     public void Resize(int mbSize)
     {
-        _clusterCount = Math.Max(1, mbSize * 1024 * 1024 / (ClusterSize * 10));
-        _entries = new TTEntry[(long)_clusterCount * ClusterSize];
+        // tt.cpp:184 — "clusterCount = mbSize * 1024 * 1024 / sizeof(Cluster)", sizeof(Cluster)==32.
+        _clusterCount = Math.Max(1, mbSize * 1024 * 1024 / 32);
+        _clusters = new Cluster[_clusterCount];
         _generation = 0;
     }
 
-    public void Clear() => Array.Clear(_entries);
+    public void Clear() => Array.Clear(_clusters);
 
     public void NewSearch() => _generation++;
 
@@ -132,15 +161,19 @@ public sealed class TranspositionTable
         ushort key16 = (ushort)key;
 
         for (int i = 0; i < ClusterSize; i++)
-            if (_entries[baseIdx + i].Key16 == key16)
-                return new TTProbeResult(_entries[baseIdx + i].IsOccupied, _entries[baseIdx + i].Read(), baseIdx + i);
+        {
+            ref TTEntry e = ref EntryAt(baseIdx + i);
+            if (e.Key16 == key16)
+                return new TTProbeResult(e.IsOccupied, e.Read(), baseIdx + i);
+        }
 
         int replace = baseIdx;
         for (int i = 1; i < ClusterSize; i++)
         {
             int idx = baseIdx + i;
-            if (_entries[replace].Depth8 - 8 * _entries[replace].RelativeAge(_generation)
-                > _entries[idx].Depth8 - 8 * _entries[idx].RelativeAge(_generation))
+            ref TTEntry r = ref EntryAt(replace);
+            ref TTEntry c = ref EntryAt(idx);
+            if (r.Depth8 - 8 * r.RelativeAge(_generation) > c.Depth8 - 8 * c.RelativeAge(_generation))
                 replace = idx;
         }
 
@@ -148,13 +181,13 @@ public sealed class TranspositionTable
     }
 
     public void Save(int writeIndex, ulong key, int value, bool pv, Bound bound, int depth, Move move, int eval) =>
-        _entries[writeIndex].Save(key, value, pv, bound, depth, move, eval, _generation);
+        EntryAt(writeIndex).Save(key, value, pv, bound, depth, move, eval, _generation);
 
     /// <summary>Marca una entry come inutile decrementandone la profondita' memorizzata —
     /// <c>TTWriter::penalize</c>, tt.cpp:155-159. Il <c>Math.Max(..., 0)</c> della fonte protegge
     /// da underflow dovuti a letture concorrenti: 0 significa "non occupata".</summary>
     public void Penalize(int writeIndex, int penalty) =>
-        _entries[writeIndex].Penalize(penalty);
+        EntryAt(writeIndex).Penalize(penalty);
 
     /// <summary>Frazione (permille) di entry occupate — <c>hashfull</c>, tt.cpp:242-250. Solo per
     /// diagnostica UCI ("info hashfull").</summary>
@@ -164,7 +197,7 @@ public sealed class TranspositionTable
         int sampled = Math.Min(1000, _clusterCount);
         for (int i = 0; i < sampled; i++)
             for (int j = 0; j < ClusterSize; j++)
-                if (_entries[(i * ClusterSize) + j].IsOccupied) cnt++;
+                if (EntryAt((i * ClusterSize) + j).IsOccupied) cnt++;
 
         return sampled == 0 ? 0 : cnt * 1000 / (sampled * ClusterSize);
     }

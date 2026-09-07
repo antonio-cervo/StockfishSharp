@@ -1417,6 +1417,57 @@ Cosa si e' verificato:
 Da tenere d'occhio. Se si ripresenta, il primo sospetto da controllare e' un helper che non vede la
 cancellazione fra un'iterazione di iterative deepening e la successiva.
 
+## Due divergenze trovate partendo da una domanda dell'utente (2026-09-07 sera)
+
+L'utente ha chiesto: "la dimensione della TT e' uguale a quella dell'oracolo?". Il valore `Hash`
+passato ai due motori nei confronti era lo stesso, ma la domanda ha fatto emergere due divergenze
+reali, entrambe corrette.
+
+### 1. Dimensione del cluster della transposition table
+
+- **Fonte** (tt.cpp:170-184): `struct Cluster { TTEntry entry[3]; char padding[2]; }` con
+  `static_assert(sizeof(Cluster) == 32)`, e `clusterCount = mbSize*1MB / sizeof(Cluster)`.
+- **Nostro**: nessun cluster, un `TTEntry[]` piatto e `clusterCount = mbSize*1MB / (3*10)`, cioe'
+  diviso 30 invece di 32.
+
+A parita' di `Hash` dichiarato allocavamo il **6,67% di entry in piu'** della fonte (con Hash 16:
+559.240 cluster contro 524.288), quindi ogni confronto di nodi contro l'oracolo era leggermente a
+nostro favore. E quei 2 byte di padding non sono spreco: portano il cluster a mezza cache line, cosi'
+le tre entry sondate insieme non scavalcano mai due linee — e la probe della TT e' l'accesso casuale
+piu' frequente del motore. Corretto con un vero `Cluster` da 32 byte. `bench 16 1 13` passa da
+2.511.612 a **2.535.248 nodi**: contro i 2.497.913 dell'oracolo il rapporto e' 1,015x — parita'
+confermata, ma ora misurata onestamente.
+
+### 2. Il punteggio UCI non era normalizzato (ne' esisteva "score mate N")
+
+Cercando la causa di una divergenza di punteggio nei finali e' emerso che a **profondita' 1** —
+dove sotto la radice c'e' solo la quiescenza — il nostro punteggio era sistematicamente ~3x quello
+dell'oracolo: **40 posizioni su 49** divergevano di oltre 80cp, con rapporto costante 3,0-3,4.
+
+Non era un bug di ricerca: da Stockfish 16 il punteggio mostrato NON e' il valore interno del
+motore. `UCIEngine::to_cp` (uci.cpp:585) lo divide per il parametro `a` del modello WDL
+(`win_rate_params`, uci.cpp:537-553), calibrato perche' "+1.00" significhi davvero un pedone di
+vantaggio in termini di probabilita' di vittoria; il fattore vale ~3,0-3,4 e dipende dal materiale
+sulla scacchiera. Questo porting stampava il valore interno grezzo. Seconda meta' dello stesso buco:
+si stampava **sempre** `score cp`, quindi i matti uscivano come centipawn enormi e nessuna GUI poteva
+mostrare l'annuncio di matto (idem per i punteggi da tablebase, che nella fonte hanno la codifica
+convenzionale +/-20000 meno la distanza).
+
+Portati in `StockfishSharp.Uci/UciScore.cs`: `win_rate_params`, `win_rate_model`, `to_cp` e
+`format_score` + la classificazione di `score.cpp`. **Verifica**: a profondita' 1 il nostro
+punteggio ora combacia ESATTAMENTE con quello dell'oracolo su tutte le posizioni provate (cp 143 /
+cp 829 / cp 155 / cp 0), e i matti escono come `mate 1` / `mate 0` identici. Nodi invariati (e' un
+cambio di sola presentazione), 113/113 test.
+
+**Conseguenza pratica**: fino ad ora ogni valutazione pubblicata dal bot su lichess era gonfiata di
+~3,3 volte, e nessun matto veniva annunciato come tale.
+
+**Nota di metodo, da ricordare**: prima di trovare la causa avevo interpretato quel 3x come "il
+nostro punteggio alla radice crolla mentre quello dell'oracolo resta stabile" e ne avevo tratto
+conclusioni sulla qualita' della ricerca. Erano conclusioni costruite su un confronto fra UNITA'
+DIVERSE. Quando due motori divergono di un fattore quasi costante su molte posizioni, sospettare
+prima le unita' di misura e solo dopo l'algoritmo.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:
