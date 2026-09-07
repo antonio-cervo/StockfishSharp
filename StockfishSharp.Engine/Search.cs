@@ -612,12 +612,31 @@ public sealed class Search
         int iterIdx = 0;
         Array.Fill(iterValue, _bestPreviousScore == Values.Infinite ? Values.Zero : _bestPreviousScore);
 
+        // search.cpp:307,356-357,392-393 — freno mancato nel primo porting delle aspiration
+        // windows: se l'iterazione precedente ha già speso più della metà del tempo stimato
+        // (increaseDepth=false, sotto), le iterazioni successive cercano una profondità EFFETTIVA
+        // ridotta (adjustedDepth, non rootDepth) finché il "debito" non viene ripagato — un
+        // incremento pieno ogni 4 passi di searchAgainCounter (commento della fonte: "issue
+        // #2717"). Senza questo, il ciclo continuava a tentare iterazioni sempre più profonde e
+        // costose anche quando la ricerca aveva già segnalato di essere a corto di tempo — causa
+        // reale, verificata offline, di una mossa che ha impiegato l'intero MaximumTime (fino a
+        // ~170s) su una posizione dove la mossa migliore cambiava spesso da un'iterazione
+        // all'altra: senza questo freno ogni iterazione veniva comunque tentata a piena profondità.
+        int searchAgainCounter = 0;
+        bool increaseDepth = true;
+
         try
         {
             for (int depth = 1; depth <= maxDepth; depth++)
             {
                 _rootDepth = depth;
                 totBestMoveChanges /= 2; // search.cpp:341, invecchia la metrica di instabilità
+
+                // search.cpp:356-357 — se l'iterazione precedente non ha lasciato margine
+                // (increaseDepth=false, impostato a fine iterazione precedente sotto), conta
+                // quanti passi di "recupero" servono prima di tornare a una profondità piena.
+                if (!increaseDepth) searchAgainCounter++;
+
                 _selDepth = 0; // search.cpp:373, dentro il ciclo pvIdx (qui multiPV=1, una volta)
 
                 // search.cpp:347-352 — salva i punteggi dell'iterazione precedente prima che il
@@ -661,10 +680,17 @@ public sealed class Search
                 _rootOptimism = 114 * avg / (Math.Abs(avg) + 85);
 
                 int bestValue;
+                int failedHighCnt = 0; // search.cpp:387 — locale a QUESTA profondità, mai invecchiato
                 while (true)
                 {
+                    // search.cpp:390-393 — profondità EFFETTIVA di questo tentativo: ridotta sia
+                    // dai fail-high ripetuti all'interno di questa stessa profondità (failedHighCnt)
+                    // sia dal "debito" accumulato da iterazioni precedenti troppo lente
+                    // (searchAgainCounter) — mai meno di 1 ply. "assicura almeno un incremento
+                    // effettivo ogni 4 passi di searchAgain" (commento della fonte, issue #2717).
+                    int adjustedDepth = Math.Max(1, depth - failedHighCnt - (3 * (searchAgainCounter + 1) / 4));
                     _rootDelta = beta - alpha; // search.cpp:394, ricalcolato a ogni tentativo
-                    bestValue = Negamax(pos, depth, 0, alpha, beta, cutNode: false);
+                    bestValue = Negamax(pos, adjustedDepth, 0, alpha, beta, cutNode: false);
 
                     // search.cpp:403 — stable_sort: le mosse a pari punteggio (tutte le non-PV,
                     // rimaste a -Infinity) mantengono l'ordine relativo che avevano.
@@ -676,11 +702,13 @@ public sealed class Search
                     {
                         beta = alpha;
                         alpha = Math.Max(bestValue - delta, -Infinity);
+                        failedHighCnt = 0; // search.cpp:425
                     }
                     else if (bestValue >= beta)
                     {
                         alpha = Math.Max(beta - delta, alpha);
                         beta = Math.Min(bestValue + delta, Infinity);
+                        failedHighCnt++; // search.cpp:433
                     }
                     else break;
 
@@ -760,6 +788,11 @@ public sealed class Search
                         || bestRootMove.Score >= MateScore - 3
                         || bestRootMove.Score == -MateScore + 2)
                         break;
+
+                    // search.cpp:612-613 — se non ci fermiamo, decide se la prossima iterazione
+                    // meriti un incremento pieno di profondità: solo se abbiamo usato meno di metà
+                    // del tempo stimato finora. "ponder" non è portato (sempre false).
+                    increaseDepth = elapsedMs <= totalTime * 0.50;
                 }
 
                 iterValue[iterIdx] = bestValue;
