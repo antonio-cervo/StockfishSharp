@@ -237,6 +237,34 @@ public sealed class Search
     // netta, non la normale crescita del fattore di ramificazione.
     private const double IterationCostSafetyMultiplier = 2.5;
 
+    /// <summary>Tetto PRATICO (non di fonte) al budget adattivo: <c>totalTime</c> non può mai
+    /// superare questo multiplo di <c>optimum</c>. Misurato dal vivo (2026-09-07, replay della
+    /// partita persa a tempo scaduto): con optimum=20,1s il prodotto dei moltiplicatori della
+    /// fonte (<c>fallingEval * reduction * bestMoveInstability * highBestMoveEffort</c>) portava
+    /// <c>totalTime</c> a 58 secondi ANCHE con fallingEval al minimo, e il tetto assoluto
+    /// <c>tm.maximum()</c> concedeva fino a ~138s su una sola mossa (la fonte lo calcola come
+    /// 0,81 volte l'orologio residuo).
+    ///
+    /// Nella fonte quei moltiplicatori stanno quasi sempre vicino a 1 perché la sua ricerca si
+    /// stabilizza in una frazione di secondo; la nostra, che ha bisogno di ~5x più nodi per
+    /// profondità, cambia idea molto più spesso e li fa compounding fino a 6x. Il risultato era
+    /// un budget "improponibile in partita" (parole dell'utente): mosse da 40-70 secondi con
+    /// l'orologio a 3 minuti, che hanno prodotto sconfitte reali a tempo scaduto.
+    ///
+    /// Questo limite NON tocca la formula portata (che resta fedele e continua a decidere QUANTO
+    /// estendere entro il tetto): mette solo un massimale al risultato, come farebbe un
+    /// allenatore che dice "puoi pensarci di più, ma non oltre il doppio del previsto".</summary>
+    private const double MaxBudgetOverOptimum = 2.0;
+
+    /// <summary>Scadenza oltre la quale la ricerca si interrompe ANCHE a meta' di un'iterazione
+    /// (0 = disattivata). Aggiornata a ogni confine di iterazione con il budget corrente; letta dal
+    /// controllo periodico in <see cref="Negamax"/>. Pratica, non di fonte — vedi il commento li'.
+    /// Campo semplice, non <c>volatile</c>: viene scritto e letto sempre dallo STESSO thread (il
+    /// ciclo di iterative deepening e la ricorsione di Negamax girano entrambi nel thread di
+    /// questa istanza di Search).</summary>
+    private double _softDeadlineMs;
+    private System.Diagnostics.Stopwatch? _elapsedStopwatch;
+
     private const int NullMoveMinDepth = 3;
     private const int NullMoveReduction = 3;
     private const int ReverseFutilityMaxDepth = 6;
@@ -579,6 +607,8 @@ public sealed class Search
         _tbHits = 0;
         _stopOnPonderhit = false; // ThreadPool::start_thinking, thread.cpp:304
         var elapsedStopwatch = System.Diagnostics.Stopwatch.StartNew(); // elapsed(), search.h
+        _elapsedStopwatch = elapsedStopwatch;
+        _softDeadlineMs = 0; // nessuna scadenza finche' la prima iterazione non ne calcola una
         if (callNewSearch) _tt.NewSearch();
         _movePick.ResetForSearch(); // lowPlyHistory.fill(102), search.cpp:326
         _accumulatorStack.Reset(); // AccumulatorStack::reset, nnue_accumulator.cpp:71-77
@@ -817,6 +847,10 @@ public sealed class Search
 
                     double totalTime = optimumMs * fallingEval * reduction * bestMoveInstability * highBestMoveEffort;
 
+                    // Tetto pratico al budget adattivo — vedi MaxBudgetOverOptimum. La formula
+                    // sopra resta quella della fonte, qui se ne limita solo il risultato.
+                    totalTime = Math.Min(totalTime, optimumMs * MaxBudgetOverOptimum);
+
                     if (_rootMoves.Count == 1)
                         totalTime = Math.Min(500.0, totalTime); // limita a 0.5s per una miglior esperienza visiva
 
@@ -829,6 +863,13 @@ public sealed class Search
                     // (non pondering) maximumMsOverride resta NoBound e si usa timeLimit come sempre.
                     double effectiveMaximumMs = maximumMsOverride != NoBound ? maximumMsOverride : (double)timeLimit.TotalMilliseconds;
                     bool pondering = isPondering?.Invoke() ?? false;
+
+                    // Aggiorna la scadenza morbida per l'iterazione che sta per iniziare: mai
+                    // oltre il budget appena calcolato, ne' oltre il tetto assoluto. Disattivata
+                    // durante il pondering, dove il tempo extra non e' mai davvero a rischio.
+                    _softDeadlineMs = (isPondering?.Invoke() ?? false)
+                        ? 0
+                        : Math.Min(totalTime, effectiveMaximumMs);
 
                     if (elapsedMs > Math.Min(totalTime, effectiveMaximumMs)
                         || bestRootMove.Score >= MateScore - 3
@@ -897,7 +938,21 @@ public sealed class Search
     private int Negamax(Position pos, int depth, int ply, int alpha, int beta, bool cutNode, Move excludedMove = default)
     {
         _nodes++;
-        if ((_nodes & 2047) == 0) _ct.ThrowIfCancellationRequested();
+        if ((_nodes & 2047) == 0)
+        {
+            _ct.ThrowIfCancellationRequested();
+
+            // Scadenza MORBIDA (pratica, non di fonte — vedi _softDeadlineMs): il controllo fra
+            // un'iterazione e l'altra non basta a limitare il tempo per mossa, perche' una singola
+            // iterazione puo' costare piu' dell'intero budget (misurato: profondita' 16 costata 36s
+            // su un budget di 40s, iniziata quando ne erano trascorsi solo 13). La fonte non ne ha
+            // bisogno: le sue iterazioni sono piccole rispetto al budget. Qui l'interruzione a meta'
+            // e' sicura e gia' supportata: OperationCanceledException viene catturata da Search_ e
+            // si tiene il risultato dell'ultima iterazione COMPLETATA.
+            double soft = _softDeadlineMs;
+            if (soft > 0 && _elapsedStopwatch!.Elapsed.TotalMilliseconds > soft)
+                throw new OperationCanceledException();
+        }
 
         bool isPvNode = beta - alpha > 1;
         bool allNode = !isPvNode && !cutNode; // search.cpp:726 — !(PvNode||cutNode)
