@@ -80,6 +80,16 @@ public sealed class SearchThreadPool
         _searches[0].SetPreviousScores(score, averageScore);
     }
 
+    /// <summary><c>SearchManager::stopOnPonderhit</c> del thread principale (search.h:313) — vedi
+    /// <see cref="Search.StopOnPonderhit"/>. Letto dal comando "ponderhit" (Program.cs) per
+    /// decidere se fermare la ricerca subito o aspettare il vero tetto massimo.</summary>
+    public bool StopOnPonderhit => _searches.Count > 0 && _searches[0].StopOnPonderhit;
+
+    /// <summary>Sonda la transposition table condivisa — usata da <c>RootMove::
+    /// extract_ponder_from_tt</c> (search.cpp:2350-2366) per trovare una mossa da suggerire alla
+    /// GUI come "ponder" quando la PV aveva una sola mossa.</summary>
+    public TTProbeResult ProbeTT(ulong key) => _tt.Probe(key);
+
     public void Resize(int hashMb) => _tt.Resize(hashMb);
 
     public void NewGame()
@@ -95,12 +105,14 @@ public sealed class SearchThreadPool
     /// principale (indice 0): gli helper, come nella fonte, non consultano mai la gestione tempo
     /// adattiva — vanno sempre fino a <c>Ply.MaxPly</c> e si fermano solo quando il thread
     /// principale (o il chiamante) cancella <paramref name="ct"/>.</summary>
-    public SearchResult Search_(Position rootPos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default, long optimumMs = Search.NoBound)
+    public SearchResult Search_(Position rootPos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default, long optimumMs = Search.NoBound,
+        Func<bool>? isPondering = null, long maximumMsOverride = Search.NoBound)
     {
         if (_searches.Count == 0) SetThreadCount(1);
 
         if (_searches.Count == 1)
-            return _searches[0].Search_(rootPos, maxDepth, timeLimit, ct, optimumMs: optimumMs);
+            return _searches[0].Search_(rootPos, maxDepth, timeLimit, ct, optimumMs: optimumMs,
+                isPondering: isPondering, maximumMsOverride: maximumMsOverride);
 
         // tt.new_search(), search.cpp:204 — chiamato UNA SOLA VOLTA dal "thread principale"
         // (qui: il pool stesso, prima di avviare tutti i worker) e MAI dagli helper (vedi la nota
@@ -164,7 +176,8 @@ public sealed class SearchThreadPool
                 tasks[idx] = Task.Factory.StartNew(() =>
                 {
                     results[idx] = _searches[idx].Search_(positions[idx], maxDepth, timeLimit, stopCt, callNewSearch: false, optimumMs: optimumMs,
-                        crossThreadBestMoveChanges: SumAndResetBestMoveChangesAcrossPool, threadCountForInstability: _searches.Count);
+                        crossThreadBestMoveChanges: SumAndResetBestMoveChangesAcrossPool, threadCountForInstability: _searches.Count,
+                        isPondering: isPondering, maximumMsOverride: maximumMsOverride);
                     stopCts.Cancel();
                 }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             }

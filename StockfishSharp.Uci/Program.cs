@@ -91,6 +91,19 @@ int maxDepth = 30;
 CancellationTokenSource? searchCts = null;
 Task? searchTask = null;
 
+// SearchManager::ponder (search.h:307, std::atomic_bool) — letto da Search.cs (isPondering) sul
+// thread di ricerca, scritto qui dal ciclo comandi su "go ponder"/"ponderhit". Una classe wrapper
+// (dichiarata in fondo al file: le dichiarazioni di tipo devono seguire tutte le istruzioni di
+// primo livello) invece di una variabile locale "volatile" (C# non supporta variabili locali
+// volatili) — stesso bisogno di visibilità cross-thread di un atomic_bool.
+var pondering = new PonderFlag();
+
+// tm.maximum() vero della "go ponder" in corso + il momento in cui è iniziata (elapsed() della
+// fonte è continuo dall'inizio del pondering, non riparte al "ponderhit") — letti da
+// HandlePonderhit per decidere se fermare la ricerca subito o riarmare il vero tetto massimo.
+long currentMaximumMs = Search.NoBound;
+Stopwatch? goStopwatch = null;
+
 var optionsMap = new OptionsMap();
 optionsMap.AddInfoListener(Console.WriteLine);
 
@@ -125,10 +138,10 @@ optionsMap.Add("Clear Hash", new Option(_ =>
     return null;
 }));
 
-// Ponder: nessun gestore di "go ponder"/"ponderhit" in HandleGo/HandleStop (protocollo pondering
-// non implementato — vedi la nota 2026-09-06 sul piano generale). Dichiarata comunque (compare
-// nell'output di "uci" come la fonte) ma impostarla non ha alcun effetto: il motore non entra mai
-// nel ramo "mainThread->ponder" di search.cpp perché quel ramo non esiste in questo porting.
+// "go ponder"/"ponderhit" GESTITI (2026-09-07, vedi HandleGo/HandlePonderhit) — come nella fonte,
+// questa opzione è puramente informativa per la GUI (le dice che può offrire il pondering
+// nell'interfaccia): il motore risponde a "go ponder"/"ponderhit" comunque, indipendentemente dal
+// suo valore (engine.cpp non la legge mai in Engine::go/set_ponderhit).
 optionsMap.Add("Ponder", new Option(false));
 
 // MultiPV: la ricerca resta a _pvIdx sempre 0 (RootMove/RootMoves nota, "manca ancora") —
@@ -300,6 +313,31 @@ void StopSearch()
     }
 }
 
+// Engine::set_ponderhit (engine.cpp:262, "threads.main_manager()->ponder = b") + il vero
+// meccanismo di check_time (search.cpp:2122-2129, "elapsed > tm.maximum() || stopOnPonderhit"):
+// abbassata la bandiera, decide se la ricerca già in corso deve fermarsi SUBITO (se l'ultima
+// iterazione completata durante il pondering aveva già superato il tempo che avremmo usato in
+// una ricerca normale — search.StopOnPonderhit) o continuare fino al vero tetto massimo,
+// misurato dallo stesso istante in cui è iniziato il pondering (il tempo già speso pondering non
+// è gratuito, si somma al budget della mossa reale — proprio il punto del pondering: se abbiamo
+// già pensato abbastanza durante il turno dell'avversario, la mossa reale costa pochissimo tempo
+// aggiuntivo).
+void HandlePonderhit()
+{
+    pondering.Value = false;
+
+    // "ponderhit" senza una "go ponder" in corso (client non conforme, o già finita): nessuna
+    // ricerca da correggere, ignora — come farebbe la fonte (set_ponderhit tocca solo un flag,
+    // innocuo se non c'è nessuno a leggerlo).
+    if (searchCts == null || goStopwatch == null || currentMaximumMs == Search.NoBound)
+        return;
+
+    if (search.StopOnPonderhit)
+        searchCts.Cancel();
+    else
+        searchCts.CancelAfter(TimeSpan.FromMilliseconds(Math.Max(0, currentMaximumMs - goStopwatch.ElapsedMilliseconds)));
+}
+
 while (Console.ReadLine() is { } line)
 {
     var tokens = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -343,7 +381,17 @@ while (Console.ReadLine() is { } line)
             break;
 
         case "stop":
+            pondering.Value = false;
             searchCts?.Cancel();
+            break;
+
+        // "The GUI sends 'ponderhit' to tell that the user has played the expected move. [...]
+        // The search should continue, but should also switch from pondering to normal search."
+        // (uci.cpp:116-119) — Engine::set_ponderhit(false) è solo "threads.main_manager()->ponder
+        // = b" (engine.cpp:262): qui basta abbassare la stessa bandiera, HandlePonderhit decide se
+        // la ricerca già in corso deve fermarsi subito o continuare col vero tetto massimo.
+        case "ponderhit":
+            HandlePonderhit();
             break;
 
         case "bench":
@@ -495,8 +543,74 @@ void HandleGo(string[] toks)
         return;
     }
 
+    // "go ... ponder", uci.cpp:228-229 — letto súbito (prima del libro) perché governa SE
+    // aspettiamo "ponderhit"/"stop" prima di annunciare bestmove, qualunque sia la fonte della
+    // mossa (libro o ricerca vera). Azzerato anche currentMaximumMs: senza questo, un HandlePonderhit
+    // arrivato in ritardo da una "go ponder" precedente potrebbe riarmare un tetto ormai senza senso.
+    bool ponderGo = Array.IndexOf(toks, "ponder") >= 0;
+    pondering.Value = ponderGo;
+    currentMaximumMs = Search.NoBound;
+
+    searchCts = new CancellationTokenSource();
+    var ct = searchCts.Token;
+
+    // search.cpp:217-229 — se una mossa è già pronta (libro, o iterative_deepening che ha
+    // raggiunto il proprio limite di profondità) MENTRE si sta ancora facendo pondering, il
+    // protocollo UCI vieta di annunciare "bestmove" finché la GUI non manda "stop" o "ponderhit".
+    // Poll leggero invece del vero busy-spin della fonte ("while(!threads.stop && ...) {}") — più
+    // gentile con la CPU, stesso effetto osservabile.
+    void WaitWhilePondering()
+    {
+        while (pondering.Value && !ct.IsCancellationRequested)
+            Thread.Sleep(1);
+    }
+
+    // UCIEngine::on_bestmove (uci.cpp:690-694): "ponder" opzionale dopo bestmove, dalla seconda
+    // mossa della PV — se la PV aveva una sola mossa, RootMove::extract_ponder_from_tt
+    // (search.cpp:2350-2366) prova comunque a suggerirne una sondando la TT sulla posizione dopo
+    // bestmove, così la GUI ha sempre qualcosa su cui pondering quando possibile.
+    Move? ExtractPonderFromTt(Move bestMove)
+    {
+        var st = new StateInfo();
+        position.DoMove(bestMove, st);
+        Move? ponderMove = null;
+        if (!position.IsDraw(1))
+        {
+            var probe = search.ProbeTT(position.Key);
+            if (probe.Found)
+            {
+                var legalMoves = new List<Move>();
+                MoveGen.Generate(GenType.Legal, position, legalMoves);
+                if (legalMoves.Contains(probe.Data.Move))
+                    ponderMove = probe.Data.Move;
+            }
+        }
+        position.UndoMove(bestMove);
+        return ponderMove;
+    }
+
+    void PrintBestmove(Move? bestMove, IReadOnlyList<Move>? pv)
+    {
+        // Matto/stallo: la TT salva Move.None come bestMove (Search.cs, "bestMove ?? Move.None"),
+        // quindi result.BestMove.HasValue è vero anche in quel caso — senza questo controllo
+        // MoveToUci(Move.None) stamperebbe "a1a1" (Move.None ha from=to=A1) invece di "0000", una
+        // mossa illegale spedita a un client UCI reale. Scoperto testando "bench".
+        if (bestMove is not { } m || m == Move.None)
+        {
+            Console.WriteLine("bestmove 0000");
+            return;
+        }
+
+        Move? ponderMove = pv is { Count: > 1 } ? pv[1] : ExtractPonderFromTt(m);
+        Console.WriteLine(ponderMove is { } p
+            ? $"bestmove {MoveToUci(m)} ponder {MoveToUci(p)}"
+            : $"bestmove {MoveToUci(m)}");
+    }
+
     // Libro di aperture (Flow D1): se la posizione è coperta, risponde subito senza avviare la
-    // ricerca vera — stessa logica di ACMyChess.Uci/Program.cs.
+    // ricerca vera — stessa logica di ACMyChess.Uci/Program.cs. Gira comunque in background (come
+    // il ramo di ricerca vera sotto): se stiamo pondering deve poter aspettare "ponderhit"/"stop"
+    // senza bloccare il ciclo comandi che li riceve.
     if (position.GamePly < BookMaxPlies)
     {
         Move? bookMove = book?.TryGetMove(position);
@@ -521,7 +635,11 @@ void HandleGo(string[] toks)
             int bookEval = Evaluate.StaticEval(position);
             search.SetPreviousScores(bookEval, bookEval);
 
-            Console.WriteLine($"bestmove {MoveToUci(bookMove.Value)}");
+            searchTask = Task.Run(() =>
+            {
+                WaitWhilePondering();
+                PrintBestmove(bookMove, null);
+            });
             return;
         }
     }
@@ -538,6 +656,17 @@ void HandleGo(string[] toks)
     // prima del tetto. Per "infinite"/"movetime"/"go depth" senza orologio, come nella fonte,
     // niente gestione adattiva: optimumMs resta Search.NoBound e budget è l'unico limite, fisso.
     long optimumMs = Search.NoBound;
+
+    // isPondering/maximumMsOverride (search.h:307, search.cpp:602) attivi SOLO nel ramo
+    // wtime/btime sotto — l'unico dove use_time_management() è vero, esattamente come la fonte
+    // (check_time/il blocco adattivo di iterative_deepening non fanno nulla altrimenti). Per
+    // "go ponder movetime N"/"go ponder infinite" (combinazioni rare, nessun bot/GUI reale le usa
+    // in pratica) il ponder resta limitato a "aspetta ponderhit/stop prima di annunciare bestmove"
+    // (WaitWhilePondering sopra) senza il tetto adattivo esteso della fonte — semplificazione
+    // dichiarata, non un buco silenzioso.
+    Func<bool>? isPondering = null;
+    long maximumMsOverride = Search.NoBound;
+
     if (infinite)
     {
         // Nessun limite di tempo reale: si ferma solo con "stop" o al raggiungimento di maxDepth
@@ -559,8 +688,26 @@ void HandleGo(string[] toks)
         if (myTime.HasValue)
         {
             timeManagement.Init(myTime.Value, myInc, movesToGo, position.GamePly, moveOverhead);
-            budget = TimeSpan.FromMilliseconds(timeManagement.MaximumTime);
             optimumMs = timeManagement.OptimumTime;
+
+            if (ponderGo)
+            {
+                // check_time (search.cpp:2122-2129): "if (ponder) return" — il vero tetto
+                // massimo NON scatta finché si sta pondering, qualunque sia il tempo passato (il
+                // nostro orologio non corre finché non tocca a noi). Un budget enorme qui disabilita
+                // il CancelAfter interno di Search_; il vero tetto (currentMaximumMs) viene riarmato
+                // dall'esterno SOLO al "ponderhit" (HandlePonderhit), misurato dallo stesso istante
+                // in cui è iniziato il pondering (goStopwatch, avviato qui sotto) — il tempo già
+                // speso pondering non è gratuito, si somma al budget della mossa reale.
+                budget = TimeSpan.FromHours(2);
+                currentMaximumMs = timeManagement.MaximumTime;
+                goStopwatch = Stopwatch.StartNew();
+                isPondering = () => pondering.Value;
+            }
+            else
+            {
+                budget = TimeSpan.FromMilliseconds(timeManagement.MaximumTime);
+            }
         }
         else
         {
@@ -568,25 +715,26 @@ void HandleGo(string[] toks)
         }
     }
 
-    int depth = depthArg.HasValue ? (int)Math.Min(depthArg.Value, maxDepth) : maxDepth;
+    // search.cpp:333 — l'unico vero limite del ciclo di iterative deepening è MAX_PLY (qui
+    // Ply.MaxPly), non un "maxDepth" arbitrario: mentre si sta pondering con orologio reale usiamo
+    // lo stesso tetto pratico della fonte, invece del maxDepth=30 usuale, così una sessione di
+    // pondering lunga può davvero approfittarne per scavare più a fondo invece di fermarsi presto
+    // a una profondità arbitraria (il fallback WaitWhilePondering sopra copre comunque il caso in
+    // cui anche Ply.MaxPly venga raggiunto, o "go ponder depth N" lo richieda esplicitamente).
+    int effectiveMaxDepth = ponderGo && isPondering != null ? Ply.MaxPly - 1 : maxDepth;
+    int depth = depthArg.HasValue ? (int)Math.Min(depthArg.Value, effectiveMaxDepth) : effectiveMaxDepth;
 
-    searchCts = new CancellationTokenSource();
-    var ct = searchCts.Token;
     var pos = position; // stesso oggetto Position: il client UCI non deve mandare "position"/"go"
                         // finché non riceve "bestmove" o manda "stop" prima (regola del protocollo).
 
     searchTask = Task.Run(() =>
     {
-        var result = search.Search_(pos, depth, budget, ct, optimumMs: optimumMs);
+        var result = search.Search_(pos, depth, budget, ct, optimumMs: optimumMs,
+            isPondering: isPondering, maximumMsOverride: maximumMsOverride);
         Console.WriteLine($"info depth {result.Depth} seldepth {result.SelDepth} score cp {result.ScoreCp} nodes {result.Nodes} tbhits {result.TbHits} pv {FormatPv(result.Pv)}");
 
-        // Matto/stallo: la TT salva Move.None come bestMove (Search.cs, "bestMove ?? Move.None"),
-        // quindi result.BestMove.HasValue è vero anche qui — senza questo controllo aggiuntivo
-        // MoveToUci(Move.None) stamperebbe "a1a1" (Move.None ha from=to=A1) invece di "0000",
-        // una mossa illegale spedita a un client UCI reale. Scoperto testando "bench".
-        Console.WriteLine(result.BestMove is { } m && m != Move.None
-            ? $"bestmove {MoveToUci(m)}"
-            : "bestmove 0000");
+        WaitWhilePondering();
+        PrintBestmove(result.BestMove, result.Pv);
     });
 }
 
@@ -728,3 +876,8 @@ string CompilerInfo() =>
     + $"\nCompiled on                : {System.Runtime.InteropServices.RuntimeInformation.OSDescription}"
     + $"\nCompilation architecture   : {System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}"
     + $"\nCompilation settings       : {(Environment.Is64BitProcess ? "64bit" : "32bit")}\n";
+
+// SearchManager::ponder, search.h:307 (std::atomic_bool) — vedi il commento sulla variabile
+// "pondering" più sopra. Le dichiarazioni di tipo devono seguire tutte le istruzioni di primo
+// livello del file, quindi la classe vive qui in fondo.
+sealed class PonderFlag { public volatile bool Value; }

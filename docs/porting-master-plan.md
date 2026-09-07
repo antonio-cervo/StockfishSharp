@@ -342,22 +342,65 @@ spazio inesistente (`No such option: Nonexistent Option`, formato esatto della f
 6` completo comprese le 2 posizioni Chess960 (il toggle `UCI_Chess960` dentro `HandleBench` passa
 ora per lo stesso `HandleSetOption`).
 
-**Manca ancora** (A4, meno urgente — completezza di funzionalità, non del protocollo): `MultiPV`
-vero (il ciclo `pvIdx`, search.cpp:360-503), `Skill`/`UCI_LimitStrength`/`UCI_Elo` veri (gioco
-indebolito), conversione punteggi WDL, `export_net`, `speedtest` (`setup_benchmark`,
-benchmark.cpp:449-528, un secondo comando di benchmark su partite reali per lo SPRT — non
-essenziale, lista `BenchmarkPositions` enorme non copiata), `ponder`/`ponderhit` (pondering vero).
+**Pondering vero FATTO (2026-09-07)**, richiesto esplicitamente dall'utente dopo la nota sotto:
+`SearchManager::ponder`/`stopOnPonderhit` (search.h:307,313) ora reali. `Search.cs`: nuovo campo
+`_stopOnPonderhit` (volatile, esposto da `StopOnPonderhit`) + due nuovi parametri di `Search_`
+(`isPondering`, `maximumMsOverride`) — il blocco di gestione tempo adattiva (search.cpp:568-614)
+ora replica esattamente la fonte: mentre si pondera, un superamento del tempo stimato non ferma
+la ricerca (`break`) ma imposta `_stopOnPonderhit=true` e forza `increaseDepth=true` (si continua
+a scavare, mai un no-op); un fail-low lo azzera di nuovo (search.cpp:427, prima mancante).
+`maximumMsOverride` disaccoppia il vero `tm.maximum()` dal parametro `timeLimit` (che durante il
+pondering diventa un tetto fittizio enorme per disattivare il `CancelAfter` interno — il vero
+`check_time`, search.cpp:2122-2129, "if (ponder) return" prima di ogni controllo, sospende
+INTERAMENTE anche il tetto assoluto finché si pondera).
 
-**Nota per quando si affronterà il pondering (osservazione dal vivo, 2026-09-06)**: in una
-partita reale del bot, l'avversario (bot Lichess) rispondeva quasi istantaneamente a ogni mossa
-pur avendo un orologio che CRESCEVA rispetto al nostro (lui oltre 11 minuti, noi circa 2) —
-comportamento coerente con un pondering reale attivo dall'altra parte (continua a cercare sulla
-posizione prevista mentre è il nostro turno; se indovina la mossa, risponde con una ricerca già
-pronta). Da noi `SearchManager::ponder`/`stopOnPonderhit` (search.h) non sono portati e
-`Program.cs` non gestisce affatto `go ponder`/`ponderhit` — motivo in più, oltre alla completezza
-di protocollo, per dargli priorità quando si tornerà su Flow A4: senza pondering il nostro bot
-parte strutturalmente svantaggiato sul tempo in ogni partita con incremento contro avversari che
-lo usano.
+`Program.cs`: `HandleGo` rileva il token "ponder" súbito (prima del libro, perché governa se
+aspettare "ponderhit"/"stop" prima di annunciare bestmove qualunque sia la fonte della mossa) e
+passa un `PonderFlag` (wrapper con campo `volatile`, C# non ha variabili locali volatili) come
+`isPondering` a `Search_`. `HandlePonderhit` (nuovo case "ponderhit") replica il cuore di
+`check_time` DALL'ESTERNO invece che con un check periodico interno: se `search.StopOnPonderhit`
+è già vero, cancella subito (`searchCts.Cancel()`, effettivo entro i successivi ~2048 nodi, la
+stessa granularità del controllo periodico già esistente); altrimenti riarma il vero tetto
+massimo misurato dallo stesso istante in cui è iniziato il pondering
+(`searchCts.CancelAfter(currentMaximumMs - goStopwatch.Elapsed)`, un `Stopwatch` dedicato avviato
+in `HandleGo`) — il tempo già speso pondering NON è gratuito, si somma al budget della mossa
+reale (il punto stesso del pondering: se si è già pensato abbastanza, la mossa reale costa
+pochissimo tempo aggiuntivo). Il ciclo iterativo usa `Ply.MaxPly-1` come tetto di profondità
+mentre si pondera (non il solito `maxDepth=30`), per non fermarsi a un muro arbitrario durante
+una sessione di pondering lunga.
+
+**Anche portato, applicabile a OGNI bestmove non solo al pondering**: `UCIEngine::on_bestmove`
+(uci.cpp:690-694) — `bestmove X ponder Y` con la seconda mossa della PV, o
+`RootMove::extract_ponder_from_tt` (search.cpp:2350-2366, nuovo `ExtractPonderFromTt` in
+Program.cs — gioca il bestmove su una copia, sonda la TT condivisa via il nuovo
+`SearchThreadPool.ProbeTT`, verifica la legalità) come ripiego quando la PV aveva una sola mossa.
+Il busy-wait di `search()` dopo `iterative_deepening()` (search.cpp:217-229, per il caso raro
+"profondità/limite raggiunto MENTRE si pondera ancora") è un `WaitWhilePondering` con poll da 1ms
+invece del vero busy-spin della fonte — applicato anche al ramo libro (Flow D1, non fonte: gira
+ora in background come il ramo di ricerca vera, altrimenti bloccherebbe il ciclo comandi che deve
+poter ricevere "ponderhit" nel frattempo).
+
+**Semplificazione dichiarata**: "go ponder movetime N"/"go ponder infinite" (combinazioni rare,
+nessun bot/GUI reale le usa in pratica insieme al pondering) non hanno il tetto adattivo esteso
+della fonte — il pondering lì si riduce a "aspetta ponderhit/stop prima di annunciare bestmove"
+senza sospendere il cap di tempo fisso già esistente. Solo il ramo wtime/btime (l'unico dove
+`use_time_management()` è vero anche nella fonte) ha la fedeltà completa.
+
+Verificato: 109/109 test; bench 1 thread — nodi IDENTICI (1.235.311, bit-esatto, il percorso non
+pondering è invariato). Verifica dal vivo via UCI (script Python con lettura non bloccante):
+`go ponder` su una mossa di libro non annuncia bestmove finché non arriva "ponderhit" (poi
+istantaneo, <20ms); `go ponder wtime/btime` su una posizione di mediogioco fuori libro, ponderhit
+dopo 3s di pondering — la ricerca continua col vero tetto residuo (23649ms calcolati, 20925ms
+misurati dal ponderhit contro 20859ms attesi, scarto entro il rumore della granularità di
+controllo) invece di fermarsi o ripartire da zero; "stop" durante il pondering interrompe entro
+30ms. **Nota dell'utente (2026-09-07): il pondering va tenuto SPENTO nel bot per ora** (il motore
+lo supporta correttamente se un client lo richiede, ma la decisione di abilitarlo sul bot reale
+resta rimandata — probabilmente in `lichess-bot`'s config, fuori da questo repo).
+
+**Nota storica per cui il pondering era stato richiesto (osservazione dal vivo, 2026-09-06)**: in
+una partita reale del bot, l'avversario (bot Lichess) rispondeva quasi istantaneamente a ogni
+mossa pur avendo un orologio che CRESCEVA rispetto al nostro (lui oltre 11 minuti, noi circa 2) —
+comportamento coerente con un pondering reale attivo dall'altra parte.
 
 **Bug reale di correttezza trovato e corretto (2026-09-06, due partite perse dal vivo sul
 bot)**: `MoveToUci`/`ParseUciMove` (scritte come codice pratico fin dal primissimo commit del

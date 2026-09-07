@@ -193,6 +193,14 @@ public sealed class Search
         return v;
     }
 
+    /// <summary><c>SearchManager::stopOnPonderhit</c>, search.h:313 — vero quando, durante il
+    /// pondering, l'ultima iterazione completata ha già superato il tempo che avremmo usato in una
+    /// ricerca normale. Letto da <see cref="SearchThreadPool.StopOnPonderhit"/> dal comando
+    /// "ponderhit" (Program.cs) per decidere se fermarsi SUBITO invece di aspettare il vero
+    /// tetto massimo — <c>volatile</c> perché letto da un thread diverso da quello di ricerca.</summary>
+    private volatile bool _stopOnPonderhit;
+    public bool StopOnPonderhit => _stopOnPonderhit;
+
     /// <summary>Equivalente di <c>Search::Worker::tbConfig</c> (search.cpp:922-973, Step 7) — non
     /// più impostato dall'esterno: ricalcolato da <see cref="Tablebase.RankRootMoves"/> a ogni
     /// <see cref="Search_"/> (<c>ThreadPool::start_thinking</c>, thread.cpp:323, chiamato a ogni
@@ -547,14 +555,23 @@ public sealed class Search
     // PeekAndResetBestMoveChanges) e il conteggio dei thread; senza pool (default, standalone),
     // legge/azzera solo se stesso e divide per 1 — matematicamente lo stesso caso limite
     // "threads.size()==1" della fonte.
+    // isPondering/maximumMsOverride: SearchManager::ponder (search.h:307) + il vero tm.maximum()
+    // (search.cpp:602). "timeLimit" resta l'unico argomento del CancelAfter esterno sotto — per una
+    // ricerca "go ponder" il chiamante (Program.cs) gli passa un tetto fittizio enorme (il vero
+    // limite scatta solo al "ponderhit", riarmando dall'esterno il CancellationTokenSource
+    // collegato a "ct") mentre "maximumMsOverride" porta qui il vero tm.maximum() per il confronto
+    // interno di fine-iterazione (search.cpp:602) — per ogni altro chiamante (non pondering)
+    // "maximumMsOverride" resta NoBound e si usa "timeLimit" come sempre, comportamento invariato.
     public SearchResult Search_(Position pos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default, bool callNewSearch = true, long optimumMs = NoBound,
-        Func<ulong>? crossThreadBestMoveChanges = null, int threadCountForInstability = 1)
+        Func<ulong>? crossThreadBestMoveChanges = null, int threadCountForInstability = 1,
+        Func<bool>? isPondering = null, long maximumMsOverride = NoBound)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeLimit);
         _ct = cts.Token;
         _nodes = 0;
         _tbHits = 0;
+        _stopOnPonderhit = false; // ThreadPool::start_thinking, thread.cpp:304
         var elapsedStopwatch = System.Diagnostics.Stopwatch.StartNew(); // elapsed(), search.h
         if (callNewSearch) _tt.NewSearch();
         _movePick.ResetForSearch(); // lowPlyHistory.fill(102), search.cpp:326
@@ -703,6 +720,7 @@ public sealed class Search
                         beta = alpha;
                         alpha = Math.Max(bestValue - delta, -Infinity);
                         failedHighCnt = 0; // search.cpp:425
+                        _stopOnPonderhit = false; // search.cpp:427 — un fail-low invalida la decisione presa
                     }
                     else if (bestValue >= beta)
                     {
@@ -742,9 +760,11 @@ public sealed class Search
                 lastBestMovePv = bestRootMove.Pv;
 
                 // search.cpp:568-614 — gestione tempo adattiva reale: SOLO quando optimumMs è
-                // stato fornito (equivalente di limits.use_time_management()); "ponder"/
-                // "stopOnPonderhit" non sono portati (il protocollo ponder non è gestito da
-                // Program.cs), quindi qui il ramo "ferma la ricerca" è sempre quello percorso.
+                // stato fornito (equivalente di limits.use_time_management()) E non abbiamo già
+                // deciso di fermarci al prossimo ponderhit (search.cpp:569, "!mainThread->
+                // stopOnPonderhit" — una volta vero, questo blocco intero smette di rieseguire,
+                // congelando totBestMoveChanges/timeReduction ai valori dell'ultima iterazione
+                // valida, finché un fail-low non lo azzera di nuovo sopra).
                 //
                 // Il ciclo "for(auto&&th:threads)" della fonte (search.cpp:562-566) gira SEMPRE
                 // per il thread principale, non solo quando use_time_management è attivo — ma dato
@@ -752,7 +772,7 @@ public sealed class Search
                 // azzerare _bestMoveChanges in quel caso è innocuo (resta comunque azzerato
                 // all'inizio del prossimo "go"): innestare tutto qui dentro semplifica senza
                 // cambiare comportamento osservabile.
-                if (optimumMs < NoBound)
+                if (optimumMs < NoBound && !_stopOnPonderhit)
                 {
                     // search.cpp:561-566 — accumula quante volte la mossa migliore è cambiata in
                     // questa iterazione, mediata su tutti i thread del pool (vedi
@@ -784,15 +804,35 @@ public sealed class Search
 
                     double elapsedMs = elapsedStopwatch.Elapsed.TotalMilliseconds;
 
-                    if (elapsedMs > Math.Min(totalTime, (double)timeLimit.TotalMilliseconds)
+                    // tm.maximum() vero (search.cpp:602): quando si sta pondering, timeLimit passato
+                    // qui da Program.cs è un tetto fittizio enorme (il vero CancelAfter esterno viene
+                    // riarmato solo al "ponderhit" — vedi HandleGo/HandlePonderhit) e maximumMsOverride
+                    // porta il vero tm.maximum() per questo confronto interno; per una ricerca normale
+                    // (non pondering) maximumMsOverride resta NoBound e si usa timeLimit come sempre.
+                    double effectiveMaximumMs = maximumMsOverride != NoBound ? maximumMsOverride : (double)timeLimit.TotalMilliseconds;
+                    bool pondering = isPondering?.Invoke() ?? false;
+
+                    if (elapsedMs > Math.Min(totalTime, effectiveMaximumMs)
                         || bestRootMove.Score >= MateScore - 3
                         || bestRootMove.Score == -MateScore + 2)
-                        break;
-
-                    // search.cpp:612-613 — se non ci fermiamo, decide se la prossima iterazione
-                    // meriti un incremento pieno di profondità: solo se abbiamo usato meno di metà
-                    // del tempo stimato finora. "ponder" non è portato (sempre false).
-                    increaseDepth = elapsedMs <= totalTime * 0.50;
+                    {
+                        // search.cpp:605-610 — se stiamo pondering non fermiamo la ricerca ora, ma
+                        // segnaliamo che lo faremmo se non lo fossimo: il "ponderhit" (o il vero
+                        // check_time via il riarmo esterno di CancelAfter) userà questo per fermarsi
+                        // quasi subito invece di aspettare la fine dell'iterazione in corso.
+                        if (pondering)
+                            _stopOnPonderhit = true;
+                        else
+                            break;
+                    }
+                    else
+                    {
+                        // search.cpp:612-613 — se non ci fermiamo, decide se la prossima iterazione
+                        // meriti un incremento pieno di profondità: sempre sì mentre si sta pondering
+                        // (mainThread->ponder), altrimenti solo se abbiamo usato meno di metà del
+                        // tempo stimato finora.
+                        increaseDepth = pondering || elapsedMs <= totalTime * 0.50;
+                    }
                 }
 
                 iterValue[iterIdx] = bestValue;
