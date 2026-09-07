@@ -116,10 +116,58 @@ Riproducibile: **9 blocchi su 12** a 8 thread; **mai** a thread singolo (decine 
   thread, contro 60/57/22/43 dell'oracolo), 54 posizioni x 8 thread x 2 repliche senza un blocco,
   e il caso peggiore usa il 13,9% dell'orologio.
 
-**Prossimo passo suggerito**: registrare, quando la fuga parte, i valori esatti che entrano nello
-Step 16 lungo la catena (`ttScore`, `probe.Data.Depth`, `depth`, `singularBeta`, `singularScore`) e
-confrontarli con gli stessi a thread singolo, per isolare quale ingresso assume un valore che a
-thread singolo non assume mai. L'unico stato condiviso e' la transposition table.
+**Indagine del 2026-09-07 notte — la fuga NON e' della profondita', e' del PLY.**
+
+Misurato con contatori interni (variabile d'ambiente `SFS_DIAG_CHAIN=1`, stampa periodica durante
+lo stallo):
+
+| | 1 thread | 8 thread, bloccato |
+|---|---|---|
+| `plyMax` (ricorsione di Negamax) | 44 | **132-154** |
+| `depthMax` | 27 | **28-34** |
+| ply alla profondita' massima | 17 | 21-23 |
+
+**La profondita' non scappa affatto**: resta a ~30 in entrambi i casi. E' il PLY ad arrivare a 132.
+Per chiamare `Negamax` a ply 132 serve che `depth` resti >= 1 per 132 ply partendo da 13, cioe' che
+venga ripristinata di continuo. Contati i quattro meccanismi che possono farlo, **sopra ply 60**:
+
+| meccanismo | 1 thread | 8 thread bloccato |
+|---|---|---|
+| `Math.Max(1, ...)` dello Step 18 (LMR) | 0 | **1.813.388 e in crescita** |
+| `depth++` dell'hindsight | 0 | 2.331 |
+| `Math.Max(newDepth, 1)` dello Step 20 | 0 | 0 |
+| estensioni | 0 | 0 |
+
+**E' il clamp dell'LMR**: `d = std::max(1, std::min(newDepth - r / 1024, newDepth + 2)) + PvNode`
+impedisce alla ricerca ridotta di scendere a zero e la forza a profondita' 1 invece di mandarla in
+quiescenza. Milioni di volte, contro ZERO a thread singolo.
+
+Ambiente in cui accade, sempre misurato sopra ply 60:
+
+    nodi visitati = 167.560.575
+    di cui patte  =  87.640.122  (52%)
+    con r50 > 99  =  84.849.809  (51%)
+    Repetition!=0 =   7.027.344  (4%)
+
+Cioe': il motore costruisce un albero da centinaia di milioni di nodi in una regione dove META' delle
+posizioni e' gia' patta per la regola delle 50 mosse. Le foglie ritornano subito, ma sono tantissime.
+La `r50` osservata sui nodi campionati a ply 101 era 54-56: linee di puro rimescolamento.
+
+**Verificato fedele (non e' qui il bug)**: il clamp dello Step 18, `Position::is_draw`,
+`Position::is_repetition`, il calcolo di `st->repetition` in `do_move` (risalita a due ply per volta
+fino a `min(rule50, pliesFromNull)`), `is_shuffling`, e l'intero Step 16.
+
+**PROSSIMO PASSO**: la regione problematica si forma fra ply ~23 (dove la profondita' tocca il
+massimo) e ply 60 (dove iniziano i contatori attuali). **Ripetere la stessa misura con soglia
+`ply > 30` invece di `ply > 60`** per vedere quale meccanismo alimenta la catena in quel tratto: se
+di nuovo il clamp dell'LMR, allora la domanda diventa perche' `r / 1024` sia cosi' grande da portare
+`newDepth - r/1024` sotto 1 in modo sistematico solo con piu' thread — e li' l'unico ingresso
+condiviso e' la transposition table (via `ttPv`, `probe.Data.Depth`, `ttCapture`, `cutoffCnt`, che
+entrano tutti nella formula di `r`).
+
+**Nota a margine trovata durante l'indagine**: `Position.IsDraw` alloca un `new List<Move>()` a ogni
+chiamata con `rule50 > 99` e re sotto scacco. Su questo percorso e' caldissimo (84 milioni di nodi
+con r50 > 99 in una singola esecuzione). Non e' la causa del blocco, ma va convertito a buffer.
 
 ### 2. Divergenza di punteggio a profondita' medie
 
