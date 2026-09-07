@@ -299,6 +299,10 @@ public sealed class Search
     // (search.cpp:822, "ss->ttPv = excludedMove ? ss->ttPv : ...").
     private readonly bool[] _ttPvHistory = new bool[Ply.MaxPly + StackOffset + 1];
 
+    // Stack::ttHit della fonte (search.cpp:819) — serve al malus "quiet early move refuted"
+    // (search.cpp:2002), che confronta (ss-1)->moveCount con "1 + (ss-1)->ttHit".
+    private readonly bool[] _ttHitHistory = new bool[Ply.MaxPly + StackOffset + 1];
+
     /// <summary>Contatore di INVOCAZIONI (non di nodi): serve solo a scandire ogni 2048 chiamate i
     /// controlli di cancellazione/scadenza, ruolo che prima svolgeva <c>_nodes</c>. Separato da
     /// quando <c>_nodes</c> e' diventato fedele alla fonte (conta le mosse giocate): il contatore
@@ -1113,6 +1117,7 @@ public sealed class Search
         // eventualmente trovata nella TT reale (che potrebbe essere di profondità inferiore o
         // assente). Valore/profondità/bound/eval della TT restano invece sempre quelli
         // effettivamente sondati, SOLO la mossa è sostituita.
+        _ttHitHistory[ply + StackOffset] = probe.Found; // ss->ttHit, search.cpp:819
         Move ttMove = ply == 0 ? _rootMoves[_pvIdx].Pv[0] : probe.Found ? probe.Data.Move : Move.None;
         // search.cpp:824 usa capture_stage (che comprende anche le promozioni a donna su casa
         // vuota), non capture. Alimenta la riduzione LMR e i margini delle Singular Extensions.
@@ -1915,7 +1920,19 @@ public sealed class Search
         }
         else if (bestMove != null)
         {
-            _movePick.UpdateStats(pos, ply, bestMove.Value, quietsSearched, capturesSearched, depth, ttMove, isPvNode, contRefs, inCheck);
+            Move statsPrevMove = _currentMoveHistory[ply + StackOffset - 1];
+            Square statsPrevSq = statsPrevMove.IsOk ? statsPrevMove.ToSq : Square.None;
+            var statsParentContRefs = _parentContRefsBufs[ply];
+            if (statsPrevSq != Square.None) FillContinuationRefs(ply - 1, statsParentContRefs);
+            _movePick.UpdateStats(pos, ply, bestMove.Value, quietsSearched, capturesSearched, depth, ttMove, isPvNode, contRefs, inCheck,
+                parentStatScore: _statScoreHistory[ply + StackOffset - 1],
+                parentMoveCount: _moveCountHistory[ply + StackOffset - 1],
+                parentTtHit: _ttHitHistory[ply + StackOffset - 1],
+                priorCapture: pos.CapturedPiece() != Piece.None,
+                prevSq: statsPrevSq,
+                prevPiece: statsPrevSq != Square.None ? pos.PieceOn(statsPrevSq) : Piece.None,
+                parentContRefs: statsParentContRefs,
+                parentInCheck: _inCheckHistory[ply + StackOffset - 1]);
         }
         else if (ply != 0)
         {

@@ -144,6 +144,16 @@ public sealed class MovePick
         for (int p = 0; p < LowPlyHistorySize; p++)
             for (int m = 0; m < 65536; m++)
                 _lowPlyHistory[p, m] = 102;
+
+        // search.cpp:328-330 — MAI PORTATO fino al 2026-09-07: a ogni nuova ricerca (cioe' a ogni
+        // mossa della partita, non a ogni nuova partita) la main history VIENE FATTA DECADERE di
+        // 729/1024, circa il 29% in meno. Senza, si accumula per l'intera partita e non si smorza
+        // mai: un bench a profondita' fissa da processo fresco non puo' accorgersene, ma in
+        // partita l'ordinamento peggiora mossa dopo mossa perche' la history resta ancorata a
+        // posizioni ormai lontane.
+        for (int c = 0; c < Colors.Nb; c++)
+            for (int m = 0; m < 65536; m++)
+                _mainHistory[c, m] = (short)(_mainHistory[c, m] * 729 / 1024);
     }
 
     /// <summary><c>StatsEntry::operator&lt;&lt;</c>, history.h:70-77: il bonus spinge il valore
@@ -164,10 +174,18 @@ public sealed class MovePick
     /// bestMove non causa un taglio (nodo PV pienamente esplorato). <paramref name="contRefs"/> è
     /// <c>(ss-1)..(ss-6)-&gt;currentMove</c> per la continuation history, <paramref
     /// name="currentInCheck"/> lo scacco di QUESTO nodo (non del genitore).</summary>
+    /// <param name="parentStatScore">(ss-1)-&gt;statScore, search.cpp:1976 — terzo termine del
+    /// bonus, MAI PORTATO fino al 2026-09-07.</param>
+    /// <param name="parentMoveCount">(ss-1)-&gt;moveCount e (ss-1)-&gt;ttHit servono al malus
+    /// "quiet early move refuted" (search.cpp:2000-2003), anch'esso mai portato.</param>
     public void UpdateStats(Position pos, int ply, Move bestMove, List<Move> quietsSearched, List<Move> capturesSearched,
-        int depth, Move ttMove, bool isPvNode, ContinuationRef[] contRefs, bool currentInCheck)
+        int depth, Move ttMove, bool isPvNode, ContinuationRef[] contRefs, bool currentInCheck,
+        int parentStatScore, int parentMoveCount, bool parentTtHit, bool priorCapture,
+        Square prevSq, Piece prevPiece, ContinuationRef[] parentContRefs, bool parentInCheck)
     {
-        int bonus = Math.Min((133 * depth) - 81, 1487) + (364 * (bestMove == ttMove ? 1 : 0));
+        // search.cpp:1976 — "+ (ss-1)->statScore / 28": quanto la history approvava la mossa del
+        // GENITORE entra nel bonus che diamo qui.
+        int bonus = Math.Min((133 * depth) - 81, 1487) + (364 * (bestMove == ttMove ? 1 : 0)) + (parentStatScore / 28);
         int malus = Math.Min((968 * depth) - 235, 2244);
 
         if (!isPvNode)
@@ -191,6 +209,14 @@ public sealed class MovePick
             PieceType capturedPiece = Types.TypeOf(pos.PieceOn(bestMove.ToSq));
             UpdateHistory(ref _captureHistory[(byte)movedPiece, (byte)bestMove.ToSq, (byte)capturedPiece], bonus * 1427 / 1024, CaptureHistoryLimit);
         }
+
+        // search.cpp:2000-2003 "Extra penalty for a quiet early move that was not a TT move in
+        // previous ply when it gets refuted" — MAI PORTATO fino al 2026-09-07. Se il genitore
+        // aveva provato UNA SOLA mossa prima di questa (piu' l'eventuale mossa di TT) e quella
+        // mossa viene ora confutata, e non era una cattura, la si punisce sulle sue continuation
+        // history.
+        if (prevSq != Square.None && parentMoveCount == 1 + (parentTtHit ? 1 : 0) && !priorCapture)
+            UpdateContinuationHistories(parentContRefs, parentInCheck, prevPiece, prevSq, -malus * 713 / 1024);
 
         // search.cpp:2005-2011 — malus per tutte le catture provate ma scartate (indipendente da
         // se bestMove sia stata una cattura o una mossa quieta).
