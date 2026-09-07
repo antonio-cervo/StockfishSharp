@@ -98,7 +98,13 @@ indicato. Elenco cumulativo: aggiungere qui, non rifare.
 
 ## APERTO — da riprendere qui
 
-### 1. Blocco del bench multi-thread (priorita' alta)
+### 1. Blocco del bench multi-thread — RISOLTO il 2026-09-08 (commit 844c691)
+
+**Causa**: `ComputeStatScore` leggeva la posizione GIA' MOSSA. Vedi in fondo a questa sezione.
+Dieci esecuzioni su dieci di `bench 16 8 13` completano ora in 8-9 secondi. Quanto segue e' la
+cronaca dell'indagine, tenuta perche' il METODO e' riusabile.
+
+#### Cronaca (storica)
 
 **Sintomo**: `bench 16 8 13` non termina. L'oracolo fa lo stesso bench in **1,8 s / 17,6M nodi**.
 Riproducibile: **9 blocchi su 12** a 8 thread; **mai** a thread singolo (decine di prove).
@@ -164,6 +170,42 @@ di nuovo il clamp dell'LMR, allora la domanda diventa perche' `r / 1024` sia cos
 `newDepth - r/1024` sotto 1 in modo sistematico solo con piu' thread — e li' l'unico ingresso
 condiviso e' la transposition table (via `ttPv`, `probe.Data.Depth`, `ttCapture`, `cutoffCnt`, che
 entrano tutti nella formula di `r`).
+
+#### LA CAUSA (trovata il 2026-09-08)
+
+Scomponendo `r` nei suoi termini sopra ply 30:
+
+| | 1 thread | 8 thread bloccato |
+|---|---|---|
+| `r` medio | **+3567** | **-2684** |
+| `r` base (`Reduction(...)`) | 2405 | 2162 |
+| **`statScore` medio** | **5.425** | **40.091** |
+| `ttPv` | 10% | 0% |
+
+`r` NEGATIVO ribalta il significato dell'LMR: in `max(1, min(newDepth - r/1024, newDepth + 2))`, con
+`r/1024 = -3` il minimo diventa `newDepth + 2`, quindi la ricerca "ridotta" **estende di 2 invece di
+ridurre**. Da qui il ply a 132-154 e l'istogramma che CRESCE con la profondita'.
+
+E a spingere `r` sotto zero e' `statScore` (`r -= statScore * 439 / 4096`: con 40.091 fa -4.297).
+
+**Perche' `statScore` era gonfiato**: `ComputeStatScore` e' chiamata allo Step 18, cioe' DOPO
+`DoMove` (come nella fonte), ma leggeva tutto dalla posizione gia' mossa. La fonte usa valori
+catturati PRIMA — `movedPiece` (Step 14), `us` (Step 1), `pos.captured_piece()` (dallo StateInfo).
+Tre valori, tutti e tre sbagliati:
+
+- **pezzo catturato**: `PieceOn(m.ToSq)` dopo la mossa contiene il pezzo che si e' MOSSO. Per una
+  cattura fatta di donna dava `873*2538/128 = 17.309` invece del valore del pezzo preso.
+- **pezzo mosso**: `MovedPiece(m)` legge `PieceOn(m.FromSq)`, dopo la mossa VUOTA: restituiva
+  `Piece.None`, con cui si indicizzavano capture history e continuation history.
+- **colore**: `pos.SideToMove` dopo la mossa e' l'AVVERSARIO: la main history veniva letta dal lato
+  sbagliato.
+
+**Metodo che ha funzionato, da riusare**: contatori interni letti DURANTE lo stallo (stampa
+periodica su stderr da un task di sfondo, attivata da variabile d'ambiente), con una domanda
+diversa a ogni giro — prima l'istogramma dei ply, poi il valore medio di `r`, infine la
+scomposizione di `r` nei suoi termini. Ogni misura ha smentito l'ipotesi precedente: prima "sono gli
+helper troppo profondi" (falso: sono a 13-17), poi "e' la profondita' che scappa" (falso: resta a
+~30, e' il PLY a scappare), infine il dato giusto. Tre ipotesi plausibili scartate da tre misure.
 
 **Nota a margine trovata durante l'indagine**: `Position.IsDraw` alloca un `new List<Move>()` a ogni
 chiamata con `rule50 > 99` e re sotto scacco. Su questo percorso e' caldissimo (84 milioni di nodi
