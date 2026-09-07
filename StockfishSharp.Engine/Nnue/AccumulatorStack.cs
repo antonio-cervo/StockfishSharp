@@ -120,8 +120,10 @@ public sealed class AccumulatorStack
             var prev = _stack[next - 1];
             var cur = _stack[next];
 
-            cur.Accumulation[p] = (short[])prev.Accumulation[p].Clone();
-            cur.PsqtAccumulation[p] = (int[])prev.PsqtAccumulation[p].Clone();
+            // Copia SUL POSTO negli array preallocati del frame corrente: il Clone() precedente
+            // allocava 2 KB per prospettiva a OGNI aggiornamento incrementale, cioe' a ogni nodo.
+            prev.Accumulation[p].AsSpan().CopyTo(cur.Accumulation[p]);
+            prev.PsqtAccumulation[p].AsSpan().CopyTo(cur.PsqtAccumulation[p]);
 
             cur.ApplyIncrementalDelta(net, perspective, ksq);
             cur.Computed[p] = true;

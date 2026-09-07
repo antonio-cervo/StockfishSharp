@@ -26,14 +26,25 @@ namespace StockfishSharp.Engine.Nnue;
 /// Computed/Dirty* servono solo quando è parte di uno stack (N9).</summary>
 public sealed class NnueAccumulator
 {
-    public readonly short[][] Accumulation = new short[2][];
-    public readonly int[][] PsqtAccumulation = new int[2][];
+    // Array PREALLOCATI una volta per accumulatore: nella fonte sono membri fissi della struct
+    // Accumulator (nnue_accumulator.h), riempiti sul posto. Qui venivano invece SOSTITUITI a ogni
+    // refresh e clonati a ogni aggiornamento incrementale (2 KB per prospettiva, a ogni nodo).
+    public readonly short[][] Accumulation = [new short[L1], new short[L1]];
+    public readonly int[][] PsqtAccumulation = [new int[PsqtBuckets], new int[PsqtBuckets]];
 
     // N9 — vedi AccumulatorStack. Computed[c]=vero se Accumulation[c]/PsqtAccumulation[c] sono
     // validi per la posizione che questo frame rappresenta. I tre Dirty descrivono la TRANSIZIONE
     // dal frame precedente sullo stack a questo (popolati da Position.DoMove quando questo frame
     // viene passato come argomento dirtyThreats/dirtyPiece/dirtyPawnPairs).
     public readonly bool[] Computed = new bool[2];
+
+    // Vedi ApplyIncrementalDelta: buffer riusati al posto di quattro liste allocate per chiamata.
+    private readonly List<int> _removedPsq = new(64);
+    private readonly List<int> _addedPsq = new(64);
+    private readonly List<int> _removedThreat = new(256);
+    private readonly List<int> _addedThreat = new(256);
+    private readonly List<int> _refreshPsq = new(64);
+    private readonly List<int> _refreshThreats = new(512);
     public readonly DirtyPiece DirtyPiece = new();
     public readonly List<DirtyThreat> DirtyThreats = new();
     public readonly DirtyPawnPairs DirtyPawnPairs = new();
@@ -61,10 +72,16 @@ public sealed class NnueAccumulator
     public void RefreshPerspective(NnueNetwork net, Position pos, Color perspective)
     {
         int p = (byte)perspective;
-        var acc = (short[])net.Biases.Clone();
-        var psqt = new int[PsqtBuckets];
 
-        var psq = new List<int>();
+        // Riempimento SUL POSTO degli array gia' esistenti (vedi la nota sui campi sopra): prima
+        // qui si clonava net.Biases (1024 short = 2 KB) e si allocavano un array PSQT e due liste
+        // a ogni singolo refresh.
+        short[] acc = Accumulation[p];
+        int[] psqt = PsqtAccumulation[p];
+        net.Biases.AsSpan(0, L1).CopyTo(acc);
+        Array.Clear(psqt);
+
+        var psq = _refreshPsq; psq.Clear();
         HalfKAv2Hm.AppendActiveIndices(perspective, pos, psq);
         foreach (int f in psq)
         {
@@ -74,7 +91,7 @@ public sealed class NnueAccumulator
             for (int b = 0; b < PsqtBuckets; b++) psqt[b] += net.PsqtWeights[pBase + b];
         }
 
-        var threats = new List<int>();
+        var threats = _refreshThreats; threats.Clear();
         FullThreats.AppendActiveIndices(perspective, pos, threats);
         Pp3Wide.AppendActiveIndices(perspective, pos, threats);
         foreach (int f in threats)
@@ -85,8 +102,7 @@ public sealed class NnueAccumulator
             for (int b = 0; b < PsqtBuckets; b++) psqt[b] += net.ThreatAndPpPsqtWeights[pBase + b];
         }
 
-        Accumulation[p] = acc;
-        PsqtAccumulation[p] = psqt;
+        // (niente riassegnazione: acc/psqt SONO gia' Accumulation[p]/PsqtAccumulation[p])
     }
 
     /// <summary>N9 — applica a QUESTA prospettiva (già inizializzata a copia del frame precedente
@@ -101,12 +117,19 @@ public sealed class NnueAccumulator
         short[] acc = Accumulation[p];
         int[] psqt = PsqtAccumulation[p];
 
-        var removedPsq = new List<int>();
-        var addedPsq = new List<int>();
+        // Buffer FISSI riusati, non quattro liste nuove a ogni chiamata: nella fonte sono array a
+        // capacita' fissa dichiarati sullo stack ("IndexList removed[2], added[2]",
+        // nnue_accumulator.cpp), qui erano l'allocazione piu' pesante rimasta del percorso caldo —
+        // ApplyIncrementalDelta gira per OGNI prospettiva a OGNI nodo che valuta, e le liste delle
+        // minacce possono contenere decine di indici, quindi anche i loro array interni venivano
+        // riallocati piu' volte mentre crescevano. Sono campi di istanza: ogni accumulatore
+        // appartiene a un solo frame di un solo AccumulatorStack, e quindi a un solo thread.
+        var removedPsq = _removedPsq; removedPsq.Clear();
+        var addedPsq = _addedPsq; addedPsq.Clear();
         HalfKAv2Hm.AppendChangedIndices(perspective, ksq, DirtyPiece, removedPsq, addedPsq);
 
-        var removedThreat = new List<int>();
-        var addedThreat = new List<int>();
+        var removedThreat = _removedThreat; removedThreat.Clear();
+        var addedThreat = _addedThreat; addedThreat.Clear();
         FullThreats.AppendChangedIndices(perspective, ksq, DirtyThreats, removedThreat, addedThreat);
         Pp3Wide.AppendChangedIndices(perspective, ksq, DirtyPawnPairs, removedThreat, addedThreat);
 

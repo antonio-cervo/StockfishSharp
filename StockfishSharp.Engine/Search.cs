@@ -308,6 +308,42 @@ public sealed class Search
     private readonly int[][] _mpValueBufs = BuildPerPlyValueBufs();
     private readonly List<Move>[] _mpGenBufs = BuildPerPlyGenBufs();
 
+    // Buffer FISSI per ply, allocati una volta sola alla creazione di questa Search — nella fonte
+    // sono tutti oggetti sullo stack della funzione ("StateInfo st;", "ValueList<Move,32>
+    // quietsSearched", "const PieceToHistory* contHist[]"), quindi a costo zero; qui erano invece
+    // allocazioni sull'heap a OGNI nodo (contRefs, le due liste) o a OGNI MOSSA (StateInfo, che
+    // essendo una classe con 5 campi array costa da solo 6 allocazioni). Un solo esemplare per ply
+    // basta: a un dato ply non ci sono mai due nodi vivi insieme (do_move/undo_move sono sempre
+    // appaiati, e la ricerca di verifica delle Singular Extensions gira PRIMA che il nodo faccia la
+    // propria mossa, quindi trova lo slot libero).
+    private readonly StateInfo[] _stateInfoPool = BuildStateInfoPool();
+    private readonly ContinuationRef[][] _contRefsBufs = BuildPerPlyContRefs();
+    private readonly ContinuationRef[][] _parentContRefsBufs = BuildPerPlyContRefs();
+
+    // DUE slot per ply, non uno: la ricerca di verifica delle Singular Extensions (Step 16) richiama
+    // Negamax allo STESSO ply con excludedMove impostata, e quella chiamata annidata accumula le
+    // proprie mosse mentre il nodo esterno sta ancora accumulando le sue. Nella fonte non e' un
+    // problema perche' sono variabili locali sullo stack di ogni invocazione. Bastano due livelli:
+    // il ramo con excludedMove non puo' entrare a sua volta nelle Singular Extensions (il gate
+    // richiede excludedMove vuota), quindi non esiste un terzo livello allo stesso ply.
+    private readonly List<Move>[] _quietsSearchedBufs = BuildPerPlyGenBufs(2);
+    private readonly List<Move>[] _capturesSearchedBufs = BuildPerPlyGenBufs(2);
+    private readonly List<Move>[] _legalScratchBufs = BuildPerPlyGenBufs();
+
+    private static StateInfo[] BuildStateInfoPool()
+    {
+        var pool = new StateInfo[Ply.MaxPly + StackOffset + 2];
+        for (int i = 0; i < pool.Length; i++) pool[i] = new StateInfo();
+        return pool;
+    }
+
+    private static ContinuationRef[][] BuildPerPlyContRefs()
+    {
+        var bufs = new ContinuationRef[Ply.MaxPly + StackOffset + 2][];
+        for (int i = 0; i < bufs.Length; i++) bufs[i] = new ContinuationRef[6];
+        return bufs;
+    }
+
     private static Move[][] BuildPerPlyMoveBufs()
     {
         var bufs = new Move[Ply.MaxPly + 1][];
@@ -322,9 +358,9 @@ public sealed class Search
         return bufs;
     }
 
-    private static List<Move>[] BuildPerPlyGenBufs()
+    private static List<Move>[] BuildPerPlyGenBufs(int slotsPerPly = 1)
     {
-        var bufs = new List<Move>[Ply.MaxPly + 1];
+        var bufs = new List<Move>[((Ply.MaxPly + StackOffset + 2) * slotsPerPly) + 1];
         for (int i = 0; i < bufs.Length; i++) bufs[i] = new List<Move>(Ply.MaxMoves);
         return bufs;
     }
@@ -1218,7 +1254,7 @@ public sealed class Search
                 // supera beta — search.cpp:1016.
                 int R = 7 + (depth / 3) + Math.Max((staticEval - beta) / 256, 0);
 
-                var nullSt = new StateInfo();
+                var nullSt = _stateInfoPool[ply];
                 pos.DoNullMove(nullSt);
                 int nullValue = -Negamax(pos, depth - R, ply + 1, -beta, -beta + 1, cutNode: false);
                 pos.UndoNullMove();
@@ -1278,7 +1314,7 @@ public sealed class Search
                     if (!pos.Legal(pcMove)) continue;
 
                     var pcFrame = _accumulatorStack.Push();
-                    var pcSt = new StateInfo();
+                    var pcSt = _stateInfoPool[ply];
                     pos.DoMove(pcMove, pcSt, pos.GivesCheck(pcMove), pcFrame.DirtyThreats, pcFrame.DirtyPiece, pcFrame.DirtyPawnPairs);
 
                     int pcValue = -Quiesce(pos, -probCutBeta, -probCutBeta + 1, ply + 1, isPvNode: false); // search.cpp:1077
@@ -1307,7 +1343,8 @@ public sealed class Search
             && !Values.IsDecisive(beta) && !Values.IsDecisive(ttScore))
             return probCutBeta13;
 
-        var contRefs = BuildContinuationRefs(ply);
+        var contRefs = _contRefsBufs[ply];
+        FillContinuationRefs(ply, contRefs);
         var mp = new MovePicker(pos, _movePick, ttMove, depth, ply, contRefs,
             _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
 
@@ -1318,8 +1355,11 @@ public sealed class Search
 
         // search.cpp:761-762/1543-1551: mosse quiete/catture provate ma non risultate la
         // migliore, per aggiornare le loro statistiche di ordinamento a fine ciclo (Step 23).
-        var quietsSearched = new List<Move>();
-        var capturesSearched = new List<Move>();
+        int searchedSlot = (ply * 2) + (excludedMove == default ? 0 : 1);
+        var quietsSearched = _quietsSearchedBufs[searchedSlot];
+        var capturesSearched = _capturesSearchedBufs[searchedSlot];
+        quietsSearched.Clear();
+        capturesSearched.Clear();
         const int SearchedListCapacity = 32; // SEARCHEDLIST_CAPACITY, search.cpp:73
 
         // Step 14. Generazione a stadi vera (MovePicker, movepick.cpp) invece della lista
@@ -1490,7 +1530,7 @@ public sealed class Search
             long nodeCountBeforeMove = ply == 0 ? _nodes : 0;
 
             var frame = _accumulatorStack.Push();
-            var st = new StateInfo();
+            var st = _stateInfoPool[ply];
             pos.DoMove(m, st, givesCheck, frame.DirtyThreats, frame.DirtyPiece, frame.DirtyPawnPairs);
 
             // Step 18 (continua dopo aver fatto la mossa), search.cpp:1316-1359.
@@ -1703,7 +1743,10 @@ public sealed class Search
 
                     int scaledBonus = Math.Min((150 * depth) - 85, 1337) * bonusScale;
 
-                    var parentContRefs = BuildContinuationRefs(ply - 1);
+                    // Buffer SEPARATO: _contRefsBufs[ply-1] appartiene al nodo genitore, che e'
+                    // ancora vivo dentro il proprio ciclo mosse e lo sta usando.
+                    var parentContRefs = _parentContRefsBufs[ply];
+                    FillContinuationRefs(ply - 1, parentContRefs);
                     _movePick.ApplyCountermoveQuietBonus(pos, prevPiece, prevSq, parentMove,
                         parentContRefs, _inCheckHistory[ply + StackOffset - 1], scaledBonus, Types.Opposite(pos.SideToMove));
                 }
@@ -1851,7 +1894,8 @@ public sealed class Search
         // La fonte in quiescenza usa UN SOLO livello di continuation history
         // (search.cpp:1763, "contHist[] = {(ss-1)->continuationHistory}"), non i sei del ciclo
         // principale: si costruisce l'array completo e si azzerano i livelli 1..5.
-        var contRefs = BuildContinuationRefs(ply);
+        var contRefs = _contRefsBufs[ply];
+        FillContinuationRefs(ply, contRefs);
         for (int i = 1; i < contRefs.Length; i++) contRefs[i] = default;
         Move prevMove = _currentMoveHistory[ply + StackOffset - 1];
         Square prevSq = prevMove != Move.None ? prevMove.ToSq : Square.None;
@@ -1906,7 +1950,7 @@ public sealed class Search
             _captureStageHistory[ply + StackOffset] = capture;
 
             var qFrame = _accumulatorStack.Push();
-            var st = new StateInfo();
+            var st = _stateInfoPool[ply];
             pos.DoMove(m, st, givesCheck, qFrame.DirtyThreats, qFrame.DirtyPiece, qFrame.DirtyPawnPairs);
             int score = -Quiesce(pos, -beta, -alpha, ply + 1, isPvNode);
             pos.UndoMove(m);
@@ -1937,7 +1981,8 @@ public sealed class Search
                 && Types.TypeOf(pos.State.CapturedPiece) >= PieceType.Knight
                 && (Bitboards.PawnSinglePushBB(us, pos.Pieces(us, PieceType.Pawn)) & ~pos.Pieces()) == 0)
             {
-                var legal = new List<Move>();
+                var legal = _legalScratchBufs[ply];
+                legal.Clear();
                 MoveGen.Generate(GenType.Legal, pos, legal);
                 if (legal.Count == 0) bestValue = Values.Draw;
             }
@@ -1956,16 +2001,17 @@ public sealed class Search
 
     /// <summary>Costruisce <c>(ss-1)..(ss-6)-&gt;currentMove</c> per la continuation history —
     /// vedi MovePick.cs. Con StackOffset=7 l'indice minimo (ply=0, i=6) è 1, sempre non negativo.</summary>
-    private ContinuationRef[] BuildContinuationRefs(int ply)
+    /// <summary>Riempie un buffer GIA' esistente invece di allocarne uno nuovo a ogni nodo — nella
+    /// fonte e' l'array locale "contHist[]" sullo stack (search.cpp:1148-1151).</summary>
+    private void FillContinuationRefs(int ply, ContinuationRef[] refs)
     {
-        var refs = new ContinuationRef[6];
         for (int i = 1; i <= 6; i++)
         {
             int idx = ply + StackOffset - i;
-            if (_currentMoveHistory[idx].IsOk)
-                refs[i - 1] = new ContinuationRef(true, _inCheckHistory[idx], _captureStageHistory[idx], _movedPieceHistory[idx], _currentMoveHistory[idx].ToSq);
+            refs[i - 1] = _currentMoveHistory[idx].IsOk
+                ? new ContinuationRef(true, _inCheckHistory[idx], _captureStageHistory[idx], _movedPieceHistory[idx], _currentMoveHistory[idx].ToSq)
+                : default;
         }
-        return refs;
     }
 
     /// <summary><c>is_shuffling</c>, search.cpp:153-160 — rileva mosse che vanno-e-vengono senza

@@ -1291,6 +1291,44 @@ futility — ma se ne fanno meno della meta'. A tempo fisso la profondita' resta
 insieme un fattore ~2,2x sui nodi. Il metodo che li ha trovati: enumerare i passi numerati della
 fonte e verificarli uno per uno, invece di fidarsi di cosa il piano dichiarava "fatto".
 
+### Allocazioni dinamiche dove la fonte ha buffer fissi (2026-09-07)
+
+Segnalazione dell'utente: *"stai attento anche ad allocazioni dinamiche che potresti incontrare
+mentre sull'oracolo sono buffer fissi"*. Cercate una per una e convertite tutte quelle sul percorso
+caldo. Nella fonte sono oggetti sullo stack o membri fissi delle struct; qui erano allocazioni per
+nodo o per mossa.
+
+| Punto | Fonte | Prima | Costo |
+|---|---|---|---|
+| `NnueAccumulator.Accumulation/PsqtAccumulation` | membri fissi della struct Accumulator | **sostituiti** a ogni refresh, **clonati** (`Clone()`, 2 KB per prospettiva) a ogni aggiornamento incrementale | il piu' pesante di tutti |
+| `RefreshPerspective` | riempimento sul posto | `net.Biases.Clone()` + `new int[]` + 2 `new List<int>()` | ~2,2 KB per refresh |
+| `ApplyIncrementalDelta` | `IndexList removed[2], added[2]` (capacita' fissa) | 4 `new List<int>()` per chiamata, per prospettiva | ~0,5 KB/nodo |
+| `StateInfo st` | oggetto sullo stack | `new StateInfo()` per MOSSA (classe con 5 campi array = 6 allocazioni) | 360 B x mossa |
+| `quietsSearched`/`capturesSearched` | `ValueList<Move,32>` sullo stack | 2 `new List<Move>()` per nodo | |
+| `contHist[]` | array sullo stack | `new ContinuationRef[6]` per nodo | |
+
+Tutte convertite a buffer preallocati (per ply nella ricerca, per accumulatore in NNUE) o a copie
+sul posto (`CopyTo` invece di `Clone`).
+
+**Bug trovato e corretto durante la conversione**: indicizzare `quietsSearched`/`capturesSearched`
+per ply NON basta — la ricerca di verifica delle Singular Extensions richiama `Negamax` allo STESSO
+ply, e la chiamata annidata azzerava le liste del nodo esterno (nella fonte non succede perche' sono
+variabili locali sullo stack di ogni invocazione). Se ne era accorto il conteggio nodi, cambiato da
+157.224 a 174.987: **una conversione di soli buffer deve lasciare i nodi IDENTICI**, e quella
+verifica ha intercettato subito il problema. Risolto con due slot per ply (il ramo con
+`excludedMove` non puo' rientrare nelle Singular Extensions, quindi non esiste un terzo livello).
+
+**Verificato**: 113/113 test (compresi quelli bit-esatti NNUE contro l'oracolo); nodi IDENTICI a
+ogni passaggio; allocazioni della ricerca da **5.771 a 210 byte/nodo (-96%)** — con la valutazione
+NNUE disattivata restano 137 byte/nodo, cioe' il percorso di ricerca e' ormai quasi allocation-free.
+`bench 16 1 13`: da 350.953 a **439.096 nodi/sec (+25%)**.
+
+**Correzione a una conclusione precedente di questa stessa sessione**: le allocazioni erano state
+giudicate "irrilevanti" perche' toglierne il 36% dava +2%. Era una misura corretta ma una
+conclusione sbagliata: togliendone il 96% si guadagna il 25%. Il costo non e' il GC in se' (gen0 e'
+economico) ma l'azzeramento della memoria e l'inquinamento continuo della cache, che diventano
+significativi solo quando il volume scende sotto una certa soglia.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:
