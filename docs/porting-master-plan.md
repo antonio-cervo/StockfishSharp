@@ -1212,6 +1212,52 @@ critici (15s / 5s / 2s / blitz a 20s):
 `Threads: 1` sul bot, ma per l'altra ragione gia' misurata (il Lazy SMP non migliora il
 tempo-per-profondita'), non per motivi di gestione del tempo.
 
+### Il Lazy SMP non era rotto: era il GC .NET (2026-09-07)
+
+L'utente ha contestato la conclusione "il Lazy SMP non aiuta, mettiamo Threads=1": *"non capisco
+perche' il multithread sull'oracolo funziona e sul nostro porting no, direi che il porting e'
+sbagliato"*. Aveva ragione che qualcosa non andava, ma la causa non era nel porting dell'algoritmo.
+
+**Primo chiarimento — la metrica era sbagliata.** "Tempo per raggiungere una profondita' fissa" non
+misura il Lazy SMP: misurato che ANCHE L'ORACOLO peggiora con 8 thread su quel metro (tattica
+0,96s→2,20s = 0,44x; complessa 1,83s→2,62s = 0,70x), e che a tempo fisso anche l'oracolo PERDE
+profondita' nominale con 8 thread (complessa: d26 a 1 thread, d24 a 8). E' normale: il guadagno del
+Lazy SMP si vede in Elo su molte partite, non in profondita' su una posizione.
+
+**La differenza vera era nella scalabilita' grezza**: a 6s fissi l'oracolo passava da 6,6M a 34,2M
+nodi (5,2x su 8 thread), noi solo da 1,5M a 4,3M (2,9x). Li' il porting stava davvero lasciando per
+strada meta' del parallelismo.
+
+**Causa trovata**: il GC di .NET era in modalita' **Workstation** (verificato a runtime,
+`GCSettings.IsServerGC == false`), che usa un unico heap e ferma tutti i thread a ogni raccolta.
+Con la ricerca che alloca ancora ~3,7 KB/nodo (vedi sopra), a N thread la pressione sul GC si
+moltiplica per N e la raccolta diventa un punto di serializzazione proprio dove serve parallelismo.
+Da notare: le allocazioni erano state misurate come **irrilevanti a thread singolo** (+2% dopo
+averne tolte il 36%) — ed e' vero, ma diventano un collo di bottiglia REALE in parallelo. Le due
+cose non sono in contraddizione.
+
+**Fix**: `<ServerGarbageCollection>true</ServerGarbageCollection>` in StockfishSharp.Uci.csproj (un
+heap e un thread di raccolta per core).
+
+| | Prima (Workstation) | Dopo (Server) |
+|---|---|---|
+| Scalabilita' nodi, 8 thread, tattica | 2,9x | **4,8x** |
+| Scalabilita' nodi, 8 thread, complessa | 3,1x | **6,4x** |
+
+Ora siamo allineati o migliori dell'oracolo (5,2x). Costo: **-5,5% a thread singolo** (374k contro
+396k nodi/sec, nodi identici) — il compromesso tipico del Server GC.
+
+**Conseguenza sulla configurazione del bot**: rifatta la misura di profondita' a 6s fissi su 4
+posizioni, con Server GC attivo — totale **70 (1 thread) / 73 (2) / 71 (4) / 72 (8)**. Il
+multi-thread torna a guadagnare e **2 thread e' il migliore**, il che coincide con quanto l'utente
+aveva gia' osservato su ACMyChess. `config-stockfishsharp.yml` portato da `Threads: 1` a
+`Threads: 2`. Sicurezza sul tempo riverificata con Server GC e invariata: peggior caso 53,2% / 53,8%
+/ 54,5% dell'orologio con 1 / 2 / 8 thread.
+
+**Lezione**: prima di concludere che un porting e' sbagliato, separare l'algoritmo dalla
+configurazione del runtime che lo ospita — e prima ancora, verificare che la metrica usata misuri
+davvero la cosa giusta (qui "tempo per profondita' fissa" mostrava un problema anche sull'oracolo).
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:

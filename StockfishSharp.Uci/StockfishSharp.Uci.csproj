@@ -8,6 +8,12 @@
     <AssemblyName>StockfishSharpUci</AssemblyName>
     <RootNamespace>StockfishSharp.Uci</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Il GC "Server" usa un heap e un thread di raccolta PER CORE, invece dell'unico heap del GC
+         "Workstation" che deve fermare tutti i thread di ricerca a ogni raccolta. Con Lazy SMP a N
+         thread la ricerca alloca N volte tanto (vedi docs/porting-master-plan.md: ~3,7 KB/nodo),
+         quindi il GC diventa un punto di serializzazione proprio dove serve parallelismo. -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>
