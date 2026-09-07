@@ -1732,7 +1732,8 @@ public sealed class Search
             if (childCutoffCnt > 1) r += 264 + (childCutoffCnt > 2 ? 1095 : 0) + (allNode ? 1138 : 0);
             else if (m == ttMove) r -= 2179;
 
-            int statScore = _movePick.ComputeStatScore(pos, m, captureStage, contRefs);
+            int statScore = _movePick.ComputeStatScore(pos, m, captureStage, contRefs,
+                _movedPieceHistory[ply + StackOffset], Types.Opposite(pos.SideToMove));
             _statScoreHistory[ply + StackOffset] = statScore; // Stack::statScore, search.cpp:1342-1349
             r -= statScore * 439 / 4096;
 
@@ -1749,6 +1750,7 @@ public sealed class Search
             if (depth >= 2 && moveCount > 1)
             {
                 int d = Math.Max(1, Math.Min(newDepth - (r / 1024), newDepth + 2)) + (isPvNode ? 1 : 0);
+
                 _reductionHistory[ply + StackOffset] = newDepth - d; // search.cpp:1371
                 score = -Negamax(pos, d, ply + 1, -(alpha + 1), -alpha, cutNode: true);
                 _reductionHistory[ply + StackOffset] = 0; // search.cpp:1373

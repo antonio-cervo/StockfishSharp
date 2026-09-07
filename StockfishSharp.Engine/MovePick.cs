@@ -290,18 +290,34 @@ public sealed class MovePick
     /// per rifinire la riduzione LMR in base a quanto la history "approva" la mossa. Per le
     /// catture usa CapturePieceToHistory; per le mosse quiete combina main history + le prime due
     /// continuation history (ss-1, ss-2 — <paramref name="contRefs"/>[0]/[1]).</summary>
-    public int ComputeStatScore(Position pos, Move m, bool captureStage, ContinuationRef[] contRefs)
+    /// <remarks>ATTENZIONE: questa funzione e' chiamata DOPO <c>DoMove</c> (Step 18 viene dopo lo
+    /// Step 17, come nella fonte), quindi la posizione e' gia' mossa. Fino al 2026-09-08 leggeva
+    /// tutto da li' e sbagliava TRE valori su tre:
+    ///   - il pezzo catturato: la fonte usa <c>pos.captured_piece()</c> (preso dallo StateInfo),
+    ///     qui si leggeva <c>PieceOn(m.ToSq)</c> che dopo la mossa contiene il pezzo che si e'
+    ///     MOSSO — per una cattura fatta di donna dava 873*2538/128 = 17.309 invece del valore del
+    ///     pezzo preso;
+    ///   - il pezzo mosso: <c>MovedPiece(m)</c> legge <c>PieceOn(m.FromSq)</c>, che dopo la mossa
+    ///     e' VUOTA, quindi restituiva <c>Piece.None</c>;
+    ///   - il colore: <c>pos.SideToMove</c> dopo la mossa e' l'AVVERSARIO, quindi la main history
+    ///     veniva letta dal lato sbagliato.
+    /// Nella fonte <c>movedPiece</c> e <c>us</c> sono catturati PRIMA della mossa (Step 1 e Step
+    /// 14) e riusati qui: per questo ora arrivano come parametri.
+    ///
+    /// L'effetto misurato era grave: <c>statScore</c> medio 40.091 invece di ~5.400, e poiche'
+    /// Step 18 fa <c>r -= statScore * 439 / 4096</c>, la riduzione LMR diventava NEGATIVA
+    /// (r medio -2684). Con r negativo "min(newDepth - r/1024, newDepth + 2)" ESTENDE invece di
+    /// ridurre, e la ricerca non termina piu'.</remarks>
+    public int ComputeStatScore(Position pos, Move m, bool captureStage, ContinuationRef[] contRefs, Piece movedPiece, Color us)
     {
         if (captureStage)
         {
-            Piece movedPiece = pos.MovedPiece(m);
-            PieceType capturedPiece = Types.TypeOf(pos.PieceOn(m.ToSq));
-            return (873 * Values.PieceValue[(byte)pos.PieceOn(m.ToSq)] / 128)
-                + _captureHistory[(byte)movedPiece, (byte)m.ToSq, (byte)capturedPiece];
+            Piece captured = pos.CapturedPiece();
+            return (873 * Values.PieceValue[(byte)captured] / 128)
+                + _captureHistory[(byte)movedPiece, (byte)m.ToSq, (byte)Types.TypeOf(captured)];
         }
 
-        Color us = pos.SideToMove;
-        Piece pc = pos.MovedPiece(m);
+        Piece pc = movedPiece;
         int mainScore = _mainHistory[(byte)us, m.Raw];
         int cont0 = ContinuationScore(contRefs[0], pc, m.ToSq);
         int cont1 = ContinuationScore(contRefs[1], pc, m.ToSq);
