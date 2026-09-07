@@ -538,7 +538,7 @@ void HandleGo(string[] toks)
     var perftDepth = GetLong("perft");
     if (perftDepth.HasValue)
     {
-        long nodes = Perft.Run(position, (int)perftDepth.Value);
+        long nodes = Perft.Run(position, (int)perftDepth.Value, root: true, MoveToUci);
         Console.WriteLine($"\nNodes searched: {nodes}\n");
         return;
     }

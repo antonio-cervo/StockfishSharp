@@ -1519,6 +1519,42 @@ contatore, dimensione di una struttura) prima dell'algoritmo. Tre divergenze tro
 stessa sessione: dimensione del cluster TT, normalizzazione del punteggio UCI, semantica del
 contatore nodi.
 
+### Caccia alla divergenza di punteggio: cosa e' stato ESCLUSO (2026-09-07 sera)
+
+Con i punteggi finalmente nelle stesse unita' e i nodi nella stessa semantica, la domanda residua e'
+diventata: a che profondita' iniziamo a divergere dall'oracolo, e perche'? Misurato su 6 posizioni:
+
+| posizione | prima divergenza > 25cp |
+|---|---|
+| tattica (`r1bbk1nr/...`) | d2 |
+| finale di torre | d3 |
+| finale di pedoni (`8/2p5/...`) | d5 |
+| mediogioco (`4r1k1/...`) | d8 (esatti fino a d7) |
+| kiwipete | d9 (esatti fino a d6) |
+| finale di pedoni 2 | nessuna fino a d10 |
+
+**A profondita' 1 il punteggio combacia ESATTAMENTE su tutte** (829/829, -139/-139, 81/81, 49/49,
+143/143), il che convalida valutazione e quiescenza. Non c'e' una soglia unica: l'inizio della
+divergenza dipende dalla posizione, il che indica micro-divergenza accumulata piuttosto che una
+singola tecnica sbagliata.
+
+**Ipotesi verificate ed ESCLUSE** (tutte con misura, non a occhio):
+- **Valutazione**: identica (stessa rete, `eval` combacia).
+- **Quiescenza**: esclusa dai punteggi esatti a profondita' 1.
+- **Ordine di generazione delle mosse**: portato `perft` con la ripartizione per mossa ("divide",
+  perft.h:44-54, che questo porting non aveva) e confrontato l'elenco completo su 3 posizioni:
+  **stesso ordine e stessi conteggi**, mossa per mossa (48, 14 e 40 mosse).
+- **Ogni singola tecnica di ricerca**: ablazione una alla volta (Step 6 intero, la sola guardia
+  `depth > 4`, Step 22 `depth -= 3`, ProbCut, razoring, futility, null move, bonus post-LMR, `inc`).
+  Nessuna, disattivata, riporta i punteggi a combaciare — quindi nessuna e' "la" colpevole.
+- **Soglie di `partial_insertion_sort`**: identiche (`int.MinValue` e `-3560 * depth`).
+- **Inizializzazione dello stack prima della radice**: `_staticEvalHistory[0..6] = Values.None` come
+  la fonte (se fossero rimaste a 0, `improving` sarebbe stato sbagliato a ply 0 e 1).
+
+Il reproducer piu' piccolo disponibile e' la posizione "tattica", che diverge gia' a **profondita'
+2** (649 contro 605) pur combaciando esattamente a profondita' 1: a quella profondita' l'albero e'
+abbastanza piccolo da poter essere confrontato nodo per nodo. E' il punto da cui ripartire.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:
