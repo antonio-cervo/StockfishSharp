@@ -1007,7 +1007,7 @@ public sealed class Search
             if (beta <= matedValue) return matedValue;
         }
 
-        if (depth <= 0) return Quiesce(pos, alpha, beta, ply);
+        if (depth <= 0) return Quiesce(pos, alpha, beta, ply, isPvNode); // search.cpp:731
 
         // Controllo "ripetizione imminente" — search.cpp:736-742: se esiste una mossa disponibile
         // che pareggerebbe per ripetizione e quel pareggio batte già alpha, tronca qui invece di
@@ -1174,7 +1174,7 @@ public sealed class Search
             // alpha (margine che cresce col quadrato della profondità), la posizione non si
             // riprenderà: si passa direttamente alla quiescenza.
             if (!isPvNode && eval < alpha - 482 * depth * depth)
-                return Quiesce(pos, alpha, beta, ply);
+                return Quiesce(pos, alpha, beta, ply, isPvNode: false); // search.cpp:992
 
             // Step 9. Futility pruning: nodo figlio — search.cpp:994-1008. La condizione sulla
             // profondità (6 se si "cerca il matto", 19 altrimenti) non va tarata: serve a non
@@ -1281,7 +1281,7 @@ public sealed class Search
                     var pcSt = new StateInfo();
                     pos.DoMove(pcMove, pcSt, pos.GivesCheck(pcMove), pcFrame.DirtyThreats, pcFrame.DirtyPiece, pcFrame.DirtyPawnPairs);
 
-                    int pcValue = -Quiesce(pos, -probCutBeta, -probCutBeta + 1, ply + 1);
+                    int pcValue = -Quiesce(pos, -probCutBeta, -probCutBeta + 1, ply + 1, isPvNode: false); // search.cpp:1077
 
                     if (pcValue >= probCutBeta && probCutDepth > 0)
                         pcValue = -Negamax(pos, probCutDepth, ply + 1, -probCutBeta, -probCutBeta + 1, cutNode: !cutNode);
@@ -1746,63 +1746,213 @@ public sealed class Search
         return value;
     }
 
-    /// <summary>Ricerca di quiescenza: estende a catture (SEE non negativa) finché la posizione
-    /// non è "tranquilla" — evita di valutare a metà di uno scambio.</summary>
-    private int Quiesce(Position pos, int alpha, int beta, int ply)
+    /// <summary><c>Search::Worker::qsearch</c>, search.cpp:1653-1883 — PORTATA FEDELMENTE il
+    /// 2026-09-07. Prima di quella data qui c'era l'abbozzo scritto nel primissimo commit del
+    /// progetto: stand pat + catture con SEE non negativa, fail-hard, e NESSUNA consultazione della
+    /// transposition table (ne' lettura, ne' taglio, ne' scrittura), nessuna potatura di futility,
+    /// nessun limite sul numero di mosse. Dato che la quiescenza produce tipicamente la maggioranza
+    /// dei nodi di un motore, non avere la TT qui significava ricalcolare da zero ogni
+    /// trasposizione: il buco piu' costoso rimasto rispetto all'oracolo.</summary>
+    private int Quiesce(Position pos, int alpha, int beta, int ply, bool isPvNode)
     {
         _nodes++;
-
-        bool inCheck = pos.Checkers() != 0;
-        int standPat = inCheck ? -MateScore + ply : Evaluate.StaticEval(pos, _accumulatorStack, Optimism(pos.SideToMove));
-
-        if (!inCheck)
+        if ((_nodes & 2047) == 0)
         {
-            if (standPat >= beta) return beta;
-            if (standPat > alpha) alpha = standPat;
+            _ct.ThrowIfCancellationRequested();
+            double soft = _softDeadlineMs;
+            if (soft > 0 && _elapsedStopwatch!.Elapsed.TotalMilliseconds > soft)
+                throw new OperationCanceledException();
         }
 
-        // MovePicker con depth=DEPTH_QS (0): sotto scacco genera le evasioni (tutte, come
-        // "candidates" faceva prima aggiungendole indiscriminatamente); altrimenti solo le
-        // catture (stadio QCAPTURE) — search.cpp:1766-1770. Restituisce mosse pseudo-legali: il
-        // filtro di legalità/SEE resta nel ciclo sotto, come nella fonte (search.cpp:1778-1820).
-        // Continuation history non tracciata in quiescenza (Quiesce non scrive
-        // _currentMoveHistory/_movedPieceHistory) — contRefs vuoti disattiva il termine nella
-        // formula di score, come già prima di questo Step.
-        var mp = new MovePicker(pos, _movePick, Move.None, Ply.DepthQs, ply, EmptyContinuationRefs,
+        // search.cpp:1661-1667 — patta per ripetizione imminente.
+        if (alpha < Values.Draw && pos.UpcomingRepetition(ply))
+        {
+            alpha = ValueDraw();
+            if (alpha >= beta) return alpha;
+        }
+
+        bool inCheck = pos.Checkers() != 0;
+        int moveCount = 0;
+        Move bestMove = Move.None;
+
+        if (isPvNode && _selDepth < ply + 1) _selDepth = ply + 1;
+
+        // Step 2. Patta immediata o profondita' massima — search.cpp:1693-1696.
+        if (pos.IsDraw(ply) || ply >= Ply.MaxPly)
+            return ply >= Ply.MaxPly && !inCheck
+                ? Evaluate.StaticEval(pos, _accumulatorStack, Optimism(pos.SideToMove))
+                : ValueDraw();
+
+        // Step 3. Consultazione della transposition table — search.cpp:1699-1711.
+        var probe = _tt.Probe(pos.Key);
+        Move ttMove = probe.Found ? probe.Data.Move : Move.None;
+        int ttScore = probe.Found ? ValueFromTt(probe.Data.Value, ply, pos.Rule50Count) : Values.None;
+        bool ttPv = probe.Found && probe.Data.IsPv;
+
+        // Taglio anticipato da TT nei nodi non-PV.
+        if (!isPvNode && probe.Data.Depth >= Ply.DepthQs && Values.IsValid(ttScore)
+            && (probe.Data.Bound & (ttScore >= beta ? Bound.Lower : Bound.Upper)) != Bound.None)
+            return ttScore;
+
+        // Step 4. Valutazione statica — search.cpp:1713-1760.
+        int unadjustedStaticEval = Values.None;
+        int bestValue;
+        int futilityBase;
+
+        if (inCheck)
+        {
+            bestValue = futilityBase = -Infinity;
+        }
+        else
+        {
+            int correctionValue = CorrectionValue(pos, ply);
+
+            if (probe.Found)
+            {
+                unadjustedStaticEval = probe.Data.Eval;
+                if (!Values.IsValid(unadjustedStaticEval))
+                    unadjustedStaticEval = Evaluate.StaticEval(pos, _accumulatorStack, Optimism(pos.SideToMove));
+
+                bestValue = ToCorrectedStaticEval(unadjustedStaticEval, correctionValue);
+                _staticEvalHistory[ply + StackOffset] = bestValue;
+
+                // Il valore di TT puo' essere una stima migliore della valutazione statica.
+                if (Values.IsValid(ttScore) && !Values.IsDecisive(ttScore)
+                    && (probe.Data.Bound & (ttScore > bestValue ? Bound.Lower : Bound.Upper)) != Bound.None)
+                    bestValue = ttScore;
+            }
+            else
+            {
+                unadjustedStaticEval = Evaluate.StaticEval(pos, _accumulatorStack, Optimism(pos.SideToMove));
+                bestValue = ToCorrectedStaticEval(unadjustedStaticEval, correctionValue);
+                _staticEvalHistory[ply + StackOffset] = bestValue;
+            }
+
+            // Stand pat: se la valutazione statica e' gia' almeno beta, si torna subito.
+            if (bestValue >= beta)
+            {
+                if (!Values.IsDecisive(bestValue))
+                    bestValue = ((441 * bestValue) + (583 * beta)) / 1024;
+
+                if (!probe.Found)
+                    _tt.Save(probe.WriteIndex, pos.Key, Values.None, false, Bound.Lower,
+                        Ply.DepthUnsearched, Move.None, unadjustedStaticEval);
+
+                return bestValue;
+            }
+
+            if (bestValue > alpha) alpha = bestValue;
+
+            futilityBase = _staticEvalHistory[ply + StackOffset] + 306;
+        }
+
+        // search.cpp:1763-1765 — contHist di un solo livello (ss-1) e casa di arrivo della mossa
+        // precedente, usata dal filtro di futility sotto.
+        // La fonte in quiescenza usa UN SOLO livello di continuation history
+        // (search.cpp:1763, "contHist[] = {(ss-1)->continuationHistory}"), non i sei del ciclo
+        // principale: si costruisce l'array completo e si azzerano i livelli 1..5.
+        var contRefs = BuildContinuationRefs(ply);
+        for (int i = 1; i < contRefs.Length; i++) contRefs[i] = default;
+        Move prevMove = _currentMoveHistory[ply + StackOffset - 1];
+        Square prevSq = prevMove != Move.None ? prevMove.ToSq : Square.None;
+
+        var mp = new MovePicker(pos, _movePick, ttMove, Ply.DepthQs, ply, contRefs,
             _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
 
-        int moveCount = 0;
+        // Step 5. Ciclo su tutte le mosse pseudo-legali.
         Move m;
         while ((m = mp.NextMove()) != Move.None)
         {
             if (!pos.Legal(m)) continue;
 
-            if (!inCheck)
-            {
-                if (!pos.Capture(m)) continue;
-                if (!pos.SeeGe(m)) continue;
-            }
+            bool givesCheck = pos.GivesCheck(m);
+            bool capture = pos.CaptureStage(m);
 
             moveCount++;
 
+            // Step 6. Potatura — search.cpp:1786-1821.
+            if (!Values.IsLoss(bestValue))
+            {
+                if (!givesCheck && m.ToSq != prevSq && !Values.IsLoss(futilityBase)
+                    && m.TypeOf != MoveType.Promotion)
+                {
+                    if (moveCount > 2) continue;
+
+                    int futilityValue = futilityBase + Values.PieceValue[(byte)pos.PieceOn(m.ToSq)];
+
+                    // Valutazione statica + pezzo catturato molto sotto alpha: si pota.
+                    if (futilityValue <= alpha)
+                    {
+                        bestValue = Math.Max(bestValue, futilityValue);
+                        continue;
+                    }
+
+                    // SEE troppo bassa: si pota.
+                    if (!pos.SeeGe(m, alpha - futilityBase))
+                    {
+                        bestValue = Math.Max(bestValue, Math.Min(alpha, futilityBase));
+                        continue;
+                    }
+                }
+
+                if (!capture) continue;               // salta le mosse quiete
+                if (!pos.SeeGe(m, -74)) continue;     // catture con SEE troppo negativa
+            }
+
+            // Step 7. Fai e cerca la mossa.
+            _currentMoveHistory[ply + StackOffset] = m;
+            _movedPieceHistory[ply + StackOffset] = pos.MovedPiece(m);
+            _inCheckHistory[ply + StackOffset] = inCheck;
+            _captureStageHistory[ply + StackOffset] = capture;
+
             var qFrame = _accumulatorStack.Push();
             var st = new StateInfo();
-            pos.DoMove(m, st, pos.GivesCheck(m), qFrame.DirtyThreats, qFrame.DirtyPiece, qFrame.DirtyPawnPairs);
-            int score = -Quiesce(pos, -beta, -alpha, ply + 1);
+            pos.DoMove(m, st, givesCheck, qFrame.DirtyThreats, qFrame.DirtyPiece, qFrame.DirtyPawnPairs);
+            int score = -Quiesce(pos, -beta, -alpha, ply + 1, isPvNode);
             pos.UndoMove(m);
             _accumulatorStack.Pop();
 
-            if (score >= beta) return beta;
-            if (score > alpha) alpha = score;
+            // Step 8. Nuova mossa migliore (fail-soft) — search.cpp:1831-1849.
+            if (score > bestValue)
+            {
+                bestValue = score;
+                if (score > alpha)
+                {
+                    bestMove = m;
+                    if (score < beta) alpha = score;
+                    else break; // fail high
+                }
+            }
         }
 
-        if (inCheck && moveCount == 0)
-            return -(MateScore - ply);
+        // Step 9. Matto e stallo — search.cpp:1852-1868. Lo stallo si controlla SOLO nelle
+        // condizioni ristrette della fonte: fuori da quelle, "moveCount==0" in quiescenza
+        // significa solo che non c'erano catture da provare, non che la posizione sia patta.
+        if (moveCount == 0)
+        {
+            if (inCheck) return -(MateScore - ply);
 
-        return alpha;
+            Color us = pos.SideToMove;
+            if (pos.NonPawnMaterial(us) == 0
+                && Types.TypeOf(pos.State.CapturedPiece) >= PieceType.Knight
+                && (Bitboards.PawnSinglePushBB(us, pos.Pieces(us, PieceType.Pawn)) & ~pos.Pieces()) == 0)
+            {
+                var legal = new List<Move>();
+                MoveGen.Generate(GenType.Legal, pos, legal);
+                if (legal.Count == 0) bestValue = Values.Draw;
+            }
+        }
+
+        if (!Values.IsDecisive(bestValue) && bestValue > beta)
+            bestValue = ((462 * bestValue) + (562 * beta)) / 1024;
+
+        // Step 10. Salva in TT. La valutazione statica si salva com'era PRIMA della correzione.
+        _tt.Save(probe.WriteIndex, pos.Key, ValueToTt(bestValue, ply), ttPv,
+            bestValue >= beta ? Bound.Lower : Bound.Upper, Ply.DepthQs, bestMove, unadjustedStaticEval);
+
+        return bestValue;
     }
 
-    private static readonly ContinuationRef[] EmptyContinuationRefs = new ContinuationRef[6];
 
     /// <summary>Costruisce <c>(ss-1)..(ss-6)-&gt;currentMove</c> per la continuation history —
     /// vedi MovePick.cs. Con StackOffset=7 l'indice minimo (ply=0, i=6) è 1, sempre non negativo.</summary>

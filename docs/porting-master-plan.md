@@ -1258,6 +1258,39 @@ aveva gia' osservato su ACMyChess. `config-stockfishsharp.yml` portato da `Threa
 configurazione del runtime che lo ospita — e prima ancora, verificare che la metrica usata misuri
 davvero la cosa giusta (qui "tempo per profondita' fissa" mostrava un problema anche sull'oracolo).
 
+### La quiescenza era senza transposition table (2026-09-07) — il buco piu' costoso
+
+Continuando la caccia ai segnaposto dopo il null move, controllata la QUIESCENZA, che nella fonte
+ha dieci passi propri (search.cpp:1653-1883) e che in un motore di scacchi produce tipicamente la
+maggioranza dei nodi. La nostra era l'abbozzo del primissimo commit:
+
+| | Fonte (qsearch) | Nostro abbozzo |
+|---|---|---|
+| Transposition table | probe + taglio anticipato nei non-PV + scrittura finale | **assente del tutto** |
+| Valutazione statica | correction history, eval da TT, ttValue come stima migliore | eval diretta |
+| Stand pat | fail-soft, miscela `(441*best + 583*beta)/1024`, scrittura in TT | `return beta` secco |
+| Potatura (Step 6) | futility (`futilityBase = staticEval + 306`), `moveCount > 2`, SEE contro `alpha - futilityBase`, SEE `>= -74` | solo `SeeGe(m) >= 0` |
+| Ripetizione imminente | `upcoming_repetition` all'ingresso | assente |
+| Ritorno | fail-soft (`bestValue`) | fail-hard (`alpha`/`beta`) |
+
+Non avere la TT in quiescenza significava **ricalcolare da zero ogni trasposizione** nella parte
+piu' popolosa dell'albero, e non alimentare la TT con i risultati di quiescenza per le visite
+successive.
+
+Portata fedelmente tutta (i dieci passi), inclusa la continuation history a UN SOLO livello
+(search.cpp:1763, non i sei del ciclo principale) e il controllo di stallo nelle condizioni
+ristrette della fonte.
+
+**Verificato**: 113/113 test; `bench 16 1 13` — nodi da **10.996.307 a 4.945.987 (-55%)**, tempo da
+29,4s a **14,1s (-52%)**. Rapporto nodi contro l'oracolo da **4,40x a 1,98x**. I nodi/sec calano
+dell'11% (350k contro 396k) perche' ogni nodo di quiescenza ora fa anche probe di TT e controlli di
+futility — ma se ne fanno meno della meta'. A tempo fisso la profondita' resta sostanzialmente pari
+(71 contro 70 su 4 posizioni, misura rumorosa), con 3 mosse su 4 coincidenti con l'oracolo.
+
+**Bilancio della caccia ai segnaposto**: due pezzi mai portati (null move, quiescenza) valevano
+insieme un fattore ~2,2x sui nodi. Il metodo che li ha trovati: enumerare i passi numerati della
+fonte e verificarli uno per uno, invece di fidarsi di cosa il piano dichiarava "fatto".
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:
