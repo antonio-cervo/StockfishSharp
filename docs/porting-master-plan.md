@@ -1555,6 +1555,94 @@ Il reproducer piu' piccolo disponibile e' la posizione "tattica", che diverge gi
 2** (649 contro 605) pur combaciando esattamente a profondita' 1: a quella profondita' l'albero e'
 abbastanza piccolo da poter essere confrontato nodo per nodo. E' il punto da cui ripartire.
 
+## Audit sistematico: cosa NON avevamo mai portato (2026-09-07 sera)
+
+Richiesta dell'utente: "controlla tutto quello che rimane togliendo quello che hai controllato,
+oppure se c'e' qualcosa sui sorgenti dell'oracolo che noi non abbiamo mai portato". Fatto con due
+metodi complementari.
+
+### Metodo 1 — dal profilo del sintomo
+
+I punteggi combaciavano ESATTAMENTE a profondita' 1 e divergevano sempre di piu' salendo: il profilo
+di qualcosa che a inizio ricerca e' vuoto e si riempie strada facendo. Ha portato a due pezzi mai
+portati:
+
+- **`do_null_move` non aggiornava lo Stack** (search.cpp:674-679). La fonte non si limita a fare la
+  mossa nulla: imposta `ss->currentMove = Move::null()` e punta le due continuation history alle
+  caselle `NO_PIECE`. Qui si faceva solo `DoNullMove` e si ricorreva, quindi il figlio del null move
+  leggeva come "mossa che ha portato qui" quella lasciata da un fratello gia' cercato allo stesso
+  ply — dato stantio di un sottoalbero estraneo. Lo leggono la continuation history del figlio, il
+  bonus differenza-di-valutazione dello Step 5, il bonus countermove dello Step 23 e la correction
+  history.
+- **Le LETTURE di continuation history erano filtrate come le scritture.** Nella fonte il puntatore
+  `(ss-i)->continuationHistory` e' SEMPRE valido: senza una mossa reale punta a
+  `continuationHistory[0][0][NO_PIECE][SQ_A1]`, che vale **-586** (valore di inizializzazione, mai
+  riscritto perche' le scritture sono filtrate da `currentMove.is_ok()`); le letture non lo sono
+  mai. Noi restituivamo 0. Lo scarto entra in `statScore` (riduzione LMR) e nelle soglie dello
+  Step 15, dove conta il valore assoluto.
+
+Effetto misurato: la profondita' alla quale il punteggio inizia a divergere dall'oracolo si sposta
+piu' in fondo — posizione "tattica" da **d2 a d8** (ora esatta fino a d5: 605/605, 478/478, 478/478,
+478/478), finale di torre da d3 a d4, kiwipete da d9 a d10.
+
+### Metodo 2 — audit meccanico delle costanti
+
+Ogni costante numerica del codice della fonte deve comparire nel porting; una assente e' logica
+mancante. Su `search.cpp` restavano 6 costanti non presenti, di cui **3 erano vera logica**:
+
+- **`729`** (search.cpp:328-330): a ogni nuova RICERCA — cioe' a ogni mossa della partita, non a
+  ogni nuova partita — la main history viene fatta **decadere di 729/1024**. Mai portato: si
+  accumulava per l'intera partita senza mai smorzarsi. Un bench a profondita' fissa da processo
+  fresco non puo' accorgersene; in partita l'ordinamento peggiora mossa dopo mossa.
+- **`713`** (search.cpp:2000-2003): un intero ramo dello Step 23, *"extra penalty for a quiet early
+  move that was not a TT move in previous ply when it gets refuted"*. Richiede `(ss-1)->ttHit`,
+  aggiunto come array per ply.
+- **`statScore / 28`** (search.cpp:1976): il bonus dello Step 23 e'
+  `min(133*depth-81, 1487) + 364*(bestMove==ttMove) + (ss-1)->statScore/28` — mancava l'ultimo
+  termine. L'audit non l'aveva pescato (28 e' a due cifre): trovato leggendo la riga accanto a una
+  delle costanti mancanti.
+
+Le altre 3 sono Skill Level / UCI_Elo, dichiarati inerti. Rifatto l'audit includendo anche le
+costanti a due cifre usate in moltiplicazioni e divisioni: su 50, **ne resta una sola** assente, ed
+e' un falso positivo (da noi e' scritta `100000UL`, il suffisso confonde il riconoscitore).
+`movepick.cpp`, `history.h`, `timeman.cpp` ed `evaluate.cpp`: **zero costanti mancanti**.
+
+### Metodo 2b — rilettura integrale delle funzioni attorno ai buchi
+
+Trovati due buchi in `update_all_stats`, ho riletto per intero quella funzione e il suo chiamante
+(Step 23). E' emerso un altro pezzo mai portato: **la propagazione di `ttPv` sul fail-low**
+(search.cpp:1614-1617, *"If no good move is found and the previous position was ttPv..."*). Non e'
+cosmetico: quel flag finisce nella entry di TT e da li' governa la riduzione LMR di chiunque
+ritrovi la posizione (Step 18, `if (ttPv) r -= 3023 + ...`, oltre tre ply di riduzione in meno).
+
+### Ipotesi ESCLUSE con misura (non a occhio)
+
+- **Valutazione**: identica (stessa rete, `eval` combacia, punteggi esatti a profondita' 1).
+- **Quiescenza**: esclusa dagli stessi punteggi esatti a profondita' 1.
+- **Ordine di generazione delle mosse**: portato `perft` con la ripartizione per mossa ("divide") e
+  confrontato l'elenco completo su 3 posizioni — **stesso ordine e stessi conteggi**, mossa per
+  mossa (48, 14 e 40 mosse).
+- **Ogni singola tecnica di ricerca**, ablata una alla volta (Step 6 intero, la sola guardia
+  `depth > 4`, Step 22 `depth -= 3`, ProbCut, razoring, futility, null move, bonus post-LMR, `inc`):
+  nessuna, disattivata, riporta i punteggi a combaciare.
+- **Soglie di `partial_insertion_sort`**: identiche.
+- **Inizializzazione dello stack prima della radice**: `_staticEvalHistory[0..6] = Values.None`, come
+  la fonte.
+- **Correction history**: tutte e 5 le tabelle presenti, formula e costanti identiche.
+
+### Stato dei nodi dopo tutto questo
+
+`bench 16 1 13`: **2.515.241** nodi contro i **2.497.913** dell'oracolo = **1,007x**. Le correzioni
+di fedelta' hanno fatto SALIRE il conteggio (da 2.135.982) — il "vantaggio" precedente veniva dalle
+divergenze stesse, che ci facevano potare piu' del dovuto.
+
+**Cosa resta non spiegato**: la divergenza di punteggio a profondita' medie su alcune posizioni
+(finale di pedoni ancora a d5) e le tempeste di fail-low che ne conseguono. Non e' riconducibile a
+una tecnica mancante fra quelle verificate. Il gap piu' grosso rimasto nel porting e'
+`nnue_accumulator.cpp` (953 righe contro le nostre 411: Finny Tables e aggiornamento ibrido), ma
+sono ottimizzazioni di velocita' che producono gli STESSI valori, quindi non possono spiegare una
+divergenza di punteggio.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:
