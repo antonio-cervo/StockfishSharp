@@ -1986,6 +1986,22 @@ public sealed class Search
         if (isPvNode && tbMaxValueCap.HasValue)
             value = Math.Min(value, tbMaxValueCap.Value);
 
+        // search.cpp:1614-1617 — MAI PORTATO fino al 2026-09-07: "If no good move is found and the
+        // previous position was ttPv, then the previous opponent move is probably good and the new
+        // position is added to the search tree." Se nessuna mossa ha superato alpha, il nodo eredita
+        // il flag ttPv dal ply precedente. Non e' cosmetico: quel flag finisce nella entry di TT
+        // (Step 24) e da li' governa la riduzione LMR di chiunque ritrovi questa posizione
+        // (Step 18, "if (ttPv) r -= 3023 + ...", oltre tre ply di riduzione in meno).
+        //
+        // La condizione e' falsa solo nei nodi che falliscono alto: in Step 22 il ramo "value >=
+        // beta" esce con break PRIMA di aggiornare alpha, mentre in ogni altro caso alpha finisce
+        // uguale a value.
+        if (value <= alpha)
+        {
+            ttPv = ttPv || _ttPvHistory[ply + StackOffset - 1];
+            _ttPvHistory[ply + StackOffset] = ttPv;
+        }
+
         // search.cpp:1629-1638: aggiorna la correction history solo se la mossa migliore non è una
         // cattura e la direzione dell'errore (bestValue sopra/sotto la valutazione statica)
         // combacia con l'esito (una bestMove trovata o un fail-low puro).
