@@ -1185,6 +1185,33 @@ dell'orologio. Soglia volutamente generosa: intercetta una regressione catastrof
 divora l'orologio, come accadeva prima), non tara i margini. Copre insieme i tre meccanismi
 corretti: budget limitato, scadenza a meta' iterazione, tetto assoluto.
 
+### Verifica del tempo a 2 e 8 thread (2026-09-07)
+
+Richiesta dall'utente prima di passare al lavoro algoritmico: le mitigazioni sul tempo reggono anche
+in multi-thread? Il dubbio era legittimo, perche' il multi-thread tocca proprio il termine che
+gonfiava il budget (`bestMoveChanges` viene letto e mediato su tutti i thread del pool) e la
+scadenza morbida la imposta solo il thread principale.
+
+Prima misura (stress test con `ucinewgame` prima di OGNI posizione): 1 thread 53,1%, 2 thread 54,0%,
+8 thread 58,7% — sembrava un degrado progressivo. **Era un artefatto del banco di prova**: misurato
+a parte, il sovraccarico vero per RICERCA del multi-thread e' di soli **~27ms** (misurato con
+`movetime` fisso, mediana di 6 ripetizioni, posizione fuori libro), mentre `ucinewgame` costa
+**~250ms in piu' con 8 thread**, perche' `NewGame()` azzera le tabelle history di OGNI thread del
+pool. In una partita vera `ucinewgame` arriva una volta sola, non a ogni mossa.
+
+Rifatta la prova in condizioni realistiche (`ucinewgame` una volta sola) sugli scenari di orologio
+critici (15s / 5s / 2s / blitz a 20s):
+
+| Thread | Peggior caso su una mossa |
+|---|---|
+| 1 | 53,6% |
+| 2 | 53,2% |
+| 8 | 54,3% |
+
+**Il numero di thread non incide sulla sicurezza del tempo.** Resta valida la scelta di
+`Threads: 1` sul bot, ma per l'altra ragione gia' misurata (il Lazy SMP non migliora il
+tempo-per-profondita'), non per motivi di gestione del tempo.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:
