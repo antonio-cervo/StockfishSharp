@@ -299,6 +299,13 @@ public sealed class Search
     // (search.cpp:822, "ss->ttPv = excludedMove ? ss->ttPv : ...").
     private readonly bool[] _ttPvHistory = new bool[Ply.MaxPly + StackOffset + 1];
 
+    /// <summary>Contatore di INVOCAZIONI (non di nodi): serve solo a scandire ogni 2048 chiamate i
+    /// controlli di cancellazione/scadenza, ruolo che prima svolgeva <c>_nodes</c>. Separato da
+    /// quando <c>_nodes</c> e' diventato fedele alla fonte (conta le mosse giocate): il contatore
+    /// di controllo deve avanzare anche nei nodi che ritornano senza giocare nulla, altrimenti la
+    /// ricerca potrebbe restare a lungo senza verificare il tempo.</summary>
+    private long _visits;
+
     // Stack::statScore/moveCount della fonte — per il bonus "countermove" di Step 23
     // (search.cpp:1578-1601), che legge (ss-1)->statScore e (ss-1)->moveCount.
     private readonly int[] _statScoreHistory = new int[Ply.MaxPly + StackOffset + 1];
@@ -656,6 +663,7 @@ public sealed class Search
         cts.CancelAfter(timeLimit);
         _ct = cts.Token;
         _nodes = 0;
+        _visits = 0;
         _tbHits = 0;
         _stopOnPonderhit = false; // ThreadPool::start_thinking, thread.cpp:304
         _nmpMinPly = 0;           // Worker::clear, search.cpp:696
@@ -990,8 +998,7 @@ public sealed class Search
 
     private int Negamax(Position pos, int depth, int ply, int alpha, int beta, bool cutNode, Move excludedMove = default)
     {
-        _nodes++;
-        if ((_nodes & 2047) == 0)
+        if ((++_visits & 2047) == 0)
         {
             _ct.ThrowIfCancellationRequested();
 
@@ -1431,6 +1438,15 @@ public sealed class Search
 
                     var pcFrame = _accumulatorStack.Push();
                     var pcSt = _stateInfoPool[ply];
+                    // search.cpp:658 — la fonte incrementa il contatore nodi in UN SOLO punto, dentro
+                    // "Search::Worker::do_move": conta le MOSSE GIOCATE, non le invocazioni di search().
+                    // Fino al 2026-09-07 questo porting faceva "_nodes++" in cima a Negamax E a Quiesce,
+                    // quindi contava: ogni invocazione invece di ogni mossa (un nodo a depth<=0 che passa
+                    // subito in quiescenza veniva contato DUE volte), il nodo radice (che la fonte non
+                    // conta), e i figli del null move (che la fonte non conta: do_null_move non tocca il
+                    // contatore). Il risultato era un conteggio gonfiato, che rendeva NON confrontabili
+                    // tutti i numeri di nodi misurati contro l'oracolo.
+                    _nodes++;
                     pos.DoMove(pcMove, pcSt, pos.GivesCheck(pcMove), pcFrame.DirtyThreats, pcFrame.DirtyPiece, pcFrame.DirtyPawnPairs);
 
                     int pcValue = -Quiesce(pos, -probCutBeta, -probCutBeta + 1, ply + 1, isPvNode: false); // search.cpp:1077
@@ -1647,6 +1663,15 @@ public sealed class Search
 
             var frame = _accumulatorStack.Push();
             var st = _stateInfoPool[ply];
+            // search.cpp:658 — la fonte incrementa il contatore nodi in UN SOLO punto, dentro
+            // "Search::Worker::do_move": conta le MOSSE GIOCATE, non le invocazioni di search().
+            // Fino al 2026-09-07 questo porting faceva "_nodes++" in cima a Negamax E a Quiesce,
+            // quindi contava: ogni invocazione invece di ogni mossa (un nodo a depth<=0 che passa
+            // subito in quiescenza veniva contato DUE volte), il nodo radice (che la fonte non
+            // conta), e i figli del null move (che la fonte non conta: do_null_move non tocca il
+            // contatore). Il risultato era un conteggio gonfiato, che rendeva NON confrontabili
+            // tutti i numeri di nodi misurati contro l'oracolo.
+            _nodes++;
             pos.DoMove(m, st, givesCheck, frame.DirtyThreats, frame.DirtyPiece, frame.DirtyPawnPairs);
 
             // Step 18 (continua dopo aver fatto la mossa), search.cpp:1316-1359.
@@ -1959,8 +1984,7 @@ public sealed class Search
     /// trasposizione: il buco piu' costoso rimasto rispetto all'oracolo.</summary>
     private int Quiesce(Position pos, int alpha, int beta, int ply, bool isPvNode)
     {
-        _nodes++;
-        if ((_nodes & 2047) == 0)
+        if ((++_visits & 2047) == 0)
         {
             _ct.ThrowIfCancellationRequested();
             double soft = _softDeadlineMs;
@@ -2112,6 +2136,15 @@ public sealed class Search
 
             var qFrame = _accumulatorStack.Push();
             var st = _stateInfoPool[ply];
+            // search.cpp:658 — la fonte incrementa il contatore nodi in UN SOLO punto, dentro
+            // "Search::Worker::do_move": conta le MOSSE GIOCATE, non le invocazioni di search().
+            // Fino al 2026-09-07 questo porting faceva "_nodes++" in cima a Negamax E a Quiesce,
+            // quindi contava: ogni invocazione invece di ogni mossa (un nodo a depth<=0 che passa
+            // subito in quiescenza veniva contato DUE volte), il nodo radice (che la fonte non
+            // conta), e i figli del null move (che la fonte non conta: do_null_move non tocca il
+            // contatore). Il risultato era un conteggio gonfiato, che rendeva NON confrontabili
+            // tutti i numeri di nodi misurati contro l'oracolo.
+            _nodes++;
             pos.DoMove(m, st, givesCheck, qFrame.DirtyThreats, qFrame.DirtyPiece, qFrame.DirtyPawnPairs);
             int score = -Quiesce(pos, -beta, -alpha, ply + 1, isPvNode);
             pos.UndoMove(m);

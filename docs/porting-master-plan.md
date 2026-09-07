@@ -1468,6 +1468,57 @@ conclusioni sulla qualita' della ricerca. Erano conclusioni costruite su un conf
 DIVERSE. Quando due motori divergono di un fattore quasi costante su molte posizioni, sospettare
 prima le unita' di misura e solo dopo l'algoritmo.
 
+## Terza divergenza della stessa famiglia: il CONTEGGIO DEI NODI (2026-09-07 sera)
+
+L'utente ha insistito sul principio: "anche il fail-low puo' essere solo una divergenza nel
+porting". Applicandolo, cercando l'origine delle tempeste di fail-low, e' emerso che a profondita' 1
+sulla stessa posizione facevamo 34 "nodi" contro i 17 dell'oracolo — con punteggio IDENTICO. Il
+doppio esatto.
+
+**La fonte incrementa il contatore in UN SOLO punto**, dentro `Search::Worker::do_move`
+(search.cpp:658): conta le **mosse giocate**, non le invocazioni di `search()`. Questo porting
+faceva `_nodes++` in cima a `Negamax` E a `Quiesce`, quindi contava tre cose in piu':
+- ogni invocazione invece di ogni mossa (un nodo a `depth<=0` che passa subito in quiescenza veniva
+  contato DUE volte);
+- il nodo radice, che la fonte non conta;
+- i figli del **null move**, che la fonte non conta affatto (`do_null_move` non tocca il contatore).
+
+Non era solo cosmetico: `info nodes`/`nps` pubblicati alla GUI erano gonfiati, e sia `value_draw()`
+sia `inc` dello Step 22 LEGGONO il contatore, quindi anche il comportamento della ricerca era
+leggermente diverso da quello della fonte. Aggiunto un contatore separato `_visits` per la sola
+cadenza dei controlli di tempo/cancellazione (ogni 2048 invocazioni), ruolo che prima svolgeva
+`_nodes`.
+
+**Verifica**: a profondita' 1 e 2 il conteggio ora combacia ESATTAMENTE con l'oracolo (17 e 34 nodi).
+
+### Il quadro corretto, dopo le tre divergenze
+
+Tutte le misure di nodi contro l'oracolo fatte prima di questa correzione erano fra grandezze
+diverse. Rifatte:
+
+| | nostro | oracolo | rapporto |
+|---|---|---|---|
+| nodi `bench 16 1 13` | **2.135.982** | 2.497.913 | **0,86x** |
+| tempo | 6.078 ms | 1.561 ms | 3,89x |
+| nodi/secondo | 351.428 | 1.600.200 | 4,55x |
+
+Cioe': l'albero che esploriamo e' ora **piu' piccolo del 14%** di quello di Stockfish vero a parita'
+di profondita' — non "parita' di nodi" come riportato prima. Tutto il divario residuo e' velocita'
+grezza, C# contro C++.
+
+**Resta aperto** il comportamento nei finali: sul finale di pedoni `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8`
+i punteggi combaciano ESATTAMENTE fino a profondita' 4 (143, 143, 33/34, 124 in unita' normalizzate)
+e divergono da 5 in poi, con tempeste di fail-low a profondita' 13-14 (otto ri-ricerche consecutive,
+437.000 nodi per una sola iterazione). La meccanica dell'aspiration window e la formula della media
+mobile che centra la finestra sono state verificate fedeli riga per riga; la causa a monte della
+divergenza a profondita' 5 non e' ancora isolata.
+
+**Lezione, ormai tre volte in una sera**: quando i due motori divergono di un fattore quasi costante
+o di un multiplo intero pulito, sospettare le CONVENZIONI (unita' di misura, semantica di un
+contatore, dimensione di una struttura) prima dell'algoritmo. Tre divergenze trovate cosi' nella
+stessa sessione: dimensione del cluster TT, normalizzazione del punteggio UCI, semantica del
+contatore nodi.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:
