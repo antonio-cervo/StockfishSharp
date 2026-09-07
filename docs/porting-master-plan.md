@@ -1152,6 +1152,39 @@ tempo da 29,31s a 27,76s. Rapporto nodi contro l'oracolo da **4,89x a 4,40x**.
 ecc.) sono l'impronta digitale affidabile del codice segnaposto mai riconciliato con la fonte —
 `grep "private const"` è un buon punto di partenza per trovarne altri.
 
+## Gestione del tempo: verifica sistematica contro l'oracolo (2026-09-07)
+
+Chiusura dell'indagine sul tempo, con la domanda posta bene: non "una partita e' andata male", ma
+"quanto consumiamo dell'orologio residuo, in tutte le situazioni?". Banco di prova: 4 posizioni
+(apertura, tattica, finale, complessa) x 8 stati di orologio (da 600s pieno fino a 2s disperato,
+rapid e blitz), stessa identica prova eseguita su ENTRAMBI i motori.
+
+**Risultato**: siamo ora piu' prudenti della fonte.
+
+| | StockfishSharp | Stockfish 19 |
+|---|---|---|
+| Peggiore assoluto (una mossa) | **53,1%** dell'orologio | **81,0%** |
+| rapid a corto (60s), posizione complessa | 31,7% | 81,0% |
+| crisi (15s), apertura | 52,9% | 80,9% |
+| blitz a corto (20s), apertura | 36,9% | 80,9% |
+
+L'80% dell'oracolo non e' un'anomalia: e' esattamente il suo tetto di progetto
+(`0,8097 * orologio residuo`, timeman.cpp). Quindi la formula portata non era il problema — il
+problema erano i moltiplicatori che la spingevano verso quel tetto molto piu' spesso di quanto
+accada alla fonte (la nostra ricerca cambia idea piu' spesso), piu' l'impossibilita' di fermare
+un'iterazione gia' avviata. Entrambi corretti (vedi la sezione precedente).
+
+Nota: restare piu' prudenti della fonte e' la scelta giusta PER NOI, non un difetto — la fonte puo'
+permettersi l'80% perche' a quel punto ha gia' cercato a fondo; noi, con ~4,4x nodi in piu' per
+profondita', arriviamo meno lontano nello stesso tempo e abbiamo piu' da perdere da una singola
+mossa lunga.
+
+**Reso permanente**: nuovo test `RealSearchNeverEatsADangerousShareOfTheClock` (3 posizioni, orologio
+di 3 secondi, ricerca VERA non solo la formula) che fallisce se una mossa consuma piu' del 60%
+dell'orologio. Soglia volutamente generosa: intercetta una regressione catastrofica (una mossa che
+divora l'orologio, come accadeva prima), non tara i margini. Copre insieme i tre meccanismi
+corretti: budget limitato, scadenza a meta' iterazione, tetto assoluto.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:
