@@ -1026,6 +1026,89 @@ stessa identica posizione volatile della partita dal vivo (avrebbe richiesto fer
 metà di una partita che stava vincendo) — la correttezza qui è verificata per costruzione/
 equivalenza matematica con la fonte, non per confronto diretto di nodi come altrove nel progetto.
 
+## Indagine sull'efficienza contro l'oracolo (2026-09-07) — dove va davvero il tempo
+
+Richiesta esplicita dell'utente ("da fuori percepisco che il compilato C# sia quasi 100 volte più
+inefficiente di quello C++"). Misurato con `bench 16 1 13` — stesse 51 posizioni, stessa
+profondità, 1 thread, 16MB hash su entrambi i motori.
+
+**Il divario si scompone in due fattori indipendenti**, ed è importante non confonderli:
+
+| | Nodi | Tempo | Nodi/sec |
+|---|---|---|---|
+| Stockfish 19 (C++) | 2.497.913 | 1,56s | 1.599.176 |
+| StockfishSharp, PRIMA | 12.226.331 | 46,12s | 265.109 |
+| StockfishSharp, DOPO | 12.226.331 | 29,31s | 417.181 |
+
+Totale prima: **29,5x** = **4,9x più nodi** (potatura/ordinamento, questione algoritmica) ×
+**6,0x più lento per nodo** (implementazione). Dopo il lavoro sotto: **18,8x** = 4,9x × **3,8x**.
+
+### Cosa NON era il problema (misurato, non ipotizzato)
+
+- **SIMD**: tutto attivo e verificato a runtime (`Avx512F/BW/DQ/Vbmi`, BMI2, POPCNT disponibili;
+  `NnueAccumulator.UsingAvx512`, `NnueLayers.UsingAvx512`, `Attacks.UsingAvx2` tutti veri).
+- **Scacchiera/movegen/do-undo**: `perft(5)` sulla stessa posizione — 74,6M nodi/sec contro
+  131,2M dell'oracolo, cioè solo **1,76x**, un rapporto C#/C++ del tutto normale. Entrambi i
+  perft usano bulk counting all'ultimo ply, quindi il confronto è equo.
+- **Allocazioni**: erano reali e vistose (**5.771 byte/nodo**, 163 GC gen0 al secondo) e sono
+  state ridotte a 3.715 byte/nodo portando i buffer del forward pass NNUE sullo stack — ma il
+  guadagno di velocità è stato del **2%, dentro il rumore**. Ipotesi plausibile, misurata e
+  smentita: il GC gen0 di .NET è già molto economico per oggetti a vita brevissima. Restano da
+  convertire `new StateInfo()` per mossa (360 byte in 6 allocazioni, perché i 5 campi array di una
+  classe C# sono oggetti separati mentre in C++ sono inline nella struct) e i due `new List<Move>()`
+  per nodo: corretti da fare, ma l'evidenza dice che valgono pochi punti percentuali.
+
+### Cosa ERA il problema: fc_0 portato dal ramo di fallback non-SIMD
+
+Misurato che la valutazione NNUE era **~92% del tempo per nodo**, e dentro di essa dominava il
+layer fc_0 (1024→32). Causa: per fc_0 la fonte usa `AffineTransformSparseInput`, mentre qui era
+stato portato `affine_transform_non_ssse3`, cioè **il ramo di fallback per macchine senza SIMD**,
+che elabora tutti i 1024 input. Misurato sui dati veri: **il 76,6% degli input di fc_0 è ZERO**
+(media su 5 posizioni, dall'apertura al finale) — si faceva ~4x il lavoro necessario sul layer più
+costoso del motore.
+
+La scelta di non portare la versione sparsa era stata presa in una sessione precedente per evitare
+due "bit-trick" giudicati troppo rischiosi da verificare a mano (la permutazione dei pesi e il
+prodotto scalare `VPDPBUSD`). L'utente ha giustamente contestato quella prudenza: contraddiceva la
+policy [[feedback-porting-completeness-over-stability]], e il progetto ha già l'attrezzo che rende
+sicuro affrontarli — i test bit-esatti scalare-contro-SIMD su dati casuali.
+
+**Portato fedelmente (2026-09-07)**:
+- `NnueLayerStack.BuildFc0ScrambledWeights` — `get_weight_index_scrambled`
+  (affine_transform_sparse_input.h:79-82) con `ChunkSize=4`. Sostituendo l'indice del file
+  (`j*L1 + inIdx`) nella formula della fonte si semplifica in `(inIdx/4)*(L2*4) + j*4 + inIdx%4`:
+  256 blocchi da 128 byte, uno per gruppo di 4 input consecutivi, esattamente due `Vector512` per
+  blocco. Applicata una volta al caricamento della rete (la fonte la applica mentre legge i pesi;
+  qui si legge prima nel layout naturale, che serve comunque allo scalare e ai test).
+- `NnueLayers.AffineTransformFc0SparseAvx512` — il ciclo di
+  affine_transform_sparse_input.h:236-243: input letto come 256 chunk da 4 byte, chunk nulli
+  saltati, chunk non nullo replicato su 16 corsie (`vec_set_32`) e moltiplicato per i due
+  `Vector512` di pesi del blocco.
+- `vec_add_dpbusd_32` nella variante **senza VNNI** che la fonte stessa ha in `simd.h`
+  (`maddubs_epi16` + `madd_epi16` + somma), esposta da .NET come
+  `Avx512BW.MultiplyAddAdjacent` — `Avx512Vnni` non esiste in .NET 10, ma questo è un percorso
+  legittimo della fonte, non un ripiego nostro. La saturazione a i16 di `maddubs` non può
+  avvenire: gli input sono 0..127 e i pesi -128..127, la somma di due prodotti adiacenti sta
+  sempre entro 32767 — è il motivo per cui la fonte si permette entrambe le varianti.
+
+**Misurato con metodologia identica sulle due implementazioni** (50.000 iterazioni di warmup,
+migliore di 5 ripetizioni da 300.000 — una prima misura con warmup insufficiente aveva gonfiato
+i valori assoluti, corretta): fc_0 da **2,210 µs a 0,119 µs = 18,5x**. Più del 4,3x della sola
+sparsità perché il guadagno è doppio: si saltano i tre quarti degli input E si usa il prodotto
+scalare u8×i8 invece di dodici `Widen` a int32.
+
+**Verificato**: 110/110 test (nuovo `Fc0SparseMatchesScalarBitExactOnRandomInputs`: 30 prove con
+sparsità realistica al 77% più i casi limite "tutto zero" e "nessuno zero", confronto bit-esatto
+contro il percorso scalare che non salta nulla); i test NNUE preesistenti contro l'oracolo reale
+continuano a passare; `bench 16 1 13` con **nodi IDENTICI** (12.226.331) e tempo da 46,19s a
+29,31s — **il motore intero è 1,57x più veloce senza cambiare un solo bit di ciò che calcola**.
+
+**Cosa resta sul lato velocità**: il 3,8x per nodo ancora presente non è più dominato da un
+singolo punto noto; i candidati successivi sono le allocazioni residue (StateInfo/List, poche
+percentuali), l'accumulatore incrementale senza Finny Tables/hybrid update (già annotato in Flow
+B) e il codegen JIT contro nativo, che è incomprimibile. Il fattore **4,9x sui nodi** resta la
+metà più grande del divario ed è lavoro algoritmico, non di implementazione.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:

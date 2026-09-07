@@ -18,6 +18,12 @@ public sealed class NnueLayerStack
     public int[] Fc0Biases = new int[L2];
     public sbyte[] Fc0Weights = new sbyte[L2 * L1]; // [output * InputDim + input]
 
+    /// <summary>Gli stessi pesi di <see cref="Fc0Weights"/> nel layout permutato richiesto da
+    /// <c>AffineTransformSparseInput</c> (vedi <c>BuildFc0ScrambledWeights</c>): 256 blocchi da
+    /// L2*4 byte, uno per ogni gruppo di 4 input consecutivi. Usato dal percorso sparso in
+    /// <see cref="NnueLayers.AffineTransformFc0SparseAvx512"/>.</summary>
+    public sbyte[] Fc0WeightsScrambled = new sbyte[L2 * L1];
+
     // fc_1: (L2*2=64) -> L3(32).
     public int[] Fc1Biases = new int[L3];
     public sbyte[] Fc1Weights = new sbyte[L3 * (L2 * 2)];
@@ -39,9 +45,30 @@ public sealed class NnueLayerStack
             throw new InvalidDataException($"Hash del layer stack non combacia: atteso 0x{HashValue:X8}, trovato 0x{header:X8}.");
 
         ReadAffine(r, Fc0Biases, Fc0Weights, L2, L1);
+        BuildFc0ScrambledWeights();
         // ac_sqr_0 e ac_0 non hanno parametri (attivazioni pure) — nessuna lettura.
         ReadAffine(r, Fc1Biases, Fc1Weights, L3, L2 * 2);
         ReadAffine(r, Fc2Biases, Fc2Weights, 1, L2 * 2 + L3 * 2);
+    }
+
+    /// <summary><c>AffineTransformSparseInput::get_weight_index_scrambled</c>,
+    /// affine_transform_sparse_input.h:79-82, con <c>ChunkSize=4</c> (il valore della fonte su
+    /// qualunque hardware SIMD). La fonte applica questa permutazione mentre LEGGE i pesi
+    /// (<c>read_parameters</c>); qui si legge prima nel layout naturale (che serve comunque al
+    /// percorso scalare e ai test di verifica) e si costruisce subito dopo la copia permutata —
+    /// stesso risultato, una volta sola al caricamento della rete.
+    ///
+    /// Sostituendo <c>i = j*L1 + inIdx</c> (l'ordine del file, output-major) nella formula della
+    /// fonte, con PaddedInputDimensions=L1=1024 e OutputDimensions=L2=32, si semplifica in:
+    /// <c>(inIdx/4)*(L2*4) + j*4 + inIdx%4</c> — cioè 256 blocchi (uno per gruppo di 4 input
+    /// consecutivi) da L2*4=128 byte ciascuno, esattamente due <c>Vector512</c> per blocco, con i
+    /// 4 pesi di ogni output adiacenti: il layout che serve al prodotto scalare u8xi8.</summary>
+    private void BuildFc0ScrambledWeights()
+    {
+        for (int j = 0; j < L2; j++)
+            for (int inIdx = 0; inIdx < L1; inIdx++)
+                Fc0WeightsScrambled[(inIdx / 4 * (L2 * 4)) + (j * 4) + (inIdx % 4)] =
+                    Fc0Weights[(j * L1) + inIdx];
     }
 
     private static void ReadAffine(BinaryReader r, int[] biases, sbyte[] weights, int outDim, int inDim)

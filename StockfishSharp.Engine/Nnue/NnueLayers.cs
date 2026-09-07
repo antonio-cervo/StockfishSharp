@@ -161,6 +161,58 @@ public static class NnueLayers
         }
     }
 
+    /// <summary><c>AffineTransformSparseInput::propagate</c>,
+    /// affine_transform_sparse_input.h:121-260 — il layer fc_0 (1024-&gt;32), l'unico dei tre che
+    /// nella fonte usa la versione a input SPARSO. Fino al 2026-09-07 qui si usava invece
+    /// <c>affine_transform_non_ssse3</c>, cioè il ramo di fallback per macchine SENZA SIMD, che
+    /// elabora tutti i 1024 input: misurato che il 76,6% di essi è ZERO (l'uscita del ClippedReLU
+    /// del feature transformer è quasi tutta nulla), quindi si faceva ~4x il lavoro necessario sul
+    /// layer che da solo domina il costo dell'intero motore.
+    ///
+    /// Algoritmo della fonte, invariato: l'input si legge come 256 "chunk" da 4 byte (i32); i
+    /// chunk nulli si saltano; per ogni chunk non nullo si moltiplica il chunk (replicato su tutte
+    /// e 16 le corsie i32) per i 128 byte di pesi di quel chunk (due <c>Vector512</c> che coprono
+    /// tutti e 32 gli output, 4 pesi per output — vedi il layout permutato in
+    /// <c>NnueLayerStack.BuildFc0ScrambledWeights</c>).
+    ///
+    /// <c>vec_add_dpbusd_32</c> è qui la variante SENZA VNNI che la fonte stessa usa quando
+    /// <c>USE_VNNI</c> non è definito (<c>m512_add_dpbusd_epi32</c>, simd.h):
+    /// <c>madd_epi16(maddubs_epi16(a,b), 1)</c>. Non è un ripiego: <c>Avx512Vnni</c> non è esposto
+    /// da .NET 10 (vedi docs/porting-master-plan.md), ma questo è un percorso legittimo della
+    /// fonte, non una nostra invenzione. La saturazione a i16 di <c>maddubs</c> non può avvenire
+    /// qui: gli input sono 0..127 (uscita del transform, <c>(sum0*sum1)/512</c> con sum&lt;=255) e
+    /// i pesi -128..127, quindi la somma di due prodotti adiacenti sta sempre entro 32767 — è
+    /// esattamente il motivo per cui la fonte si permette entrambe le varianti.</summary>
+    public static void AffineTransformFc0SparseAvx512(ReadOnlySpan<byte> input, sbyte[] scrambledWeights, int[] biases, Span<int> output)
+    {
+        // 32 output = due Vector512<int> da 16 corsie (NumAccums = OutputDimensions/OutputSimdWidth).
+        var acc0 = Vector512.LoadUnsafe(ref biases[0]);
+        var acc1 = Vector512.LoadUnsafe(ref biases[Vector512<int>.Count]);
+        var ones = Vector512.Create((short)1);
+
+        ReadOnlySpan<int> chunks = MemoryMarshal.Cast<byte, int>(input);
+        ref sbyte wRef = ref scrambledWeights[0];
+
+        for (int c = 0; c < chunks.Length; c++)
+        {
+            int chunk = chunks[c];
+            if (chunk == 0) continue; // il "find_nnz" della fonte, in forma diretta
+
+            var inVec = Vector512.Create(chunk).AsByte(); // vec_set_32: i 4 byte replicati su 16 corsie
+            nuint wBase = (nuint)(c * (L2 * 4));
+
+            var w0 = Vector512.LoadUnsafe(ref wRef, wBase);
+            var w1 = Vector512.LoadUnsafe(ref wRef, wBase + 64);
+
+            acc0 += Avx512BW.MultiplyAddAdjacent(Avx512BW.MultiplyAddAdjacent(inVec, w0), ones);
+            acc1 += Avx512BW.MultiplyAddAdjacent(Avx512BW.MultiplyAddAdjacent(inVec, w1), ones);
+        }
+
+        ref int outRef = ref MemoryMarshal.GetReference(output);
+        acc0.StoreUnsafe(ref outRef);
+        acc1.StoreUnsafe(ref outRef, (nuint)Vector512<int>.Count);
+    }
+
     /// <summary><c>ClippedReLU::propagate</c>, ramo scalare, clipped_relu.h:167-171.</summary>
     public static void ClippedRelu(ReadOnlySpan<int> input, int weightScaleBitsLocal, Span<byte> output)
     {
@@ -196,7 +248,13 @@ public static class NnueLayers
         Span<byte> concat2 = stackalloc byte[(L2 * 2) + (L3 * 2)];
         Span<int> fc2Out = stackalloc int[1];
 
-        AffineTransform(transformedFeatures, stack.Fc0Weights, stack.Fc0Biases, L1, L2, fc0Out);
+        // fc_0 è l'unico dei tre layer che nella fonte usa AffineTransformSparseInput (gli altri
+        // due, molto più piccoli, usano AffineTransform normale) — vedi il commento lì.
+        if (UsingAvx512)
+            AffineTransformFc0SparseAvx512(transformedFeatures, stack.Fc0WeightsScrambled, stack.Fc0Biases, fc0Out);
+        else
+            AffineTransform(transformedFeatures, stack.Fc0Weights, stack.Fc0Biases, L1, L2, fc0Out);
+
         SqrClippedRelu(fc0Out, NnueCommon.WeightScaleBits + 1, sqr0);
         ClippedRelu(fc0Out, NnueCommon.WeightScaleBits + 1, clip0);
 
