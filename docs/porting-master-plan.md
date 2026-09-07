@@ -306,12 +306,47 @@ col motore di perft già validato contro i valori pubblicati. 95/95 test totali 
 nuovi); verificato a mano via UCI: `d`/`eval`/`flip`/`compiler`/`go perft 4` tutti corretti in
 sequenza sulla stessa sessione.
 
-**Manca ancora** (A4, meno urgente — completezza di protocollo, non forza di gioco):
-infrastruttura opzioni generica (`Option`/`OptionsMap`), `setoption` completo oltre a
-`Hash`/`UCI_Chess960`, `MultiPV`, `UCI_LimitStrength`/`UCI_Elo`, `UCI_ShowWDL`, conversione
-punteggi WDL, `Skill Level`, `export_net`, `speedtest` (`setup_benchmark`, benchmark.cpp:449-528,
-un secondo comando di benchmark su partite reali per lo SPRT — non essenziale, lista
-`BenchmarkPositions` enorme non copiata), `ponder`/`ponderhit` (pondering vero).
+**Infrastruttura opzioni generica FATTA (2026-09-07)**: `StockfishSharp.Uci/OptionsMap.cs`
+(scritto in una sessione precedente, mai collegato — completato ora) porta fedelmente
+`class Option`/`class OptionsMap` (ucioption.h:39-103 + ucioption.cpp:41-212): tipo/min/max/
+on_change, ordine di stampa per indice di inserimento (`Idx`, non l'ordine alfabetico del
+dizionario). `Program.cs` registra ora le 18 opzioni reali di `Engine::Engine`
+(engine.cpp:69-139) nello stesso ordine di inserimento — verificato byte per byte contro
+l'oracolo (`uci` produce lo stesso identico elenco, comprese le righe senza `default` per i
+bottoni). `HandleSetOption` sostituisce la catena if/else ad-hoc con l'algoritmo esatto di
+`OptionsMap::setoption` (nome multi-parola letto token per token fino a "value", "value" mai
+verificato letteralmente, valore opzionale per i bottoni) — corretto anche un buco pre-esistente:
+prima "setoption name Clear Hash" (nessun token "value") veniva scartato silenziosamente perché
+l'handler richiedeva sempre un indice "value" trovato.
+
+Wired con on_change reale (comportamento verificato, non solo dichiarato): `Threads`, `Hash`,
+`Clear Hash` (→ `Search.NewGame()`, che fonde già `tt.clear(threads)`+`threads.clear()` della
+fonte — vedi il commento lì), `Move Overhead` (NUOVO: prima hardcoded a 10 in `TimeManagement.Init`,
+mai letto da UCI — ora `moveOverhead` è una variabile aggiornata dall'opzione e passata davvero),
+`UCI_Chess960`, tutte e 4 le opzioni Syzygy, `EvalFile` (NUOVO: prima la rete NNUE si caricava solo
+all'avvio da un percorso hardcoded — ora ricaricabile a runtime, con messaggio di errore se il
+file non esiste invece di un crash).
+
+**Dichiarate per completezza di protocollo ma senza on_change (nessun effetto sul motore)**:
+`Debug Log File`/`NumaPolicy` (nessun analogo utile qui — non NUMA, non un logger dedicato),
+`Ponder` (nessun gestore `go ponder`/`ponderhit`, vedi nota sotto), `MultiPV` (resta a `_pvIdx=0`),
+`Skill Level`/`UCI_LimitStrength`/`UCI_Elo` (nessuna classe `Skill` portata), `UCI_ShowWDL`
+(nessuna conversione punteggio→WDL), `nodestime` (deliberatamente non portato, nota già in
+`TimeManagement.cs`). Ognuna commentata in `Program.cs` col motivo esatto, per non essere mai
+scambiata per "fatta" in futuro.
+
+Verificato: 109/109 test; `uci` confrontato byte per byte con l'oracolo (stesso ordine, stessi
+default/min/max, comprese le righe `type button` senza `default`); `setoption` a mano su bottone
+(`Clear Hash` senza value), spin (`Hash`/`Move Overhead`), check (`UCI_Chess960`), un nome con
+spazio inesistente (`No such option: Nonexistent Option`, formato esatto della fonte); `bench 16 1
+6` completo comprese le 2 posizioni Chess960 (il toggle `UCI_Chess960` dentro `HandleBench` passa
+ora per lo stesso `HandleSetOption`).
+
+**Manca ancora** (A4, meno urgente — completezza di funzionalità, non del protocollo): `MultiPV`
+vero (il ciclo `pvIdx`, search.cpp:360-503), `Skill`/`UCI_LimitStrength`/`UCI_Elo` veri (gioco
+indebolito), conversione punteggi WDL, `export_net`, `speedtest` (`setup_benchmark`,
+benchmark.cpp:449-528, un secondo comando di benchmark su partite reali per lo SPRT — non
+essenziale, lista `BenchmarkPositions` enorme non copiata), `ponder`/`ponderhit` (pondering vero).
 
 **Nota per quando si affronterà il pondering (osservazione dal vivo, 2026-09-06)**: in una
 partita reale del bot, l'avversario (bot Lichess) rispondeva quasi istantaneamente a ogni mossa

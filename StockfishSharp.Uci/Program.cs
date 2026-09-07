@@ -64,10 +64,143 @@ string syzygyPath = "";
 bool syzygy50MoveRule = true;
 int syzygyProbeDepth = 1;
 int syzygyProbeLimit = 7;
+long moveOverhead = 10; // timeman.cpp:67, options["Move Overhead"] — ora letto davvero da HandleGo.
 
 void UpdateSyzygyOptions() => search.SetSyzygyOptions(syzygy50MoveRule, syzygyProbeDepth, syzygyProbeLimit);
 UpdateSyzygyOptions();
 int maxDepth = 30;
+
+// Infrastruttura opzioni generica (ucioption.h/ucioption.cpp, porting fedele in OptionsMap.cs) —
+// sostituisce la catena if/else ad-hoc di prima di HandleSetOption. Registra le opzioni della
+// fonte reale (engine.cpp:69-139) nello stesso ordine (l'ordine di stampa di "uci" dipende
+// dall'ordine di inserimento, non dall'alfabeto). Ogni Option qui sotto ha un on_change VERO
+// (comportamento reale) tranne il blocco esplicitamente commentato più sotto — dichiarato ma
+// deliberatamente inerte, per completezza di protocollo senza promettere funzionalità che il
+// motore non ha ancora (Flow A4 "manca ancora", docs/porting-master-plan.md).
+// Stesso ordine di inserimento di engine.cpp:69-139 (l'ordine di stampa di "uci" dipende da Idx,
+// non dall'alfabeto — vedi OptionsMap.cs). Le voci senza on_change reale sono commentate una per
+// una più sotto, dove compaiono nell'ordine della fonte.
+// Una ricerca ("go") gira su un task in background invece che bloccare questo ciclo: un client
+// UCI reale (GUI o lichess-bot) può mandare "stop" mentre il motore sta ancora pensando e si
+// aspetta un "bestmove" pronto subito dopo — con una chiamata sincrona qui, "stop" non sarebbe mai
+// letto finché la ricerca non finisce da sola. Non un porting (Flow A4, uci.cpp non ancora
+// portato) — ingegneria pratica sul nostro layer UCI minimo, che già non è fedele. Dichiarate qui
+// (non più sotto vicino a StopSearch()) perché gli on_change di "Threads"/"Clear Hash" sotto le
+// catturano: in una sequenza di top-level statement una closure ha bisogno che la variabile locale
+// sia già assegnata testualmente PRIMA del punto in cui viene catturata.
+CancellationTokenSource? searchCts = null;
+Task? searchTask = null;
+
+var optionsMap = new OptionsMap();
+optionsMap.AddInfoListener(Console.WriteLine);
+
+// "Debug Log File"/"NumaPolicy" non hanno un analogo utile in questo porting (nessun logger
+// dedicato da avviare; NUMA è gestito da .NET stesso, non da questo codice) — dichiarate solo per
+// completezza dell'elenco stampato da "uci" (una GUI le riconosce come presenti), mai lette altrove.
+optionsMap.Add("Debug Log File", new Option(""));
+optionsMap.Add("NumaPolicy", new Option("auto"));
+
+// Default 8, non 1 come la fonte: scelta di deployment già presa (commit "UCI: default Threads 8
+// (era 1)") per un motore che gioca una partita alla volta — non cambiata qui.
+optionsMap.Add("Threads", new Option(8, 1, Environment.ProcessorCount, o =>
+{
+    StopSearch();
+    search.SetThreadCount((int)o);
+    search.NewGame();
+    return null;
+}));
+
+optionsMap.Add("Hash", new Option(16, 1, 4096, o =>
+{
+    search.Resize((int)o);
+    return null;
+}));
+
+optionsMap.Add("Clear Hash", new Option(_ =>
+{
+    // Engine::search_clear (engine.cpp:161-169): tt.clear(threads) + threads.clear() — la nostra
+    // Search.NewGame() fonde già entrambi gli effetti (vedi il commento lì, thread.cpp:272-278).
+    StopSearch();
+    search.NewGame();
+    return null;
+}));
+
+// Ponder: nessun gestore di "go ponder"/"ponderhit" in HandleGo/HandleStop (protocollo pondering
+// non implementato — vedi la nota 2026-09-06 sul piano generale). Dichiarata comunque (compare
+// nell'output di "uci" come la fonte) ma impostarla non ha alcun effetto: il motore non entra mai
+// nel ramo "mainThread->ponder" di search.cpp perché quel ramo non esiste in questo porting.
+optionsMap.Add("Ponder", new Option(false));
+
+// MultiPV: la ricerca resta a _pvIdx sempre 0 (RootMove/RootMoves nota, "manca ancora") —
+// impostare un valore >1 è accettato ma non produce PV multiple.
+optionsMap.Add("MultiPV", new Option(1, 1, 256));
+
+// Skill Level / UCI_LimitStrength / UCI_Elo: nessuna classe Skill portata, il motore gioca sempre
+// alla forza massima indipendentemente da questi valori.
+optionsMap.Add("Skill Level", new Option(20, 0, 20));
+
+optionsMap.Add("Move Overhead", new Option(10, 0, 5000, o =>
+{
+    moveOverhead = (int)o;
+    return null;
+}));
+
+// nodestime: deliberatamente non portato (TimeManagement.cs, nessuno lo usa in pratica qui).
+optionsMap.Add("nodestime", new Option(0, 0, 10000));
+
+optionsMap.Add("UCI_Chess960", new Option(false, o =>
+{
+    isChess960 = (bool)o;
+    return null;
+}));
+
+optionsMap.Add("UCI_LimitStrength", new Option(false));
+optionsMap.Add("UCI_Elo", new Option(1320, 1320, 3190));
+
+// UCI_ShowWDL: nessuna conversione punteggio→WDL portata.
+optionsMap.Add("UCI_ShowWDL", new Option(false));
+
+optionsMap.Add("SyzygyPath", new Option("", o =>
+{
+    syzygyPath = o.CurrentValue;
+    Tablebase.Init(syzygyPath); // Tablebases::init, chiamato ad ogni cambio di SyzygyPath
+    UpdateSyzygyOptions();
+    return null;
+}));
+
+optionsMap.Add("SyzygyProbeDepth", new Option(1, 1, 100, o =>
+{
+    syzygyProbeDepth = (int)o;
+    UpdateSyzygyOptions();
+    return null;
+}));
+
+optionsMap.Add("Syzygy50MoveRule", new Option(true, o =>
+{
+    syzygy50MoveRule = (bool)o;
+    UpdateSyzygyOptions();
+    return null;
+}));
+
+optionsMap.Add("SyzygyProbeLimit", new Option(7, 0, 7, o =>
+{
+    syzygyProbeLimit = (int)o;
+    UpdateSyzygyOptions();
+    return null;
+}));
+
+optionsMap.Add("EvalFile", new Option(DefaultNetworkPath, o =>
+{
+    try
+    {
+        Evaluate.NnueNetwork = StockfishSharp.Engine.Nnue.NnueNetwork.Load(o.CurrentValue);
+        return $"info string NNUE evaluation using {System.IO.Path.GetFileName(o.CurrentValue)}";
+    }
+    catch (Exception ex)
+    {
+        return $"info string failed to load NNUE network '{o.CurrentValue}': {ex.Message}";
+    }
+}));
 
 // Riscalda il tiered JIT di .NET prima che arrivi il primo "go" reale della partita — un problema
 // pratico assente nella fonte C++ (nessuna compilazione a runtime), scoperto misurando la gestione
@@ -94,14 +227,6 @@ _ = Task.Run(() =>
         // Riscaldamento best-effort: un fallimento qui non deve mai impedire l'avvio del motore.
     }
 });
-
-// Una ricerca ("go") gira su un task in background invece che bloccare questo ciclo: un client
-// UCI reale (GUI o lichess-bot) può mandare "stop" mentre il motore sta ancora pensando e si
-// aspetta un "bestmove" pronto subito dopo — con una chiamata sincrona qui, "stop" non sarebbe mai
-// letto finché la ricerca non finisce da sola. Non un porting (Flow A4, uci.cpp non ancora
-// portato) — ingegneria pratica sul nostro layer UCI minimo, che già non è fedele.
-CancellationTokenSource? searchCts = null;
-Task? searchTask = null;
 
 // Lista "Defaults" reale di benchmark.cpp:34-101 (51 posizioni + le tre righe "setoption name
 // UCI_Chess960" che le racchiudono) — copiata identica, incluse le mosse incorporate in alcune
@@ -185,13 +310,11 @@ while (Console.ReadLine() is { } line)
         case "uci":
             Console.WriteLine("id name StockfishSharp (porting in corso)");
             Console.WriteLine("id author Antonio Cervo, porting da Stockfish (GPLv3)");
-            Console.WriteLine("option name Hash type spin default 16 min 1 max 4096");
-            Console.WriteLine($"option name Threads type spin default 8 min 1 max {Environment.ProcessorCount}");
-            Console.WriteLine("option name UCI_Chess960 type check default false");
-            Console.WriteLine("option name SyzygyPath type string default <empty>");
-            Console.WriteLine("option name SyzygyProbeDepth type spin default 1 min 1 max 100");
-            Console.WriteLine("option name Syzygy50MoveRule type check default true");
-            Console.WriteLine("option name SyzygyProbeLimit type spin default 7 min 0 max 7");
+            // operator<<(ostream&, OptionsMap&), ucioption.cpp:187-212 — ogni voce comincia già
+            // con "\n" (verificato byte per byte contro l'oracolo: una riga vuota separa "id
+            // author" dalla prima opzione, poi un'opzione per riga).
+            Console.Write(optionsMap.ToString());
+            Console.WriteLine();
             Console.WriteLine("uciok");
             break;
 
@@ -266,48 +389,32 @@ while (Console.ReadLine() is { } line)
     }
 }
 
+// UCIEngine::setoption (uci.cpp:483-485) + OptionsMap::setoption (ucioption.cpp:43-60) — il primo
+// token dopo "setoption" viene consumato senza verificare che sia letteralmente "name" (la fonte
+// fa lo stesso: "is >> token; // Consume the "name" token", mai controllato). Il nome può
+// contenere spazi (letto token per token finché non incontra "value"); il valore è tutto il resto,
+// anch'esso può contenere spazi ed è opzionale — un bottone come "Clear Hash" non ne manda uno, e
+// l'algoritmo qui lo gestisce esattamente come la fonte (value resta vuoto). Sostituisce la
+// catena if/else ad-hoc di prima: ogni opzione applica ora il proprio on_change reale tramite
+// optionsMap (vedi la registrazione sopra).
 void HandleSetOption(string[] toks)
 {
-    int nameIdx = Array.IndexOf(toks, "name");
-    int valueIdx = Array.IndexOf(toks, "value");
-    if (nameIdx < 0 || valueIdx < 0 || valueIdx <= nameIdx) return;
+    if (toks.Length < 2) return;
 
-    string name = string.Join(' ', toks[(nameIdx + 1)..valueIdx]);
-    string value = string.Join(' ', toks[(valueIdx + 1)..]);
+    int i = 2; // toks[0]="setoption", toks[1] è il token "name" (scartato, come nella fonte)
+    string name = "";
+    while (i < toks.Length && toks[i] != "value")
+    {
+        name = name.Length == 0 ? toks[i] : $"{name} {toks[i]}";
+        i++;
+    }
+    i++; // salta il token "value" stesso, se presente
 
-    if (string.Equals(name, "Hash", StringComparison.OrdinalIgnoreCase) && int.TryParse(value, out int mb))
-        search.Resize(mb);
-    else if (string.Equals(name, "Threads", StringComparison.OrdinalIgnoreCase) && int.TryParse(value, out int threads))
-    {
-        // Ricrea il pool (C1, Lazy SMP) — mai durante una ricerca attiva per protocollo, ma
-        // StopSearch() per sicurezza in ogni caso.
-        StopSearch();
-        search.SetThreadCount(threads);
-        search.NewGame();
-    }
-    else if (string.Equals(name, "UCI_Chess960", StringComparison.OrdinalIgnoreCase) && bool.TryParse(value, out bool chess960))
-        isChess960 = chess960;
-    else if (string.Equals(name, "SyzygyPath", StringComparison.OrdinalIgnoreCase))
-    {
-        syzygyPath = value;
-        Tablebase.Init(syzygyPath); // Tablebases::init, chiamato ad ogni cambio di SyzygyPath
-        UpdateSyzygyOptions();
-    }
-    else if (string.Equals(name, "SyzygyProbeDepth", StringComparison.OrdinalIgnoreCase) && int.TryParse(value, out int probeDepth))
-    {
-        syzygyProbeDepth = probeDepth;
-        UpdateSyzygyOptions();
-    }
-    else if (string.Equals(name, "Syzygy50MoveRule", StringComparison.OrdinalIgnoreCase) && bool.TryParse(value, out bool rule50))
-    {
-        syzygy50MoveRule = rule50;
-        UpdateSyzygyOptions();
-    }
-    else if (string.Equals(name, "SyzygyProbeLimit", StringComparison.OrdinalIgnoreCase) && int.TryParse(value, out int probeLimit))
-    {
-        syzygyProbeLimit = probeLimit;
-        UpdateSyzygyOptions();
-    }
+    string value = "";
+    for (; i < toks.Length; i++)
+        value = value.Length == 0 ? toks[i] : $"{value} {toks[i]}";
+
+    optionsMap.SetOption(name, value);
 }
 
 void HandlePosition(string[] toks)
@@ -451,7 +558,7 @@ void HandleGo(string[] toks)
 
         if (myTime.HasValue)
         {
-            timeManagement.Init(myTime.Value, myInc, movesToGo, position.GamePly);
+            timeManagement.Init(myTime.Value, myInc, movesToGo, position.GamePly, moveOverhead);
             budget = TimeSpan.FromMilliseconds(timeManagement.MaximumTime);
             optimumMs = timeManagement.OptimumTime;
         }
