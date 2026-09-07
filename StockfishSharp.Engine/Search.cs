@@ -1379,8 +1379,32 @@ public sealed class Search
 
                 var nullSt = _stateInfoPool[ply];
                 pos.DoNullMove(nullSt);
+
+                // search.cpp:674-679 — "do_null_move" non si limita a fare la mossa nulla sulla
+                // scacchiera: azzera anche i campi dello Stack di QUESTO ply
+                // ("ss->currentMove = Move::null()" e le due continuation history puntate alle
+                // caselle NO_PIECE). MAI PORTATO fino al 2026-09-07: qui si faceva solo
+                // DoNullMove e si ricorreva, quindi il figlio del null move leggeva come "mossa
+                // che ha portato qui" quella lasciata da un fratello gia' cercato a questo stesso
+                // ply — dato stantio di un sottoalbero estraneo. Lo leggono: la continuation
+                // history del figlio, il bonus "differenza di valutazione statica" (Step 5), il
+                // bonus countermove su fail-low puro (Step 23) e la correction history.
+                Move savedNullMove = _currentMoveHistory[ply + StackOffset];
+                Piece savedNullPiece = _movedPieceHistory[ply + StackOffset];
+                bool savedNullInCheck = _inCheckHistory[ply + StackOffset];
+                bool savedNullCapture = _captureStageHistory[ply + StackOffset];
+                _currentMoveHistory[ply + StackOffset] = Move.None;
+                _movedPieceHistory[ply + StackOffset] = Piece.None;
+                _inCheckHistory[ply + StackOffset] = false;
+                _captureStageHistory[ply + StackOffset] = false;
+
                 int nullValue = -Negamax(pos, depth - R, ply + 1, -beta, -beta + 1, cutNode: false);
                 pos.UndoNullMove();
+
+                _currentMoveHistory[ply + StackOffset] = savedNullMove;
+                _movedPieceHistory[ply + StackOffset] = savedNullPiece;
+                _inCheckHistory[ply + StackOffset] = savedNullInCheck;
+                _captureStageHistory[ply + StackOffset] = savedNullCapture;
 
                 // Non restituire matti o punteggi da tablebase non dimostrati.
                 if (nullValue >= beta && !Values.IsWin(nullValue))

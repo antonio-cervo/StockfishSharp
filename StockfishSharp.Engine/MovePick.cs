@@ -309,8 +309,19 @@ public sealed class MovePick
     /// da <see cref="MovePicker"/> per lo score delle mosse quiete (movepick.cpp:233-237).</summary>
     public int GetContinuationHistory(ContinuationRef r, Piece pc, Square to) => ContinuationScore(r, pc, to);
 
+    /// <summary>Nella fonte il puntatore <c>(ss-i)-&gt;continuationHistory</c> e' SEMPRE valido:
+    /// quando non c'e' una mossa reale (prime ply della ricerca, o figlio di un null move) punta
+    /// alla casella <c>continuationHistory[0][0][NO_PIECE][SQ_A1]</c>, che vale -586 (il valore di
+    /// inizializzazione, mai riscritto perche' le SCRITTURE sono filtrate da
+    /// <c>currentMove.is_ok()</c>). Le letture invece non sono mai filtrate.
+    ///
+    /// Fino al 2026-09-07 questo porting filtrava anche le letture, restituendo 0 al posto di -586.
+    /// Non e' innocuo: quello scarto entra in <c>statScore</c> (quindi nella riduzione LMR) e nelle
+    /// soglie di potatura dello Step 15, dove conta il valore ASSOLUTO e non solo il confronto fra
+    /// mosse. <c>default(ContinuationRef)</c> ha gia' esattamente i campi di quella casella
+    /// (InCheck=false, CaptureStage=false, Piece=None, To=A1), quindi basta indicizzare sempre.</summary>
     private int ContinuationScore(ContinuationRef r, Piece pc, Square to) =>
-        r.IsOk ? _continuationHistory[r.InCheck ? 1 : 0, r.CaptureStage ? 1 : 0, (byte)r.Piece, (byte)r.To, (byte)pc, (byte)to] : 0;
+        _continuationHistory[r.InCheck ? 1 : 0, r.CaptureStage ? 1 : 0, (byte)r.Piece, (byte)r.To, (byte)pc, (byte)to];
 
     /// <summary><c>update_quiet_histories</c>, search.cpp:2045-2056 — main history, low-ply
     /// history (solo ply&lt;5) e continuation history (vedi nota in testa al file per pawn
