@@ -1376,6 +1376,47 @@ ora sceglie la STESSA mossa dell'oracolo. 113/113 test.
 ~1,6M dell'oracolo) - cioe' ormai solo C# contro C++, non piu' un buco di porting. Il divario totale
 misurato a inizio giornata era 29,5x.
 
+## Stato dopo la parita' di nodi: thread, tempo, e una questione APERTA (2026-09-07)
+
+**Sicurezza sul tempo, molto migliorata**: con orologio reale (4 posizioni x 4 scenari di orologio,
+a 1/2/4/8 thread) il caso peggiore usa ora il **13,9% dell'orologio residuo**, contro il 53-54%
+misurato stamattina e contro la soglia di 60% del test di regressione automatico
+(`RealSearchNeverEatsADangerousShareOfTheClock`). Conseguenza diretta della parita' di nodi: si
+arriva alla stessa profondita' in meta' tempo, quindi la gestione tempo adattiva si ferma prima.
+
+**Numero di thread: il vantaggio dei 2 thread e' sparito.** Profondita' raggiunta con `go movetime
+6000` su 3 posizioni reali: 1 thread 55, 2 thread 54, 4 thread 54, 8 thread 55 — piatto, tutto
+dentro il rumore. Prima delle correzioni di oggi la stessa misura dava un vantaggio ai 2 thread
+(70/73/71/72 su 4 posizioni). Raddoppiata l'efficienza single-thread, il numero di thread non fa
+piu' differenza misurabile su questa macchina. `Threads: 2` lasciato invariato nel config del bot:
+cambiarlo di nuovo su una differenza dentro il rumore sarebbe solo churn.
+
+Scalabilita' grezza (nodi/secondo, bench): 1 thread 439.246, 2 thread 830.744 (1,89x) — la
+scalabilita' c'e', ma a profondita' fissa il Lazy SMP moltiplica i nodi (2,6x a 2 thread) quindi
+non si traduce in tempo-a-profondita'.
+
+### QUESTIONE APERTA: blocco intermittente del bench multi-thread
+
+Osservato **2 volte** (entrambe nei primi due bench multi-thread eseguiti dopo le correzioni): il
+`bench 16 4 13` si e' fermato sulla posizione 27 (`6k1/6p1/P6p/r1N5/5p2/7P/1b3PP1/4R1K1 w`)
+bruciando CPU per oltre 20 minuti invece dei ~9 secondi normali. **Non piu' riproducibile**: 15
+esecuzioni successive tutte pulite (8 a 4 thread, 5 a 8 thread, 2 a 4 thread). Quindi e' una race,
+non un bug deterministico.
+
+Cosa si e' verificato:
+- La posizione **in isolamento** e' sana a 1/2/4/8 thread (1,8-2,0s, nodi coerenti). Il blocco
+  richiede lo stato accumulato (TT + history) delle 26 posizioni precedenti — il bench fa
+  `ucinewgame` una volta sola all'inizio, come la fonte.
+- La propagazione dello stop nel pool, riletta, e' corretta: il thread principale chiama
+  `stopCts.Cancel()` appena finisce, e gli helper controllano il token ogni 2048 nodi.
+- **L'esposizione in partita e' molto minore che nel bench**: il bench passa
+  `timeLimit = TimeSpan.FromHours(1)` (gli helper vanno fino a `Ply.MaxPly`), mentre in partita il
+  limite e' la scadenza vera. La verifica con orologio reale sopra (16 combinazioni x 4 conteggi di
+  thread) non ha mai superato il 13,9% del budget.
+
+Da tenere d'occhio. Se si ripresenta, il primo sospetto da controllare e' un helper che non vede la
+cancellazione fra un'iterazione di iterative deepening e la successiva.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:
