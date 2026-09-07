@@ -1070,6 +1070,20 @@ public sealed class Search
 
         if (depth <= 0) return Quiesce(pos, alpha, beta, ply, isPvNode); // search.cpp:731
 
+        // search.cpp:732-733, "Limit the depth if extensions made it too large" — MAI PORTATO fino
+        // al 2026-09-07. Non e' una rifinitura: le estensioni (Step 16 puo' dare +3, piu' i due
+        // "depth++" di singular e hindsight) possono far CRESCERE la profondita' di nodo in nodo
+        // lungo una catena, e senza questo tetto supera 252. A quel punto TTEntry.Save calcola
+        // "Depth8 = (byte)(d - DepthNone)" e va in OVERFLOW DI BYTE: la fonte lo previene proprio
+        // con questo min (e lo presidia con "assert(d - DEPTH_NONE < 256)", tt.cpp:113).
+        //
+        // La TT si riempie allora di profondita' sbagliate, che rientrano nella condizione dello
+        // Step 16 "ttData.depth >= depth - 3" e alimentano ulteriori estensioni: retroazione che si
+        // autosostiene. Con piu' thread le entry corrotte sono molte di piu', ed e' per questo che
+        // il sintomo (bench multi-thread che non termina, ricorsione fino a ply 244) si vedeva solo
+        // da 2 thread in su, mai a thread singolo.
+        depth = Math.Min(depth, Ply.MaxPly - 1);
+
         // Controllo "ripetizione imminente" — search.cpp:736-742: se esiste una mossa disponibile
         // che pareggerebbe per ripetizione e quel pareggio batte già alpha, tronca qui invece di
         // esplorare il sottoalbero per scoprirlo più a fondo.
