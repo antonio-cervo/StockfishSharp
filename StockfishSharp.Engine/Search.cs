@@ -263,12 +263,13 @@ public sealed class Search
     /// ciclo di iterative deepening e la ricorsione di Negamax girano entrambi nel thread di
     /// questa istanza di Search).</summary>
     private double _softDeadlineMs;
-    private System.Diagnostics.Stopwatch? _elapsedStopwatch;
 
-    private const int NullMoveMinDepth = 3;
-    private const int NullMoveReduction = 3;
-    private const int ReverseFutilityMaxDepth = 6;
-    private const int ReverseFutilityMarginPerDepth = 90;
+    /// <summary><c>Worker::nmpMinPly</c>, search.h — mentre è diverso da zero il null move resta
+    /// disattivato (fino a quel ply), per impedire che la ricerca di VERIFICA del null move ne
+    /// avvii un'altra ricorsivamente: search.cpp:1030-1040 lo dice esplicitamente ("Recursive
+    /// verification is not allowed"). Azzerato a ogni nuova ricerca e a ogni nuova partita.</summary>
+    private int _nmpMinPly;
+    private System.Diagnostics.Stopwatch? _elapsedStopwatch;
 
     // Stack della fonte (search.cpp:289-298: stack[MAX_PLY+10], ss=stack+7) ridotto ai soli campi
     // che servono qui: valutazione statica (improving/opponentWorsening), mossa/pezzo mosso/scacco
@@ -606,6 +607,7 @@ public sealed class Search
         _nodes = 0;
         _tbHits = 0;
         _stopOnPonderhit = false; // ThreadPool::start_thinking, thread.cpp:304
+        _nmpMinPly = 0;           // Worker::clear, search.cpp:696
         var elapsedStopwatch = System.Diagnostics.Stopwatch.StartNew(); // elapsed(), search.h
         _elapsedStopwatch = elapsedStopwatch;
         _softDeadlineMs = 0; // nessuna scadenza finche' la prima iterazione non ne calcola una
@@ -1192,16 +1194,54 @@ public sealed class Search
                     return ((661 * beta) + (363 * eval)) / 1024;
             }
 
-            // Null-move pruning: mai sotto scacco né in nodi PV, mai con solo re+pedoni (zugzwang).
-            if (!isPvNode && depth >= NullMoveMinDepth && HasNonPawnMaterial(pos, pos.SideToMove))
+            // Step 10. Null move search with verification search — search.cpp:1009-1043.
+            // PORTATO FEDELMENTE il 2026-09-07: fino a quel momento qui c'era ancora il segnaposto
+            // scritto nel primissimo commit del progetto (0967bda, "nucleo ISPIRATO a search.cpp"),
+            // che differiva dalla fonte su ogni punto e faceva moltissimo lavoro inutile:
+            //  - provava il null move su OGNI nodo non-PV invece che solo sui cutNode (nei nodi
+            //    "all", che per definizione non falliscono alto, il null move non taglia quasi mai:
+            //    era lavoro sprecato a ogni nodo);
+            //  - non aveva NESSUNA condizione sulla valutazione statica, quindi tentava il null
+            //    move anche con la posizione molto sotto beta, dove non può ragionevolmente tagliare;
+            //  - usava una riduzione FISSA (R=4) invece di quella dinamica della fonte, che cresce
+            //    con la profondità e con quanto la valutazione supera beta;
+            //  - non escludeva il caso excludedMove (le ricerche di verifica delle Singular
+            //    Extensions), dove la fonte non lo fa mai;
+            //  - restituiva "beta" invece di "nullValue", e non aveva la ricerca di verifica.
+            // Misurato: era una delle cause principali del divario di ~5x nel numero di nodi
+            // rispetto all'oracolo a parità di profondità (vedi docs/porting-master-plan.md).
+            if (cutNode && staticEval >= beta - (13 * depth) - (47 * (improving ? 1 : 0)) + 365
+                && excludedMove == default && HasNonPawnMaterial(pos, pos.SideToMove)
+                && ply >= _nmpMinPly && beta >= -2000)
             {
+                // Riduzione dinamica basata sulla profondità e su quanto la valutazione statica
+                // supera beta — search.cpp:1016.
+                int R = 7 + (depth / 3) + Math.Max((staticEval - beta) / 256, 0);
+
                 var nullSt = new StateInfo();
                 pos.DoNullMove(nullSt);
-                int nullScore = -Negamax(pos, depth - 1 - NullMoveReduction, ply + 1, -beta, -beta + 1, cutNode: false);
+                int nullValue = -Negamax(pos, depth - R, ply + 1, -beta, -beta + 1, cutNode: false);
                 pos.UndoNullMove();
 
-                if (nullScore >= beta && Math.Abs(nullScore) < MateScore - Ply.MaxPly) return beta;
+                // Non restituire matti o punteggi da tablebase non dimostrati.
+                if (nullValue >= beta && !Values.IsWin(nullValue))
+                {
+                    if (_nmpMinPly != 0 || depth < 16) return nullValue;
+
+                    // Ricerca di verifica alle profondità alte, col null move disattivato finché
+                    // il ply non supera _nmpMinPly (la ricorsione non è ammessa) — search.cpp:1034.
+                    _nmpMinPly = ply + (3 * (depth - R) / 4);
+                    int v = Negamax(pos, depth - R, ply, beta - 1, beta, cutNode: false);
+                    _nmpMinPly = 0;
+
+                    if (v >= beta) return nullValue;
+                }
             }
+
+            // search.cpp:1046 — da qui in poi "improving" vale anche quando la valutazione statica
+            // è già sopra beta. Mancava: influenza ProbCut (Step 12), la formula di riduzione LMR
+            // e la soglia di potatura delle mosse tardive (Step 15).
+            improving |= staticEval >= beta;
 
             // Step 11. Internal iterative reduction — search.cpp:1048-1052: a profondità
             // sufficiente, riduce la profondità nei nodi PV/Cut senza una mossa in TT (una TT

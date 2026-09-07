@@ -1109,6 +1109,49 @@ percentuali), l'accumulatore incrementale senza Finny Tables/hybrid update (già
 B) e il codegen JIT contro nativo, che è incomprimibile. Il fattore **4,9x sui nodi** resta la
 metà più grande del divario ed è lavoro algoritmico, non di implementazione.
 
+## Lavoro algoritmico: Step 10 (null move) era ancora un segnaposto (2026-09-07)
+
+Ripreso il fattore "4,9x più nodi" (la metà algoritmica del divario). Diagnostica: confronto
+nodi/profondità contro l'oracolo su posizioni singole, poi **posizione per posizione su tutte le 51
+del bench**. Risultati: il divario NON è uniforme (a depth 11: totale 2,8x, ma singole posizioni da
+22x fino a posizioni dove siamo MIGLIORI dell'oracolo, 0,3x) e CRESCE con la profondità (2,8x a
+depth 11, 4,9x a depth 13). Su un finale il rapporto esplodeva fra depth 6 e 8 (da 0,9x a 14,8x).
+
+Verificati fedeli riga per riga, senza trovare errori: `reduction()` e la sua tabella
+(`2872/128.0*log(i)`), tutte le correzioni per-mossa di Step 18 (3023/1004/885/816/940/697/65/
+26310/4026/933/1079/264/1095/1138/2179...), Singular Extensions (Step 16, gate `depth >= 6 + ttPv`,
+margini doppio/triplo, `depth++`, estensione negativa — e `ttMoveHistory` È consultata, la nota
+precedente in questo documento era sbagliata), Step 15 (potatura a profondità bassa).
+
+**Trovato invece che Step 10 (null move) non era mai stato portato**: era ancora il segnaposto
+scritto nel primissimo commit del progetto (`0967bda`, dichiarato all'epoca "nucleo ISPIRATO a
+search.cpp"), e differiva dalla fonte (search.cpp:1009-1043) su ogni singolo punto:
+
+| | Fonte | Segnaposto |
+|---|---|---|
+| Quando | solo `cutNode`, con `staticEval >= beta - 13*depth - 47*improving + 365`, `!excludedMove`, `beta >= -2000`, `ply >= nmpMinPly` | qualunque nodo non-PV, nessuna condizione sulla valutazione |
+| Riduzione | `R = 7 + depth/3 + max((staticEval-beta)/256, 0)` | fissa, `R = 4` |
+| Verifica | ricerca di verifica a depth ≥ 16 con `nmpMinPly` | assente |
+| Ritorno | `nullValue` | `beta` |
+
+Il difetto più costoso era provare il null move su OGNI nodo non-PV invece che solo sui cutNode:
+nei nodi "all", che per definizione non falliscono alto, non taglia quasi mai — lavoro sprecato a
+ogni nodo, che compone con la profondità. Portato fedelmente, incluso il campo `nmpMinPly`
+(azzerato a ogni ricerca) e `improving |= staticEval >= beta` (search.cpp:1046), anch'esso
+mancante: influenza ProbCut, la formula di riduzione LMR e la soglia di potatura delle mosse
+tardive.
+
+Rimosse anche quattro costanti morte, impronta digitale del vecchio segnaposto
+(`NullMoveMinDepth`, `NullMoveReduction`, `ReverseFutilityMaxDepth`, `ReverseFutilityMarginPerDepth`
+— queste ultime due non erano nemmeno più usate da nessuna parte).
+
+**Verificato**: 110/110 test; `bench 16 1 13` — nodi da **12.226.331 a 10.996.307 (-10,1%)**,
+tempo da 29,31s a 27,76s. Rapporto nodi contro l'oracolo da **4,89x a 4,40x**.
+
+**Metodo da riusare**: le costanti inventate che nella fonte non esistono (qui `NullMoveMinDepth`
+ecc.) sono l'impronta digitale affidabile del codice segnaposto mai riconciliato con la fonte —
+`grep "private const"` è un buon punto di partenza per trovarne altri.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:
