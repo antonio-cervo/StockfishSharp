@@ -397,6 +397,53 @@ controllo) invece di fermarsi o ripartire da zero; "stop" durante il pondering i
 lo supporta correttamente se un client lo richiede, ma la decisione di abilitarlo sul bot reale
 resta rimandata — probabilmente in `lichess-bot`'s config, fuori da questo repo).
 
+### Indagine sul tempo per mossa (2026-09-07) e tetto di sicurezza per-iterazione — PRATICO, non fonte
+
+Richiesta esplicita dell'utente dopo la nota sul pondering: "impieghiamo troppo tempo per fare una
+mossa a prescindere da quelle del libro" — riferito alla sconfitta reale a tempo scaduto
+(`zEJZDl6m`, 2026-09-06 sera, già nella cronologia sopra). Riprodotta offline la posizione esatta
+di una delle mosse critiche (`4rr2/pp1q1ppk/2np3p/b1pn3b/2P1PP2/1P1P4/PBN2QBP/R4R1K w - - 0 19`,
+wtime/btime dal log reale) con una strumentazione temporanea per-iterazione.
+
+**Causa isolata**: il controllo del tempo (fedele alla fonte) decide se continuare solo TRA
+un'iterazione completa e la successiva, mai a metà. Su questa posizione, la profondità 16 è
+arrivata a 6,97s (budget stimato ~17,3s — via libera a continuare), ma la profondità 17 **da
+sola** ha impiegato altri 20,1s, mentre il budget stimato nel frattempo era rimasto stabile
+(~16,3s, instabilità già decaduta a 1,077): non un rigonfiamento della formula d'instabilità, ma
+un'iterazione genuinamente più costosa del previsto, che nessun meccanismo esistente può
+interrompere a metà (il tetto assoluto duro è molto più alto e non era stato raggiunto).
+
+**Confronto diretto con l'oracolo sulla stessa posizione (stessa rete NNUE)**: Stockfish 19 reale
+arriva a depth 20 in 645ms con 743.777 nodi; il nostro motore (thread principale, confrontabile
+1v1 con l'oracolo a 1 thread) ha impiegato ~2,3M nodi per arrivare solo a depth 17 — **~20 volte
+più nodi per una profondità inferiore**, e il rapporto CRESCE con la profondità (a depth 8 è solo
+~1,8x) invece di restare costante: non un costo fisso per nodo, un effetto di potatura/estensioni
+meno efficaci che si amplifica ply dopo ply. Trovato un contributo concreto ma parziale: `history.h`'s
+`ttMoveHistory` (D=8192) esiste già nel porting ma non è mai consultata in nessuna formula — nella
+fonte compare nel margine di estensione doppia/tripla delle Singular Extensions (search.cpp:1261)
+e nel multi-cut pruning (search.cpp:1279) — un termine scalare mancante in due formule, non
+sufficiente da solo a spiegare un gap di 20x. La causa di fondo resta quella già scritta più volte
+in questo documento: messa a punto fine diffusa, non un pezzo isolato — la stessa conclusione di
+sempre, ora con un numero misurato invece che solo argomentata.
+
+**Mitigazione applicata (dichiaratamente PRATICA, non fonte — Stockfish reale non ne ha bisogno
+perché non incontra quasi mai questo caso)**: nuovo `Search.IterationCostSafetyMultiplier` (2.5) +
+`previousIterationElapsedMs` in `Search_` — se l'iterazione APPENA CONCLUSA ha consumato da sola
+più di 2,5 volte il budget stimato di quel momento, la deepening si ferma del tutto (niente
+successiva iterazione), invece del solo freno più morbido già esistente
+(`increaseDepth=false`/`searchAgainCounter`, che riduce la profondità EFFETTIVA della prossima
+iterazione ma non impedisce di tentarla). Non si applica mentre si sta pondering (search.cpp:613
+forza sempre `increaseDepth=true` lì, il tempo "extra" non è mai davvero a rischio).
+
+Verificato: 109/109 test; `bench 16 1 10` — nodi IDENTICI (1.235.311, bit-esatto: il tetto si
+applica solo alle ricerche a gestione tempo reale, mai a `bench`/`go depth N` a profondità fissa,
+dove `optimumMs` resta `NoBound`). Sulla posizione riprodotta il comportamento fra esecuzioni
+successive resta variabile (già osservato: Lazy SMP con 8 thread introduce non-determinismo reale
+nell'accumulo di `bestMoveInstability` fra un'esecuzione e l'altra sulla STESSA posizione) — non
+un test bit-esatto praticabile per questo caso specifico, la correttezza della logica è verificata
+dai test dedicati e dal ragionamento sulla formula, non da un confronto diretto nodi/mosse come
+per le tecniche di fonte.
+
 **Nota storica per cui il pondering era stato richiesto (osservazione dal vivo, 2026-09-06)**: in
 una partita reale del bot, l'avversario (bot Lichess) rispondeva quasi istantaneamente a ogni
 mossa pur avendo un orologio che CRESCEVA rispetto al nostro (lui oltre 11 minuti, noi circa 2) —

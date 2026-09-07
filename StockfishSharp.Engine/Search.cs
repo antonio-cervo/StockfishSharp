@@ -231,6 +231,12 @@ public sealed class Search
     // la gestione tempo adattiva non è attiva (equivalente di !limits.use_time_management()).
     public const long NoBound = long.MaxValue / 2;
 
+    // Mitigazione pratica, non di fonte — vedi il commento su "previousIterationElapsedMs" in
+    // Search_. Soglia scelta con margine ampio apposta (un'iterazione può legittimamente costare
+    // qualche volta più della precedente anche in casi normali): serve a intercettare un'anomalia
+    // netta, non la normale crescita del fattore di ramificazione.
+    private const double IterationCostSafetyMultiplier = 2.5;
+
     private const int NullMoveMinDepth = 3;
     private const int NullMoveReduction = 3;
     private const int ReverseFutilityMaxDepth = 6;
@@ -642,6 +648,18 @@ public sealed class Search
         int searchAgainCounter = 0;
         bool increaseDepth = true;
 
+        // Mitigazione PRATICA, non di fonte (2026-09-07, richiesta esplicitamente dall'utente dopo
+        // un'analisi diretta di una sconfitta reale a tempo scaduto — vedi
+        // docs/porting-master-plan.md): traccia quanto tempo l'ULTIMA iterazione completata ha
+        // consumato DA SOLA (non l'elapsed cumulativo). Stockfish reale non ha bisogno di questo:
+        // sulla stessa posizione reale usa ~20 volte meno nodi alla stessa profondità (misurato
+        // contro l'oracolo), quindi il salto di costo fra un'iterazione e la successiva resta quasi
+        // sempre piccolo — da noi può essere drastico (un'iterazione da 20s+ dopo una da 2s), e una
+        // volta iniziata non c'è modo di interromperla a metà (il controllo periodico rispetta solo
+        // il tetto assoluto, molto più alto di quello stimato). Vedi IterationCostSafetyMultiplier
+        // sotto.
+        double previousIterationElapsedMs = 0;
+
         try
         {
             for (int depth = 1; depth <= maxDepth; depth++)
@@ -832,7 +850,23 @@ public sealed class Search
                         // (mainThread->ponder), altrimenti solo se abbiamo usato meno di metà del
                         // tempo stimato finora.
                         increaseDepth = pondering || elapsedMs <= totalTime * 0.50;
+
+                        // Mitigazione pratica, non di fonte (vedi il commento su
+                        // "previousIterationElapsedMs" sopra il ciclo): se l'iterazione APPENA
+                        // CONCLUSA ha già consumato da sola più di IterationCostSafetyMultiplier
+                        // volte il budget stimato, non arrischiare di avviarne un'altra — a
+                        // differenza di "increaseDepth=false" (che riduce solo la profondità
+                        // EFFETTIVA della prossima iterazione via searchAgainCounter, restando
+                        // comunque esposti a una nuova iterazione altrettanto costosa) questo ferma
+                        // del tutto la deepening. Non si applica mentre si sta pondering: lì il
+                        // tempo "extra" non è mai davvero a rischio (search.cpp:613 lo forza sempre
+                        // a continuare).
+                        double iterationCostMs = elapsedMs - previousIterationElapsedMs;
+                        if (!pondering && iterationCostMs > totalTime * IterationCostSafetyMultiplier)
+                            break;
                     }
+
+                    previousIterationElapsedMs = elapsedMs;
                 }
 
                 iterValue[iterIdx] = bestValue;
