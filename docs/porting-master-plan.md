@@ -1643,6 +1643,58 @@ una tecnica mancante fra quelle verificate. Il gap piu' grosso rimasto nel porti
 sono ottimizzazioni di velocita' che producono gli STESSI valori, quindi non possono spiegare una
 divergenza di punteggio.
 
+## Le parti non portate di nnue_accumulator.cpp nascondono incorrettezze? (2026-09-07 notte)
+
+Domanda dell'utente, dopo che avevo liquidato le 542 righe non portate come "ottimizzazioni di
+velocita' che producono gli stessi valori". Era un'**assunzione**, non un fatto verificato. Verificata
+su tre livelli.
+
+### 1. La policy di refresh e' fedele
+
+`requires_refresh` nella fonte e' `diff.pc == make_piece(perspective, KING)`
+(half_ka_v2_hm.cpp:102-104) — identica alla nostra. E usa lo STESSO feature set:
+`find_last_usable_accumulator` invoca `PSQFeatureSet::requires_refresh`, e
+`PSQFeatureSet = Features::HalfKAv2_hm` (nnue_architecture.h:42), che e' esattamente quello che
+chiamiamo noi. Il commento della fonte spiega anche perche' basta: *"Threat feature set refreshes
+require a king move across the center, i.e., a subset of halfka refreshes"* — la condizione HalfKA
+(qualunque mossa di re) e' la piu' larga delle tre, quindi copre anche gli altri due feature set.
+`find_last_usable_accumulator` combacia riga per riga.
+
+### 2. I pezzi mancanti sono percorsi ALTERNATIVI, non logica diversa
+
+| non portato | cosa fa | perche' e' neutro sui valori |
+|---|---|---|
+| `backward_update_incremental` | dopo un refresh dell'ultimo frame, riempie all'INDIETRO i frame intermedi marcandoli "computed" | e' cache: quei frame verrebbero comunque ricalcolati alla prossima valutazione |
+| `update_accumulator_refresh_cache` | calcola il refresh partendo da uno stato in cache (Finny table) invece che da zero | stesso accumulatore, per differenza invece che da capo |
+| `update_accumulator_hybrid` | scorciatoia per le mosse di re nella stessa meta' di scacchiera | percorso alternativo allo stesso risultato |
+| `forward_update_incremental_both` | aggiorna le due prospettive insieme | solo fusione dei due cicli |
+
+Al loro posto facciamo sempre il refresh completo: piu' lavoro, stessi valori.
+
+### 3. Ma il test che avrebbe dovuto dimostrarlo aveva un buco reale
+
+`NnueIncrementalTests` chiamava `Evaluate` a **ogni** nodo: l'accumulatore era quindi sempre gia'
+aggiornato e il recupero risaliva al massimo di UN frame. Nella ricerca vera non e' cosi' — un nodo
+sotto scacco non valuta affatto, e un taglio da transposition table esce prima dello Step 5 — quindi
+si accumulano piu' ply senza valutazione e il successivo `Evaluate` deve risalire fino all'ultimo
+accumulatore utilizzabile e riapplicare in avanti TUTTI i delta intermedi
+(`FindLastUsableAccumulator` + `ForwardUpdateIncremental`). **Quel percorso non era coperto da
+nulla**, ed e' esattamente dove un errore resterebbe silenzioso: nessun crash, solo valutazioni
+sbagliate.
+
+Nuovo `NnueIncrementalGapsTests`: partite casuali lunghe (semi fissi, rigiocate finche' non si sono
+raccolte almeno 40 valutazioni per seme), valutando solo **una volta su quattro** cosi' da creare
+buchi di lunghezza variabile, con confronto bit-per-bit contro `ComputeFromScratch` a ogni
+valutazione. Con guardie esplicite che verificano che il test stia davvero coprendo qualcosa: numero
+minimo di valutazioni, buco massimo di almeno 3 frame, almeno una mossa di re (che forza il refresh).
+Verde su 4 posizioni x 4 semi; 117/117 test totali.
+
+La catena di prova regge perche' `ComputeFromScratch` era gia' verificato bit-esatto contro l'oracolo
+(N1-N8): da-zero == oracolo, incrementale == da-zero, quindi incrementale == oracolo.
+
+**Lezione di metodo** (vedi la regola generale dell'utente): un test che esiste non e' una prova
+finche' non si e' guardato COSA copre davvero. Qui copriva solo il caso facile.
+
 ## Come si misura la fine
 
 Il criterio di completamento del progetto non è "tutti i file portati", ma:
