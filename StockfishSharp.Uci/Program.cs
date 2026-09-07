@@ -69,6 +69,32 @@ void UpdateSyzygyOptions() => search.SetSyzygyOptions(syzygy50MoveRule, syzygyPr
 UpdateSyzygyOptions();
 int maxDepth = 30;
 
+// Riscalda il tiered JIT di .NET prima che arrivi il primo "go" reale della partita — un problema
+// pratico assente nella fonte C++ (nessuna compilazione a runtime), scoperto misurando la gestione
+// tempo (vedi TimeManagement.MaximumTime): il primissimo "go" del processo paga in più, FUORI dallo
+// Stopwatch interno di Search_, ~1-1.7s di compilazione dei metodi hot-path (Negamax/Quiesce/
+// MovePicker) mai eseguiti prima — un rischio reale di superare il tempo assegnato dalla GUI/dal
+// bot sulla prima mossa. Gira su una SearchThreadPool/Position dedicate, mai condivise con `search`/
+// `position` della partita reale, così non può interferire né lasciare stato residuo (history,
+// TT) quando la partita vera comincia.
+_ = Task.Run(() =>
+{
+    try
+    {
+        var warmupPos = new Position();
+        warmupPos.Set("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", false);
+        var warmupSearch = new SearchThreadPool();
+        warmupSearch.SetThreadCount(8);
+        warmupSearch.Resize(16);
+        warmupSearch.NewGame();
+        warmupSearch.Search_(warmupPos, 10, TimeSpan.FromMilliseconds(800), CancellationToken.None, optimumMs: 400);
+    }
+    catch
+    {
+        // Riscaldamento best-effort: un fallimento qui non deve mai impedire l'avvio del motore.
+    }
+});
+
 // Una ricerca ("go") gira su un task in background invece che bloccare questo ciclo: un client
 // UCI reale (GUI o lichess-bot) può mandare "stop" mentre il motore sta ancora pensando e si
 // aspetta un "bestmove" pronto subito dopo — con una chiamata sincrona qui, "stop" non sarebbe mai

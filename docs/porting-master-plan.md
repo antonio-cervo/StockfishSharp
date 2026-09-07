@@ -614,6 +614,42 @@ cercato) su più posizioni in sequenza (`e2e4` dalla partenza, `c7c5` dopo 1.e4,
 ricerca vera, corretta — su un finale K vs k fuori libro, `a7a6` dopo una Ruy Lopez). 85/85 test
 (nessuno tocca `StockfishSharp.Uci`, il progetto compila pulito). **Flow D COMPLETO.**
 
+### D2 — Riscaldamento JIT all'avvio — ✅ FATTO 2026-09-07
+
+**Indagine sul "bug della gestione del tempo"** (richiesta esplicitamente dall'utente dopo il
+commit di stamattina su `searchAgainCounter`/`adjustedDepth`, che aveva lasciato aperto il dubbio
+di non risolvere il caso peggiore osservato dal vivo): verificato con un test misurato (UCI reale,
+`go wtime 60000 btime 60000 winc 1000` su una posizione di mediogioco) che **non esiste un vero
+overrun algoritmico** — `TimeManagement.Init` combacia riga per riga con `timeman.cpp`
+(verificato di nuovo qui), e il meccanismo di stop mid-ricerca (`cts.CancelAfter(timeLimit)` +
+`_ct.ThrowIfCancellationRequested()` ogni 2048 nodi in `Negamax`, search.cpp:778-779/2103-2129:
+`check_time` è chiamato SOLO da `search()`, mai da `qsearch()`, nella fonte — verificato, non è un
+buco di fedeltà) rispetta `MaximumTime` con un margine di pochi millisecondi, esattamente come
+previsto. Il caso "una mossa usa quasi tutto `MaximumTime`" resta comportamento CORRETTO e atteso
+dell'algoritmo reale quando l'instabilità misurata (`bestMoveInstability`) è genuinamente alta — non
+un bug.
+
+**Trovato invece un problema pratico reale, mai proprio della fonte C++ (nessuna compilazione a
+runtime lì)**: il primissimo `go` del processo paga, FUORI dallo `Stopwatch` interno di `Search_`,
+il costo del tiered JIT di .NET che compila i metodi hot-path (`Negamax`/`Quiesce`/`MovePicker`)
+mai eseguiti prima — misurato ~1.1-1.7s in più rispetto a `MaximumTime` sulla primissima ricerca di
+un processo appena avviato (verificato isolando la causa: una `go movetime 500` di riscaldamento
+prima della `go wtime/btime` reale nello stesso processo elimina quasi del tutto lo scarto). Un
+rischio concreto di sforare il tempo assegnato dalla GUI/dal bot sulla prima mossa di ogni partita
+(o di ogni riavvio di processo).
+
+**Fix**: nuovo blocco in `Program.cs`, un `Task.Run` in background avviato subito dopo il caricamento
+di NNUE/libro (non bloccante, non risponde a "uci"/"isready" più lentamente) che esegue una ricerca
+di riscaldamento (`depth 10`, budget 800ms) su una `SearchThreadPool`/`Position` DEDICATE, mai
+condivise con quelle della partita reale — niente stato residuo (history, TT) quando la partita
+vera comincia. Per costruzione questo copre solo la primissima ricerca del processo: le mosse
+successive nella stessa partita (stesso processo) non pagano più questo costo, essendo già JIT-ate.
+
+Verificato: 109/109 test; misurato via UCI (stessa posizione/orologio di prima, con ~3s di attesa fra
+l'avvio del processo e il primo `go` — il tempo reale di handshake di una GUI/di lichess-bot)
+l'overrun scende da ~1.14s (4.8% di `MaximumTime`) a ~0.3s (1.3%) sulla primissima ricerca del
+processo.
+
 ---
 
 ## L'oracolo: cosa garantisce e cosa no
