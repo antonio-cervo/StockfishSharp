@@ -12,6 +12,12 @@
 #             2049). E' la traccia che ha nominato il colpevole il 2026-09-08: allo stesso nodo
 #             (nodi=499) la fonte leggeva come mossa del genitore d6a6 e noi d6c7, perche' il
 #             nostro slot currentMove era stato sovrascritto dalla ricerca singolare.
+#   CHIN/CH - ingressi (bestValue, staticEval, depth, bestMove) e stato prima della scrittura del
+#             bonus di correction history. Ha isolato una divergenza di 1 cp risalendo dalla
+#             correction history al valore di ritorno del nodo.
+#   PATTA   - ogni patta immediata di search(), con ply, nodi, rule50 e il valore restituito. Nata
+#             per il caso rule50=93, dove la fonte in QUIESCENZA usa VALUE_DRAW secco e in search()
+#             "value_draw(nodes)" (+-1): noi usavamo il secondo in entrambe.
 # Sono le stesse grandezze che il nostro motore stampa con SFS_TRACE=1: si confrontano voce per
 # voce con tools/confronta_traccia.py.
 #
@@ -32,8 +38,34 @@
 # stderr si riempie e il processo si BLOCCA senza mai emettere "bestmove".
 #
 --- stockfish-upstream-reference/src/search.cpp	2026-09-05 13:35:36.126498700 +0200
-+++ oracolo-build/src/search.cpp	2026-09-08 20:37:19.510370300 +0200
-@@ -975,14 +975,31 @@
++++ oracolo-build/src/search.cpp	2026-09-08 21:01:18.229134600 +0200
+@@ -116,6 +116,11 @@
+     constexpr int nonPawnWeight = 186;
+     auto&         shared        = workerThread.sharedHistory;
+ 
++    if (std::getenv("SF_TRACE"))
++        std::cerr << "    CH bonus=" << bonus
++                  << " pawnPrima=" << int(shared.pawn_correction_entry(pos)[us].pawn)
++                  << " minorPrima=" << int(shared.minor_piece_correction_entry(pos)[us].minor)
++                  << " bMinor=" << (bonus * 150 / 128) << std::endl;
+     shared.pawn_correction_entry(pos)[us].pawn << bonus;
+     shared.minor_piece_correction_entry(pos)[us].minor << bonus * 150 / 128;
+     shared.nonpawn_correction_entry<WHITE>(pos)[us].nonPawnWhite << bonus * nonPawnWeight / 128;
+@@ -787,7 +792,13 @@
+         // Step 2. Check for aborted search or immediate draw
+         if (threads.stop.load(std::memory_order_relaxed) || pos.is_draw(ss->ply)
+             || ss->ply >= MAX_PLY)
++        {
++            if (std::getenv("SF_TRACE"))
++                std::cerr << "    PATTA sito=790 ply=" << ss->ply << " nodi=" << nodes
++                          << " r50=" << pos.rule50_count() << " val="
++                          << ((ss->ply >= MAX_PLY && !ss->inCheck) ? evaluate(pos) : value_draw(nodes)) << std::endl;
+             return (ss->ply >= MAX_PLY && !ss->inCheck) ? evaluate(pos) : value_draw(nodes);
++        }
+ 
+         // Step 3. Mate distance pruning. Even if we mate at the next move our score
+         // would be at best mate_in(ss->ply + 1), but if alpha is already bigger because
+@@ -975,14 +986,32 @@
      if (ss->inCheck)
          goto moves_loop;
  
@@ -53,7 +85,8 @@
 +        if (std::getenv("SF_TRACE"))
 +            std::cerr << "    MH sito=982 m=" << UCIEngine::move((ss - 1)->currentMove, false) << " lato=" << int(~us) << " bonus=" << (evalDiff * 11) << " prima=" << int(mainHistory[~us][((ss - 1)->currentMove).raw()])
 +                      << " ply=" << ss->ply << " d=" << depth << " nodi=" << nodes
-+                      << " se=" << ss->staticEval << " se1=" << (ss - 1)->staticEval << std::endl;
++                      << " se=" << ss->staticEval << " se1=" << (ss - 1)->staticEval
++                      << " grezza=" << unadjustedStaticEval << " cv=" << correctionValue << std::endl;
          mainHistory[~us][((ss - 1)->currentMove).raw()] << evalDiff * 11;
          if (!ttHit && type_of(pos.piece_on(prevSq)) != PAWN
              && ((ss - 1)->currentMove).type_of() != PROMOTION)
@@ -65,7 +98,7 @@
      }
  
  
-@@ -996,6 +1013,16 @@
+@@ -996,6 +1025,16 @@
      if (!ss->ttPv && depth < (seekMate ? 6 : 19) && eval >= beta && (!ttData.move || ttCapture)
          && !is_loss(beta) && !is_win(eval))
      {
@@ -82,7 +115,7 @@
          Value futilityMult = std::min(45 + depth * 4, 85);
          futilityMult -= 20 * !ss->ttHit;
  
-@@ -1303,6 +1330,7 @@
+@@ -1303,6 +1342,7 @@
          }
  
          u64 nodeCount = rootNode ? u64(nodes) : 0;
@@ -90,7 +123,7 @@
  
          // Step 17. Make the move
          do_move(pos, move, st, givesCheck, ss);
-@@ -1339,6 +1367,18 @@
+@@ -1339,6 +1379,18 @@
          else if (move == ttData.move)
              r -= 2179;
  
@@ -109,7 +142,7 @@
          if (capture)
              ss->statScore = 873 * int(PieceValue[pos.captured_piece()]) / 128
                            + captureHistory[movedPiece][move.to_sq()][type_of(pos.captured_piece())];
-@@ -1434,6 +1474,12 @@
+@@ -1434,6 +1486,12 @@
          if (threads.stop.load(std::memory_order_relaxed))
              return VALUE_ZERO;
  
@@ -122,12 +155,13 @@
          if (rootNode)
          {
              RootMove& rm = *std::find(rootMoves.begin(), rootMoves.end(), move);
-@@ -1594,10 +1640,16 @@
+@@ -1594,10 +1652,17 @@
          update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq,
                                        scaledBonus * 263 / 16384);
  
-+        if (std::getenv("SF_TRACE") && ~us == BLACK && ((ss - 1)->currentMove).raw() == 2802)
-+            std::cerr << "    MH sito=1597 bonus=" << (scaledBonus * 215 / 32768) << " prima=" << int(mainHistory[~us][((ss - 1)->currentMove).raw()]) << std::endl;
++        if (std::getenv("SF_TRACE"))
++            std::cerr << "    MH sito=1597 m=" << UCIEngine::move((ss - 1)->currentMove, false) << " lato=" << int(~us)
++                      << " bonus=" << (scaledBonus * 215 / 32768) << " prima=" << int(mainHistory[~us][((ss - 1)->currentMove).raw()]) << std::endl;
          mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 215 / 32768;
  
          if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
@@ -139,7 +173,18 @@
      }
  
      // Bonus for prior capture countermove that caused the fail low
-@@ -1757,6 +1809,12 @@
+@@ -1634,6 +1699,10 @@
+         auto bonus =
+           std::clamp(int(bestValue - ss->staticEval) * depth * (bestMove ? 12 : 18) / 128,
+                      -CORRECTION_HISTORY_LIMIT / 4, CORRECTION_HISTORY_LIMIT / 4);
++        if (std::getenv("SF_TRACE"))
++            std::cerr << "    CHIN ply=" << ss->ply << " nodi=" << nodes << " bv=" << bestValue << " se=" << ss->staticEval << " d=" << depth
++                      << " bm=" << (bestMove ? 1 : 0) << " grezzo=" << bonus
++                      << " finale=" << (1061 * bonus / 1024) << std::endl;
+         update_correction_history(pos, ss, *this, 1061 * bonus / 1024);
+     }
+ 
+@@ -1757,6 +1826,12 @@
              alpha = bestValue;
  
          futilityBase = ss->staticEval + 306;
@@ -152,7 +197,7 @@
      }
  
      const PieceToHistory* contHist[] = {(ss - 1)->continuationHistory};
-@@ -1783,6 +1841,12 @@
+@@ -1783,6 +1858,12 @@
  
          moveCount++;
  
@@ -165,7 +210,7 @@
          // Step 6. Pruning
          if (!is_loss(bestValue))
          {
-@@ -1824,6 +1888,12 @@
+@@ -1824,6 +1905,12 @@
          do_move(pos, move, st, givesCheck, ss);
  
          value = -qsearch<nodeType>(pos, ss + 1, -beta, -alpha);
@@ -178,16 +223,17 @@
          undo_move(pos, move);
  
          assert(value > -VALUE_INFINITE && value < VALUE_INFINITE);
-@@ -2046,6 +2116,8 @@
+@@ -2046,6 +2133,9 @@
    const Position& pos, Stack* ss, Search::Worker& workerThread, Move move, int bonus) {
  
      Color us = pos.side_to_move();
-+    if (std::getenv("SF_TRACE") && us == BLACK && move.raw() == 2802)
-+        std::cerr << "    MH sito=2049 bonus=" << bonus << " prima=" << int(workerThread.mainHistory[us][move.raw()]) << std::endl;
++    if (std::getenv("SF_TRACE"))
++        std::cerr << "    MH sito=2049 m=" << UCIEngine::move(move, false) << " lato=" << int(us)
++                  << " bonus=" << bonus << " prima=" << int(workerThread.mainHistory[us][move.raw()]) << std::endl;
      workerThread.mainHistory[us][move.raw()] << bonus;  // Untuned to prevent duplicate effort
  
      if (ss->ply < LOW_PLY_HISTORY_SIZE)
-@@ -2053,6 +2125,8 @@
+@@ -2053,6 +2143,8 @@
  
      update_continuation_histories(ss, pos.moved_piece(move), move.to_sq(), bonus * 750 / 1024);
  

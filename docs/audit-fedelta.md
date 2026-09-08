@@ -142,6 +142,38 @@ posizioni di matto/stallo dove l'oracolo non stampa la riga info — artefatto d
 `4k3/3q1r2/1N2r1b1/3ppN2/2nPP3/1B1R2n1/2R1Q3/3K4 w - - 5 1` (1.821 contro 1.050, l'unica dove ne
 usiamo molti di piu').
 
+## RISOLTA: in quiescenza la patta valeva +-1 invece di 0
+
+Trovata attaccando `5rk1/q6p/2p3bR/1pPp1rP1/1P1Pp3/P3B1Q1/1K3P2/R7 w - - 93 90`, che era l'UNICA
+divergenza rimasta a profondita' 7 (7.448 nodi contro 7.237) e la piu' esplosiva a 8 e 9 (21.865
+contro 9.538; 38.069 contro 13.350). La FEN ha **rule50 = 93**: a sette ply dalla radice la regola
+delle 50 mosse scatta, quindi la ricerca incontra molte patte.
+
+Le due funzioni della fonte trattano la patta immediata in modo **diverso**, e non e' una svista:
+
+```cpp
+// search(),  search.cpp:790
+return (ss->ply >= MAX_PLY && !ss->inCheck) ? evaluate(pos) : value_draw(nodes);
+// qsearch(), search.cpp:1695
+return (ss->ply >= MAX_PLY && !ss->inCheck) ? evaluate(pos) : VALUE_DRAW;
+```
+
+`value_draw(nodes)` vale `VALUE_DRAW - 1 + (nodes & 0x2)`, cioe' **+-1**: e' il rumore deliberato
+contro la "cecita' da triplice ripetizione". In quiescenza la fonte NON lo mette. Da noi c'era
+`ValueDraw()` in entrambe: ogni foglia di patta valeva +-1 invece di 0, e l'errore risaliva
+l'albero. Da li' cambiava la correction history, la riduzione LMR, e infine la mossa scelta.
+
+**Come si e' arrivati**: la traccia CHIN (ingressi del bonus di correction history) mostrava lo
+stesso nodo (`nodi=2967 ply=5 d=4`) con `bv=-26` da noi e `-27` nell'oracolo, tutto il resto
+identico. Alzando la traccia PLY a ply 6 si vedeva la foglia: `newDepth=0`, cioe' tuffo in
+quiescenza, `score=-1` da noi e `0` nell'oracolo. Un valore di patta.
+
+Dopo la correzione la posizione coincide in tutto: 7.237 nodi, punteggio 21 cp e la stessa PV di
+dodici mosse.
+
+**Lezione**: due funzioni della fonte che sembrano fare la stessa cosa possono differire di
+proposito. Non si trascrive "il concetto" una volta e lo si riusa: si trascrive OGNI sito.
+
 ## RISOLTA: lo slot `currentMove` sovrascritto dalla ricerca singolare
 
 Trovata subito dopo `PvNode`, sulla divergenza a profondita' 4 successiva per taglia:

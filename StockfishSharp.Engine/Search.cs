@@ -630,6 +630,11 @@ public sealed class Search
         Move m = _currentMoveHistory[ply + StackOffset - 1];
 
         const int nonPawnWeight = 186;
+        if (Traccia)
+            Console.Error.WriteLine($"    CH bonus={bonus}"
+                + $" pawnPrima={_shared.PawnCorrHistory[pos.PawnKey & (ulong)_shared.CorrSizeMinus1, (byte)us]}"
+                + $" minorPrima={_shared.MinorCorrHistory[pos.MinorPieceKey & (ulong)_shared.CorrSizeMinus1, (byte)us]}"
+                + $" bMinor={bonus * 150 / 128}");
         UpdateCorrHistoryEntry(ref _shared.PawnCorrHistory[pos.PawnKey & (ulong)_shared.CorrSizeMinus1, (byte)us], bonus);
         UpdateCorrHistoryEntry(ref _shared.MinorCorrHistory[pos.MinorPieceKey & (ulong)_shared.CorrSizeMinus1, (byte)us], bonus * 150 / 128);
         UpdateCorrHistoryEntry(ref _shared.NonPawnWhiteCorrHistory[pos.NonPawnKey(Color.White) & (ulong)_shared.CorrSizeMinus1, (byte)us], bonus * nonPawnWeight / 128);
@@ -1290,7 +1295,13 @@ public sealed class Search
         if (ply != 0)
         {
             if (pos.IsDraw(ply) || ply >= Ply.MaxPly)
-                return ply >= Ply.MaxPly && pos.Checkers() == 0 ? Evaluate.StaticEval(pos, _accumulatorStack, Optimism(pos.SideToMove)) : ValueDraw();
+            {
+                int vPatta = ply >= Ply.MaxPly && pos.Checkers() == 0
+                    ? Evaluate.StaticEval(pos, _accumulatorStack, Optimism(pos.SideToMove)) : ValueDraw();
+                if (Traccia)
+                    Console.Error.WriteLine($"    PATTA sito=790 ply={ply} nodi={_nodes} r50={pos.Rule50Count} val={vPatta}");
+                return vPatta;
+            }
 
             // Step 3. Mate distance pruning — search.cpp:797-799. Esatta, non euristica: da
             // questo ply il miglior esito possibile è dare matto alla PROSSIMA mossa, il peggiore
@@ -1362,7 +1373,15 @@ public sealed class Search
 
         // Step 5. Valutazione statica — to_corrected_static_eval applica ora la vera correction
         // history (CorrectionValue sopra), non più un segnaposto a 0.
-        int staticEval;
+        // "ss->staticEval" e' un campo dello Stack, come "ss->ttPv": la verifica del null move
+        // (search.cpp:1037) gira sullo STESSO ss e lo RISCRIVE, ricalcolandolo con una correction
+        // history nel frattempo cambiata. Fino al 2026-09-08 qui c'era una copia locale, riversata
+        // nell'array solo in fondo al blocco: il nodo esterno continuava a usare il valore vecchio
+        // dove la fonte usa quello nuovo. Effetto misurato: 1 cp di scarto sulla valutazione
+        // corretta, che via correction history si propagava a "cv" e da li' alla riduzione LMR.
+        // Con "ref" la variabile E' la cella, e la scrittura avviene dove la fonte la fa
+        // (search.cpp:830/832/840/850), non piu' tardi.
+        ref int staticEval = ref _staticEvalHistory[ply + StackOffset];
         int eval;
         int unadjustedStaticEval = Values.None;
 
@@ -1375,7 +1394,7 @@ public sealed class Search
             // Ricerca di verifica delle Singular Extensions (Step 16): stessa posizione, stesso
             // ply della chiamata esterna — riusa la valutazione statica già calcolata lì invece
             // di ricalcolarla (search.cpp:831-832).
-            staticEval = eval = unadjustedStaticEval = _staticEvalHistory[ply + StackOffset];
+            unadjustedStaticEval = eval = staticEval; // "staticEval" E' gia' _staticEvalHistory[ply+off]
         }
         else
         {
@@ -1406,8 +1425,6 @@ public sealed class Search
             if (!probe.Found)
                 _tt.Save(probe.WriteIndex, pos.Key, Values.None, ttPv, Bound.None, Ply.DepthUnsearched, Move.None, unadjustedStaticEval);
         }
-
-        _staticEvalHistory[ply + StackOffset] = staticEval;
 
         bool improving = staticEval > _staticEvalHistory[ply + StackOffset - 2]; // (ss-2)->staticEval
         bool opponentWorsening = staticEval > -_staticEvalHistory[ply + StackOffset - 1]; // -(ss-1)->staticEval
@@ -1602,7 +1619,8 @@ public sealed class Search
                         + $" lato={(int)Types.Opposite(pos.SideToMove)} bonus={evalDiff * 11}"
                         + $" prima={_movePick.TracciaMainHistory(Types.Opposite(pos.SideToMove), parentMoveForEvalDiff)}"
                         + $" ply={ply} d={depth} nodi={_nodes}"
-                        + $" se={staticEval} se1={_staticEvalHistory[ply + StackOffset - 1]}");
+                        + $" se={staticEval} se1={_staticEvalHistory[ply + StackOffset - 1]}"
+                        + $" grezza={unadjustedStaticEval} cv={correctionValue}");
                 _movePick.ApplyEvalDiffMainBonus(Types.Opposite(pos.SideToMove), parentMoveForEvalDiff, evalDiff * 11);
 
                 Square prevSqForEvalDiff = parentMoveForEvalDiff.ToSq;
@@ -2372,6 +2390,9 @@ public sealed class Search
         {
             int chBonus = Math.Clamp((value - staticEval) * depth * (bestMove != null ? 12 : 18) / 128,
                 -CorrectionHistoryLimit / 4, CorrectionHistoryLimit / 4);
+            if (Traccia)
+                Console.Error.WriteLine($"    CHIN ply={ply} nodi={_nodes} bv={value} se={staticEval} d={depth}"
+                    + $" bm={(bestMove != null ? 1 : 0)} grezzo={chBonus} finale={1061 * chBonus / 1024}");
             UpdateCorrectionHistory(pos, ply, 1061 * chBonus / 1024);
         }
 
@@ -2437,11 +2458,19 @@ public sealed class Search
 
         if (isPvNode && _selDepth < ply + 1) _selDepth = ply + 1;
 
-        // Step 2. Patta immediata o profondita' massima — search.cpp:1693-1696.
+        // Step 2. Patta immediata o profondita' massima — search.cpp:1693-1695.
+        // ATTENZIONE, differenza REALE fra le due funzioni della fonte: qui la patta vale
+        // VALUE_DRAW secco (0), mentre in search() vale "value_draw(nodes)" = -1 + (nodes & 2),
+        // cioe' +-1 (il "rumore" anti-cecita' da triplice ripetizione). Fino al 2026-09-08 qui
+        // c'era ValueDraw() anche in quiescenza: ogni foglia di patta valeva +-1 invece di 0, e
+        // l'errore risaliva l'albero. Su
+        // "5rk1/q6p/2p3bR/1pPp1rP1/1P1Pp3/P3B1Q1/1K3P2/R7 w - - 93 90" (rule50=93, quindi molte
+        // patte per la regola delle 50 mosse a portata di ricerca) bastava a far divergere di 211
+        // nodi a profondita' 7 e a cambiare la mossa scelta.
         if (pos.IsDraw(ply) || ply >= Ply.MaxPly)
             return ply >= Ply.MaxPly && !inCheck
                 ? Evaluate.StaticEval(pos, _accumulatorStack, Optimism(pos.SideToMove))
-                : ValueDraw();
+                : Values.Draw;
 
         // Step 3. Consultazione della transposition table — search.cpp:1699-1711.
         var probe = _tt.Probe(pos.Key);
