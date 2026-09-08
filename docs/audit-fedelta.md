@@ -61,6 +61,42 @@ Tre livelli, in ordine di costo crescente. Nessuno da solo basta — l'hanno dim
 Regola operativa: **ogni riga vagliata va annotata qui sotto**, con l'esito, cosi' le sessioni
 successive non la riesaminino da capo. Un audit che si ripete da zero ogni volta non converge.
 
+## INDAGINE IN CORSO: due scritture di troppo sulla pawn history
+
+**Caso**: `8/3k4/8/8/8/4B3/4KB2/2B5 w - - 0 1` a profondita' 2 — 134 nodi contro 135, la divergenza
+piu' piccola che resti (identico a profondita' 1).
+
+**Catena di causa gia' ricostruita, con i due motori strumentati e affiancati**:
+
+1. Le tracce di radice combaciano per 52 righe su 53; la prima divergenza e' alla mossa **#11
+   `e3g5`**, con `alpha`, `beta`, `r` e `newDepth` IDENTICI ma punteggio 922 contro 909.
+2. Scendendo a ply 1 e poi a ply 2, la prima divergenza vera e' al nodo dopo `e3g5 d7d6`
+   (`8/8/3k4/6B1/8/8/4KB2/2B5 w`): la nostra prima mossa e' `e2d2`, quella dell'oracolo `g5f4`
+   (che da' scacco). Entrambi senza mossa di TT: e' un problema di ORDINAMENTO.
+3. Confrontati i punteggi di TUTTE le mosse quiete di quel nodo: **358 righe, 3 diverse**, e in un
+   solo campo — la **pawn history**. `main`, le continuation history e il bonus di scacco
+   combaciano. (Utile saperlo: `score<QUIETS>`, il bonus scacco e `set_check_info` sono fedeli,
+   verificati riga per riga.)
+4. Tracciate le SCRITTURE su quella voce (`[RE][d2]`, e la posizione non ha pedoni quindi c'e' una
+   sola chiave dei pedoni per tutta la ricerca): **noi 12, l'oracolo 10**. I bonus combaciano uno a
+   uno fino alla settima; poi noi ne facciamo due in piu':
+
+       noi:      ... quiet 44 | evaldiff 2821 | quiet 518 | quiet 70 | quiet -91 | quiet -775
+       oracolo:  ... quiet 44 |                 quiet 518 | quiet 70 |             quiet -775
+
+**Quindi: applichiamo il bonus "differenza di valutazione statica" alla pawn history in un nodo dove
+la fonte non lo applica** (piu' una scrittura quieta di troppo, probabilmente conseguenza).
+
+**Gia' verificati fedeli su questo percorso, NON ricontrollare**: i tre siti che scrivono la pawn
+history (search.cpp:985, 1600, 2056) con le loro costanti; il `bonusScale` del countermove
+(search.cpp:1580-1592) riga per riga; `update_quiet_histories`; `set_check_info`; `score<QUIETS>`;
+`TranspositionTable::probe`; `Zobrist::noPawns` (presente e usato).
+
+**DA DOVE RIPARTIRE**: il bonus di search.cpp:983-985 e' protetto da `!ttHit`. Aggiungere ply e
+profondita' alla traccia `PAWNW` (istruzioni sotto) e trovare in quale nodo la nostra `probe.Found`
+e' falsa mentre quella dell'oracolo e' vera — oppure in quale nodo il blocco esterno
+(search.cpp:979) entra da noi e non da loro.
+
 ## PUNTO DI RIPRESA per la prossima sessione
 
 **Piano concordato con l'utente: instrumentare l'oracolo per scovare le cause delle divergenze
