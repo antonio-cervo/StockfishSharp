@@ -494,10 +494,17 @@ scegliere la stessa mossa per caso, ma non visitare lo stesso NUMERO di nodi):
 | 18 | — | **49/49** |
 | 20 | 48/49 | **49/49** |
 | 22 | — | **49/49** |
+| 24 | — | **49/49** |
 
-Fino a profondita' **22** questo porting visita **esattamente lo stesso numero di nodi** dell'oracolo
+Fino a profondita' **24** questo porting visita **esattamente lo stesso numero di nodi** dell'oracolo
 su tutte e 49 le posizioni confrontabili. Non e' un "quasi": e' l'albero identico, nodo per nodo,
-per alberi che a d22 arrivano a milioni di nodi.
+per alberi che a quelle profondita' arrivano a decine di milioni di nodi.
+
+**Nessuna divergenza esiste piu' su questo insieme, a nessuna profondita' misurata.** Le due
+verifiche indipendenti aggiunte il 2026-09-09 (34 posizioni scelte per battere cio' che il bench non
+batte, e Chess960 con l'opzione accesa) sono anch'esse pulite. Continuare a salire di profondita' ha
+ormai un ritorno basso: ogni passo raddoppia il tempo di misura e le ultime sei profondita' non hanno
+prodotto nulla. **Il fronte non e' piu' la fedelta' dell'albero.**
 
 Le colonne "prima" a d16 e d20 sono le misure fatte durante la giornata, prima delle ultime due
 correzioni (puntatore alla PV del figlio, e il tetto di 10 s su `go depth` che era nel MISURATORE).
