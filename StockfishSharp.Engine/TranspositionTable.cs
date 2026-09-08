@@ -46,7 +46,7 @@ internal struct TTEntry
     public short Eval16;
 
     private const byte GenerationBits = 5;
-    private const byte GenerationMask = (1 << GenerationBits) - 1;
+    internal const byte GenerationMask = (1 << GenerationBits) - 1;
     private const byte BoundShift = GenerationBits;
     private const byte BoundMask = 0b11 << BoundShift;
     private const byte PvShift = BoundShift + 2;
@@ -140,9 +140,27 @@ public sealed class TranspositionTable
         _generation = 0;
     }
 
-    public void Clear() => Array.Clear(_clusters);
+    /// <summary><c>TranspositionTable::clear</c>, tt.cpp:187-221 — la fonte azzera anche
+    /// <c>generation8</c>, non solo la tabella. Ometterlo lasciava un contatore che continuava a
+    /// crescere attraverso <c>ucinewgame</c>/"Clear Hash", cioe' attraverso i confini di partita.</summary>
+    public void Clear()
+    {
+        _generation = 0;
+        Array.Clear(_clusters);
+    }
 
-    public void NewSearch() => _generation++;
+    /// <summary><c>TranspositionTable::new_search</c>, tt.cpp:238-242. Il mascheramento NON e'
+    /// pignoleria: <c>genBound8</c> impacca generazione (5 bit), bound (2 bit) e pv (1 bit) nello
+    /// stesso byte, e <c>save</c> li unisce con un OR. Senza la maschera, dalla 32esima ricerca in
+    /// poi i bit alti della generazione traboccano nei campi bound e pv, che vengono riletti
+    /// sbagliati: un limite UPPER puo' tornare come EXACT, cioe' un taglio che non andava fatto.
+    /// La fonte ha su questo un assert esplicito in <c>save</c>
+    /// (<c>assert(curr_generation &lt;= GENERATION_MASK); // TT::new_search() plays nice</c>).</summary>
+    public void NewSearch()
+    {
+        _generation++;
+        _generation &= TTEntry.GenerationMask; // tt.cpp:241
+    }
 
     public byte Generation => _generation;
 
