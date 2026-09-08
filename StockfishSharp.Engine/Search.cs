@@ -760,6 +760,7 @@ public sealed class Search
         double totBestMoveChanges = 0;
         int lastBestMoveDepth = 0;
         List<Move> lastBestMovePv = [];
+        int lastBestMoveScore = -Infinity; // search.cpp:504, per forgottenMate
         var iterValue = new int[4];
         int iterIdx = 0;
         Array.Fill(iterValue, _bestPreviousScore == Values.Infinite ? Values.Zero : _bestPreviousScore);
@@ -887,6 +888,59 @@ public sealed class Search
                 // attuale — bug reale trovato in una partita del bot, 2026-09-06. rootMoves[0].pv[0]
                 // è per costruzione sempre legale (creata da MoveGen.Generate(Legal,...) sopra, mai
                 // sovrascritta con altro che mosse passate da pos.Legal(m) nel ciclo di Negamax).
+                // search.cpp:504-508 — "forgottenMate". NON riguarda le iterazioni interrotte:
+                // riguarda un'iterazione COMPLETATA che perde un matto trovato da una precedente,
+                // o che lo ritrova solo con un punteggio inesatto. In quel caso la fonte NON
+                // sostituisce il risultato: tiene il matto piu' corto gia' trovato.
+                //
+                // Fino al 2026-09-08 questo blocco era dichiarato "non serve qui" con la
+                // motivazione che un'iterazione interrotta lancia un'eccezione e non arriva mai
+                // fin qui. La motivazione e' corretta ma copre solo META' del blocco della fonte
+                // (il ramo "abortedLossSearch"): forgottenMate e' indipendente da threads.stop, e
+                // senza di esso il motore puo' annunciare un matto e poi, a un'iterazione piu'
+                // profonda, giocare altro.
+                bool forgottenMate = lastBestMoveScore != -Infinity
+                    && Values.IsMateOrMated(lastBestMoveScore)
+                    && (Math.Abs(_rootMoves[0].Score) < Math.Abs(lastBestMoveScore)
+                        || _rootMoves[0].IsInexact);
+
+                // search.cpp:510-520. Il "if (!threads.stop)" della fonte e' implicito: qui ci si
+                // arriva solo a iterazione completata (vedi sopra).
+                if (lastBestMovePv.Count == 0 || lastBestMovePv[0] != _rootMoves[0].Pv[0])
+                    lastBestMoveDepth = depth;
+
+                if (!forgottenMate)
+                {
+                    // COPIA, non alias: piu' sotto lastBestMovePv puo' essere riversata dentro
+                    // _rootMoves[0].Pv, e con un alias la si azzererebbe mentre la si legge.
+                    lastBestMovePv = [.. _rootMoves[0].Pv];
+                    lastBestMoveScore = _rootMoves[0].Score;
+                }
+
+                // search.cpp:529-547 — ripristino: riporta in testa la vecchia mossa migliore col
+                // suo punteggio di matto. Il ramo "abortedLossSearch" della fonte non e'
+                // rappresentabile qui (un'iterazione interrotta non arriva a questo punto) ed e'
+                // gia' coperto dal fatto che il risultato pubblicato resta quello dell'ultima
+                // iterazione completata.
+                if (_rootMoves[0].Score != -Infinity && forgottenMate && lastBestMovePv.Count > 0)
+                {
+                    int idx = _rootMoves.FindIndex(rm => rm.Pv.Count > 0 && rm.Pv[0] == lastBestMovePv[0]);
+                    if (idx > 0)
+                    {
+                        var daPromuovere = _rootMoves[idx];
+                        _rootMoves.RemoveAt(idx);
+                        _rootMoves.Insert(0, daPromuovere);
+                    }
+
+                    if (idx >= 0)
+                    {
+                        _rootMoves[0].Score = _rootMoves[0].UciScore = lastBestMoveScore;
+                        _rootMoves[0].Pv.Clear();
+                        _rootMoves[0].Pv.AddRange(lastBestMovePv);
+                        _rootMoves[0].UnsetInexact();
+                    }
+                }
+
                 var bestRootMove = _rootMoves[0];
                 result.BestMove = bestRootMove.Pv[0];
                 result.Pv = [.. bestRootMove.Pv];
@@ -896,16 +950,14 @@ public sealed class Search
                 result.Depth = depth;
                 result.SelDepth = bestRootMove.SelDepth;
 
-                // search.cpp:510-521 — traccia da quanto la mossa migliore è stabile.
-                // "forgottenMate"/l'aggancio a un matto di un'iterazione interrotta a metà
-                // (search.cpp:505-547) non servono qui: un'iterazione interrotta a metà lancia
-                // OperationCanceledException PRIMA di arrivare a questo punto, quindi il ciclo
-                // "for" non la raggiunge mai e result mantiene per costruzione l'ultimo risultato
-                // completato — lo stesso identico effetto che quella logica ottiene nella fonte
-                // con un flag cooperativo, qui gratis grazie al modello a eccezioni.
-                if (lastBestMovePv.Count == 0 || lastBestMovePv[0] != bestRootMove.Pv[0])
-                    lastBestMoveDepth = depth;
-                lastBestMovePv = bestRootMove.Pv;
+                // NOTA STORICA, terza della serie (vedi anche SearchThreadPool.cs): fino al
+                // 2026-09-08 qui c'era scritto che "forgottenMate e l'aggancio a un matto di
+                // un'iterazione interrotta a meta' (search.cpp:505-547) non servono qui", perche'
+                // un'iterazione interrotta lancia un'eccezione e non arriva mai a questo punto.
+                // La motivazione e' vera ma copre solo il ramo "abortedLossSearch": forgottenMate
+                // e' indipendente da threads.stop e riguarda iterazioni COMPLETATE. Ora e' portato,
+                // sopra. Terza volta in due giorni che un'assunzione dichiarata in un commento
+                // nasconde un pezzo mancante.
 
                 // search.cpp:568-614 — gestione tempo adattiva reale: SOLO quando optimumMs è
                 // stato fornito (equivalente di limits.use_time_management()) E non abbiamo già
