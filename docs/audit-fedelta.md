@@ -142,6 +142,49 @@ posizioni di matto/stallo dove l'oracolo non stampa la riga info — artefatto d
 `4k3/3q1r2/1N2r1b1/3ppN2/2nPP3/1B1R2n1/2R1Q3/3K4 w - - 5 1` (1.821 contro 1.050, l'unica dove ne
 usiamo molti di piu').
 
+## PUNTO CIECO CHIUSO: il percorso SYZYGY non era mai stato confrontato
+
+Nessuno strumento di audit configurava `SyzygyPath`. Quindi `rank_root_moves` alla radice, il
+probing in-tree dello Step 7 e la sostituzione del punteggio da tablebase non erano MAI stati messi
+a confronto con la fonte — mentre il bot gioca CON le tablebase configurate. Nuovo
+`tools/tablebase.py`: 12 finali entro i 5 pezzi, con l'opzione accesa su entrambi i motori, e
+confronta **nodi E PV** (la seconda e' il segnale specifico per `syzygy_extend_pv`).
+
+Ha fruttato due cose subito.
+
+### 1. La riga "info" finale non passava da `output_pv`
+
+La fonte ristampa la riga finale chiamando la STESSA `output_pv` delle righe per iterazione
+(search.cpp:255-256). Da noi il layer UCI riformattava `result` a mano, saltando tutto cio' che
+`output_pv` fa: la sostituzione del punteggio da TABLEBASE (search.cpp:2296-2297), il campo `bound`
+e il ramo `usePreviousScore`.
+
+Su `8/8/8/3k4/8/8/3KB3/3B4 w - - 0 1` — KBBvK con i due alfieri sullo **stesso colore**, cioe' una
+PATTA teorica — le righe per iterazione dicevano correttamente `cp 0` e la riga finale diceva
+`cp 186`. Un client UCI legge l'ultima riga: annunciavamo +1,86 su una patta.
+
+Portato anche `RootMove::extract_ponder_from_tt` (search.cpp:2350) dentro il motore, dove vive nella
+fonte: stava nel layer UCI e operava su una COPIA della PV, quindi la mossa di ponder finiva nella
+riga stampata ma non in `rootMoves[0].pv` — ed e' proprio quel campo che `output_pv` legge subito
+dopo. `EmettiPv` e' ora diviso in `CostruisciInfoPv` (calcola) + emissione, cosi' la riga finale usa
+lo stesso identico calcolo.
+
+### 2. Portato `syzygy_extend_pv`, l'ultimo pezzo dichiarato mancante
+
+Restava `PV 9/12`: i tre casi erano tutti `syzygy_extend_pv` (search.cpp:2225-2271), che la fonte usa
+per validare/troncare la PV e poi estenderla fino al matto con le mosse a DTZ minimo.
+
+La sua assenza era dichiarata come *"incide solo su quanto e' lunga la PV mostrata, mai sulla mossa
+scelta"*. **Falso** — quinta assunzione scritta in un commento che si rivela sbagliata in tre giorni:
+modifica `rootMoves[0].pv`, che diventa `previousPV` e da li' alimenta `followPV`, che disattiva IIR
+e la potatura delle mosse quiete. In posizione con tablebase cambia l'albero dell'iterazione dopo.
+
+I mattoni c'erano gia' tutti (`RankRootMoves` con `rankDtz`/`timeAbort`, `MoveGen`, `RootMove`).
+Portati con essa il budget di meta' `Move Overhead` e lo spareggio dei DTZ pari merito.
+
+**Risultato**: `nodi 12/12, PV 12/12` a profondita' 10 e 16. Bench invariato (senza tablebase la
+guardia della fonte non e' mai vera: fuori dal regime TB un punteggio decisivo e' sempre un matto).
+
 ## RISOLTA (nel MISURATORE): "go depth N" aveva un tetto di 10 secondi
 
 Quarto difetto trovato negli strumenti invece che nel motore, e il piu' insidioso perche' falsava
@@ -1328,4 +1371,7 @@ Da estendere poi a: `movepick.cpp`, `history.h`, `position.cpp`, `tt.cpp`, `move
   backward update. **Verificato neutro sui valori** (vedi porting-master-plan.md), sono percorsi
   alternativi allo stesso accumulatore.
 - MultiPV, Skill Level, UCI_Elo, filtro `searchmoves`: dichiarati inerti.
+- `nodestime` (timeman.cpp): modalita' "nodi al posto dei millisecondi", opzione UCI inerte.
+- **`syzygy_extend_pv` NON E' PIU' in questo elenco**: portato il 2026-09-09. Era l'ultimo pezzo di
+  `search.cpp` con effetto sul comportamento a mancare.
 - Infrastruttura NUMA, huge pages, thread nativi: gestita dal runtime .NET.
