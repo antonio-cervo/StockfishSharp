@@ -61,41 +61,51 @@ Tre livelli, in ordine di costo crescente. Nessuno da solo basta — l'hanno dim
 Regola operativa: **ogni riga vagliata va annotata qui sotto**, con l'esito, cosi' le sessioni
 successive non la riesaminino da capo. Un audit che si ripete da zero ogni volta non converge.
 
-## INDAGINE IN CORSO: due scritture di troppo sulla pawn history
+## RISOLTA: il segnaposto della valutazione in TT usava il sentinella sbagliato
 
-**Caso**: `8/3k4/8/8/8/4B3/4KB2/2B5 w - - 0 1` a profondita' 2 — 134 nodi contro 135, la divergenza
-piu' piccola che resti (identico a profondita' 1).
+**Caso di partenza**: `8/3k4/8/8/8/4B3/4KB2/2B5 w - - 0 1` a profondita' 2, 134 nodi contro 135.
 
-**Catena di causa gia' ricostruita, con i due motori strumentati e affiancati**:
+**Catena, ricostruita con i due motori strumentati e affiancati** — e' il modello di come si procede:
+1. le tracce di radice combaciano per 52 righe su 53; prima divergenza alla mossa #11 `e3g5`, con
+   `alpha`, `beta`, `r` e `newDepth` IDENTICI ma punteggio 922 contro 909;
+2. scendendo a ply 2, al nodo dopo `e3g5 d7d6` la nostra prima mossa e' `e2d2`, quella dell'oracolo
+   `g5f4` (che da' scacco), **senza mossa di TT da entrambe le parti**: e' ordinamento;
+3. confrontati i punteggi di TUTTE le mosse quiete di quel nodo: **358 righe, 3 diverse, in un solo
+   campo** — la pawn history (`main`, continuation e bonus scacco combaciano);
+4. tracciate le SCRITTURE su quella voce: **noi 12, l'oracolo 10**, con i bonus uguali uno a uno
+   fino al settimo;
+5. tracciate le condizioni d'ingresso del bonus in eccesso: **82 righe, una sola davvero diversa**,
+   ed era `ttHit=0` da noi contro `ttHit=1` da loro.
 
-1. Le tracce di radice combaciano per 52 righe su 53; la prima divergenza e' alla mossa **#11
-   `e3g5`**, con `alpha`, `beta`, `r` e `newDepth` IDENTICI ma punteggio 922 contro 909.
-2. Scendendo a ply 1 e poi a ply 2, la prima divergenza vera e' al nodo dopo `e3g5 d7d6`
-   (`8/8/3k4/6B1/8/8/4KB2/2B5 w`): la nostra prima mossa e' `e2d2`, quella dell'oracolo `g5f4`
-   (che da' scacco). Entrambi senza mossa di TT: e' un problema di ORDINAMENTO.
-3. Confrontati i punteggi di TUTTE le mosse quiete di quel nodo: **358 righe, 3 diverse**, e in un
-   solo campo — la **pawn history**. `main`, le continuation history e il bonus di scacco
-   combaciano. (Utile saperlo: `score<QUIETS>`, il bonus scacco e `set_check_info` sono fedeli,
-   verificati riga per riga.)
-4. Tracciate le SCRITTURE su quella voce (`[RE][d2]`, e la posizione non ha pedoni quindi c'e' una
-   sola chiave dei pedoni per tutta la ricerca): **noi 12, l'oracolo 10**. I bonus combaciano uno a
-   uno fino alla settima; poi noi ne facciamo due in piu':
+**CAUSA** (search.cpp:853): l'entry con la sola valutazione statica va scritta con
+`DEPTH_UNSEARCHED` (-2), noi usavamo `DepthNone` (-3). I due sentinella non sono intercambiabili e
+types.h:235-241 lo dice: DEPTH_NONE serve al **controllo di occupazione**, DEPTH_UNSEARCHED alle
+entry scritte senza aver cercato. Con DepthNone il campo `depth8` diventa 0, cioe'
+`is_occupied() == false`: **l'entry c'e' ma ogni sonda successiva la manca.**
 
-       noi:      ... quiet 44 | evaldiff 2821 | quiet 518 | quiet 70 | quiet -91 | quiet -775
-       oracolo:  ... quiet 44 |                 quiet 518 | quiet 70 |             quiet -775
+Due conseguenze, una di correttezza e una di velocita':
+- la valutazione statica salvata non veniva mai riusata (rete NNUE rivalutata da capo ogni volta);
+- il bonus di pawn history protetto da `!ttHit` veniva applicato una volta di troppo, cambiando
+  l'ordinamento delle mosse quiete e quindi l'albero.
 
-**Quindi: applichiamo il bonus "differenza di valutazione statica" alla pawn history in un nodo dove
-la fonte non lo applica** (piu' una scrittura quieta di troppo, probabilmente conseguenza).
+**EFFETTO**
 
-**Gia' verificati fedeli su questo percorso, NON ricontrollare**: i tre siti che scrivono la pawn
-history (search.cpp:985, 1600, 2056) con le loro costanti; il `bonusScale` del countermove
-(search.cpp:1580-1592) riga per riga; `update_quiet_histories`; `set_check_info`; `score<QUIETS>`;
-`TranspositionTable::probe`; `Zobrist::noPawns` (presente e usato).
+| | prima | dopo |
+|---|---|---|
+| bench, nodi | 2.211.774 | **2.335.349** (oracolo 2.497.913) |
+| **nodi/secondo** | 374.000 | **474.567 (+27%)** |
+| stesso n. di nodi a profondita' 2 | 45/51 | **47/51** |
+| stesso n. di nodi a profondita' 3 | 27/51 | **40/51** |
+| stessa mossa a profondita' 3 | 94,1% | **100,0% (51/51)** |
+| scarto mediano di punteggio a d6 | 9 cp | **1 cp** |
 
-**DA DOVE RIPARTIRE**: il bonus di search.cpp:983-985 e' protetto da `!ttHit`. Aggiungere ply e
-profondita' alla traccia `PAWNW` (istruzioni sotto) e trovare in quale nodo la nostra `probe.Found`
-e' falsa mentre quella dell'oracolo e' vera — oppure in quale nodo il blocco esterno
-(search.cpp:979) entra da noi e non da loro.
+Due riproduttori storici sono ora **bit-identici all'oracolo** a profondita' 2, 3 e 6:
+`8/3k4/8/8/8/4B3/4KB2/2B5 w` (135/272/1198) e `8/8/1P6/5pr1/8/1R6/7k/2K5 b` (378/466/1455).
+
+**Verificati fedeli lungo questo percorso, NON ricontrollare**: i tre siti che scrivono la pawn
+history con le loro costanti; il `bonusScale` del countermove; `update_quiet_histories`;
+`set_check_info`; `score<QUIETS>` col bonus scacco; `TranspositionTable::probe`; `Zobrist::noPawns`;
+il `bonusScale` di search.cpp:1580-1592.
 
 ## PUNTO DI RIPRESA per la prossima sessione
 
@@ -206,10 +216,10 @@ Piu' la normalizzazione `(none)` == `0000` (matto/stallo: formato del layer UCI,
 | profondita' | stessa mossa | scarto di punteggio (mediana / peggiore) |
 |---|---|---|
 | 1 | **51/51 = 100,0%** | **0 cp / 0 cp** |
-| 3 | 45/51 = 88,2% | 0 cp / 35 cp |
-| 6 | 43/51 = 84,3% | 9 cp / 168 cp |
-| 9 | 38/51 = 74,5% | 25 cp / 108 cp |
-| 12 | 42/51 = 82,4% | 22 cp / 236 cp |
+| 3 | **51/51 = 100,0%** | 0 cp / 17 cp |
+| 6 | 43/51 = 84,3% | 1 cp / 77 cp |
+| 9 | 39/51 = 76,5% | 22 cp / 126 cp |
+| 12 | 41/51 = 80,4% | 24 cp / 146 cp |
 
 **A profondita' 1 siamo IDENTICI all'oracolo**: stessa mossa su tutte le 51 posizioni e scarto di
 punteggio zero. Convalida insieme valutazione NNUE, quiescenza e generazione mosse. Da profondita' 3
