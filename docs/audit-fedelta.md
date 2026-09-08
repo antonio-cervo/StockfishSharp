@@ -490,11 +490,17 @@ scegliere la stessa mossa per caso, ma non visitare lo stesso NUMERO di nodi):
 | 10 | 46/49 | **49/49** |
 | 12 | — | **49/49** |
 | 14 | — | **49/49** |
-| 16 | — | 46/49 |
+| 16 | 46/49 | **49/49** |
+| 18 | — | **49/49** |
+| 20 | 48/49 | **49/49** |
+| 22 | — | **49/49** |
 
-Fino a profondita' **14** questo porting visita **esattamente lo stesso numero di nodi** dell'oracolo
-su tutte e 49 le posizioni confrontabili. Non e' un "quasi": e' l'albero identico. Il fronte e' ora
-a profondita' 15-16.
+Fino a profondita' **22** questo porting visita **esattamente lo stesso numero di nodi** dell'oracolo
+su tutte e 49 le posizioni confrontabili. Non e' un "quasi": e' l'albero identico, nodo per nodo,
+per alberi che a d22 arrivano a milioni di nodi.
+
+Le colonne "prima" a d16 e d20 sono le misure fatte durante la giornata, prima delle ultime due
+correzioni (puntatore alla PV del figlio, e il tetto di 10 s su `go depth` che era nel MISURATORE).
 
 **Accordo di gioco a parita' di profondita'** (mossa scelta e scarto di punteggio):
 
@@ -518,17 +524,30 @@ Bench: 2.145.601 -> 2.117.244 -> 2.304.916 -> **2.182.360** nodi (oracolo 2.497.
 muove in entrambe le direzioni: non e' una metrica di qualita', e' solo la forma dell'albero che si
 conforma a quella della fonte.
 
-**DA DOVE RIPARTIRE**: le tre divergenze rimaste a profondita' 16, in ordine di taglia —
+**DA DOVE RIPARTIRE**: sulle 51 posizioni del bench **non esiste piu' una divergenza di conteggio
+nodi fino a profondita' 22**. Il fronte va quindi cercato altrove:
 
-- `r3r1k1/2p2ppp/p1p1bn2/8/1q2P3/2NPQN2/PPP3PP/R4RK1 b - - 2 15`: 135.032 contro 134.436 (**+596**),
-  la piu' piccola, da attaccare per prima;
-- `8/8/3P3k/8/1p6/8/1P6/1K3n2 b - - 0 1`: 139.286 contro 132.841 (+6.445);
-- `8/2p4P/8/kr6/6R1/8/8/1K6 w - - 0 1`: 223.851 contro 251.422 (-27.571).
+1. **Profondita' oltre 22** — misurare 24, 26. Ogni passo raddoppia il tempo, quindi conviene
+   lanciarlo in background e nel frattempo fare altro.
+2. **Altre posizioni**: 51 FEN sono poche e sono quelle del bench, cioe' quelle su cui Stockfish
+   stesso e' piu' esercitato. Un insieme piu' vario (finali di pedoni, posizioni con arrocco da
+   entrambe le parti, Chess960 con l'opzione accesa, posizioni con rule50 alto — che ha gia' fruttato
+   una causa) e' il modo naturale per far riemergere qualcosa.
+3. **Multi-thread**: tutte le misure di parita' sono a 1 thread. A piu' thread la parita' esatta non
+   e' attesa (Lazy SMP e' non deterministico anche nella fonte), ma l'EFFICIENZA parallela si puo'
+   confrontare — vedi il punto 2-bis piu' sotto, misura vecchia e da rifare.
+4. **Velocita'**: ora che l'albero e' identico, cio' che resta del divario in partita e' solo
+   nodi/secondo (4,0x). E' il fronte con il ritorno pratico piu' alto sul bot.
 
-Il procedimento e' lo stesso di sempre (iterazioni.py -> confronta_traccia.py -> si scende di
-livello) e ora e' molto piu' veloce, perche' il tetto di ply delle tracce si cambia da variabile
-d'ambiente (`SFS_PLY`/`SF_PLY`) senza ricompilare l'oracolo. Con alberi da 130.000+ nodi conviene
-pero' partire da `iterazioni.py` per trovare l'ITERAZIONE, e solo dopo aprire le tracce.
+Il procedimento resta lo stesso (iterazioni.py -> confronta_traccia.py -> si scende di livello) ed
+e' ora molto piu' veloce, perche' il tetto di ply delle tracce si cambia da variabile d'ambiente
+(`SFS_PLY`/`SF_PLY`) senza ricompilare l'oracolo. Con alberi da centinaia di migliaia di nodi
+conviene sempre partire da `iterazioni.py` per trovare l'ITERAZIONE, e solo dopo aprire le tracce.
+
+**Segnale da conoscere**: se la nostra ultima riga "info" dice una profondita' MINORE di quella
+richiesta mentre l'oracolo dice quella giusta, non e' una divergenza di ricerca — e' il ramo
+`usePreviousScore` di `output_pv`, cioe' la nostra iterazione e' stata INTERROTTA. Controllare
+prima i limiti di tempo del misuratore. E' cosi' che si e' scoperto il tetto di 10 s su `go depth`.
 
 Filo aperto indipendente: il finale `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11`, dove il rapporto
 di nodi esplode a 12-13x fra profondita' 11 e 13 per poi rientrare a 1,1x. Da rimisurare: e' una
