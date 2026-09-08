@@ -418,9 +418,11 @@ scegliere la stessa mossa per caso, ma non visitare lo stesso NUMERO di nodi):
 | 10 | 46/49 | **49/49** |
 | 12 | — | **49/49** |
 | 14 | — | **49/49** |
+| 16 | — | 46/49 |
 
-Fino a profondita' 14 questo porting visita **esattamente lo stesso numero di nodi** dell'oracolo su
-tutte e 49 le posizioni confrontabili. Non e' un "quasi": e' l'albero identico.
+Fino a profondita' **14** questo porting visita **esattamente lo stesso numero di nodi** dell'oracolo
+su tutte e 49 le posizioni confrontabili. Non e' un "quasi": e' l'albero identico. Il fronte e' ora
+a profondita' 15-16.
 
 **Accordo di gioco a parita' di profondita'** (mossa scelta e scarto di punteggio):
 
@@ -444,9 +446,17 @@ Bench: 2.145.601 -> 2.117.244 -> 2.304.916 -> **2.182.360** nodi (oracolo 2.497.
 muove in entrambe le direzioni: non e' una metrica di qualita', e' solo la forma dell'albero che si
 conforma a quella della fonte.
 
-**Da dove ripartire**: le divergenze rimaste cominciano a profondita' 12. Il procedimento e' lo
-stesso e ora e' molto piu' veloce, perche' il tetto di ply delle tracce si cambia da variabile
-d'ambiente (`SFS_PLY`/`SF_PLY`) senza ricompilare l'oracolo.
+**DA DOVE RIPARTIRE**: le tre divergenze rimaste a profondita' 16, in ordine di taglia —
+
+- `r3r1k1/2p2ppp/p1p1bn2/8/1q2P3/2NPQN2/PPP3PP/R4RK1 b - - 2 15`: 135.032 contro 134.436 (**+596**),
+  la piu' piccola, da attaccare per prima;
+- `8/8/3P3k/8/1p6/8/1P6/1K3n2 b - - 0 1`: 139.286 contro 132.841 (+6.445);
+- `8/2p4P/8/kr6/6R1/8/8/1K6 w - - 0 1`: 223.851 contro 251.422 (-27.571).
+
+Il procedimento e' lo stesso di sempre (iterazioni.py -> confronta_traccia.py -> si scende di
+livello) e ora e' molto piu' veloce, perche' il tetto di ply delle tracce si cambia da variabile
+d'ambiente (`SFS_PLY`/`SF_PLY`) senza ricompilare l'oracolo. Con alberi da 130.000+ nodi conviene
+pero' partire da `iterazioni.py` per trovare l'ITERAZIONE, e solo dopo aprire le tracce.
 
 Filo aperto indipendente: il finale `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11`, dove il rapporto
 di nodi esplode a 12-13x fra profondita' 11 e 13 per poi rientrare a 1,1x. Da rimisurare: e' una
