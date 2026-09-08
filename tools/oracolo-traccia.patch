@@ -28,6 +28,24 @@
      if (!ss->ttPv && depth < (seekMate ? 6 : 19) && eval >= beta && (!ttData.move || ttCapture)
          && !is_loss(beta) && !is_win(eval))
      {
+--- stockfish-upstream-reference/src/search.cpp	2026-09-05 13:35:36.126498700 +0200
++++ oracolo-build/src/search.cpp	2026-09-08 19:13:39.255254100 +0200
+@@ -982,7 +982,11 @@
+         mainHistory[~us][((ss - 1)->currentMove).raw()] << evalDiff * 11;
+         if (!ttHit && type_of(pos.piece_on(prevSq)) != PAWN
+             && ((ss - 1)->currentMove).type_of() != PROMOTION)
++        {
++            if (std::getenv("SF_TRACE") && type_of(pos.piece_on(prevSq)) == KING && prevSq == SQ_D2)
++                std::cerr << "    PAWNW evaldiff bonus=" << (evalDiff * 13) << std::endl;
+             sharedHistory.pawn_entry(pos)[pos.piece_on(prevSq)][prevSq] << evalDiff * 13;
++        }
+     }
+ 
+ 
+@@ -996,6 +1000,16 @@
+     if (!ss->ttPv && depth < (seekMate ? 6 : 19) && eval >= beta && (!ttData.move || ttCapture)
+         && !is_loss(beta) && !is_win(eval))
+     {
 +        if (ss->ply <= 1 && std::getenv("SF_TRACE"))
 +            std::cerr << "    STEP9 ply=" << ss->ply << " depth=" << depth << " eval=" << eval
 +                      << " statico=" << ss->staticEval << " ttHit=" << ss->ttHit
@@ -41,7 +59,15 @@
          Value futilityMult = std::min(45 + depth * 4, 85);
          futilityMult -= 20 * !ss->ttHit;
  
-@@ -1339,6 +1349,14 @@
+@@ -1303,6 +1317,7 @@
+         }
+ 
+         u64 nodeCount = rootNode ? u64(nodes) : 0;
++        u64 nodeCountTraccia = nodes;  // solo per la traccia: nodeCount e' azzerato fuori dalla radice
+ 
+         // Step 17. Make the move
+         do_move(pos, move, st, givesCheck, ss);
+@@ -1339,6 +1354,14 @@
          else if (move == ttData.move)
              r -= 2179;
  
@@ -56,15 +82,36 @@
          if (capture)
              ss->statScore = 873 * int(PieceValue[pos.captured_piece()]) / 128
                            + captureHistory[movedPiece][move.to_sq()][type_of(pos.captured_piece())];
-@@ -1434,6 +1452,11 @@
+@@ -1434,6 +1457,11 @@
          if (threads.stop.load(std::memory_order_relaxed))
              return VALUE_ZERO;
  
-+        if (rootNode && std::getenv("SF_TRACE"))
-+            std::cerr << "  RADICE d=" << depth << " mc=" << moveCount << " " << UCIEngine::move(move, false)
++        if (ss->ply <= 3 && std::getenv("SF_TRACE"))
++            std::cerr << "  PLY" << ss->ply << " d=" << depth << " mc=" << moveCount << " " << UCIEngine::move(move, false)
 +                      << " score=" << value << " alpha=" << alpha << " beta=" << beta
-+                      << " costo=" << (nodes - nodeCount) << " nodi=" << nodes << " r=" << r << " newDepth=" << newDepth << std::endl;
++                      << " costo=" << (nodes - nodeCountTraccia) << " nodi=" << nodes << " r=" << r << " newDepth=" << newDepth << " ttHit=" << ss->ttHit << " ttMove=" << (ttData.move ? UCIEngine::move(ttData.move, false) : std::string("none")) << std::endl;
 +
          if (rootNode)
          {
              RootMove& rm = *std::find(rootMoves.begin(), rootMoves.end(), move);
+@@ -1597,7 +1625,11 @@
+         mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 215 / 32768;
+ 
+         if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
++        {
++            if (std::getenv("SF_TRACE") && type_of(pos.piece_on(prevSq)) == KING && prevSq == SQ_D2)
++                std::cerr << "    PAWNW countermove bonus=" << (scaledBonus * 324 / 8192) << std::endl;
+             sharedHistory.pawn_entry(pos)[pos.piece_on(prevSq)][prevSq] << scaledBonus * 324 / 8192;
++        }
+     }
+ 
+     // Bonus for prior capture countermove that caused the fail low
+@@ -2053,6 +2085,8 @@
+ 
+     update_continuation_histories(ss, pos.moved_piece(move), move.to_sq(), bonus * 750 / 1024);
+ 
++    if (std::getenv("SF_TRACE") && type_of(pos.moved_piece(move)) == KING && move.to_sq() == SQ_D2)
++        std::cerr << "    PAWNW quiet bonus=" << (bonus * (bonus > -4 ? 1104 : 459) / 1024) << std::endl;
+     workerThread.sharedHistory.pawn_entry(pos)[pos.moved_piece(move)][move.to_sq()]
+       << bonus * (bonus > -4 ? 1104 : 459) / 1024;
+ }

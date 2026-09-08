@@ -239,6 +239,13 @@ Task riscaldamento = Task.Run(() =>
 {
     try
     {
+        // Con la traccia di audit accesa il riscaldamento va SALTATO: esegue una ricerca propria
+        // (8 thread, profondita' 10 sulla posizione iniziale) e le sue mosse di radice finiscono
+        // nella traccia, rendendola illeggibile — 614 righe invece di 63, con dentro le mosse di
+        // una partita che non c'entra nulla. Trappola incontrata davvero il 2026-09-08.
+        if (StockfishSharp.Engine.Search.Traccia)
+            return;
+
         var warmupPos = new Position();
         warmupPos.Set("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", false);
         var warmupSearch = new SearchThreadPool();

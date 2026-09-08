@@ -382,6 +382,16 @@ public sealed class Search
     //       MovePicker esterno e' ancora vivo dentro il proprio ciclo mosse (non serve un quarto
     //       livello: con excludedMove impostata lo Step 16 non puo' rientrare di nuovo)
     //   2 = ProbCut, che vive prima del ciclo principale ma durante il quale girano i figli
+    /// <summary>Traccia di audit, attiva solo con la variabile d'ambiente <c>SFS_TRACE=1</c>.
+    /// NON e' codice della fonte: e' l'impalcatura che permette di confrontare le grandezze interne
+    /// con quelle dell'ORACOLO COMPILATO E STRUMENTATO (vedi tools/oracolo-traccia.patch, che
+    /// aggiunge a search.cpp le stesse identiche tracce). E' il metodo con cui il 2026-09-08 e'
+    /// stato trovato il bug della maschera sui bound: si stampano i componenti da entrambe le parti
+    /// e si confrontano voce per voce, invece di formulare ipotesi.
+    ///
+    /// Essendo <c>static readonly</c>, a traccia spenta il JIT elimina del tutto i rami: costo zero.</summary>
+    public static readonly bool Traccia = Environment.GetEnvironmentVariable("SFS_TRACE") == "1";
+
     private readonly MovePicker[] _movePickerPool = BuildMovePickerPool();
 
     private static MovePicker[] BuildMovePickerPool()
@@ -1467,6 +1477,17 @@ public sealed class Search
                 && (ttMove == Move.None || ttCapture)
                 && !Values.IsLoss(beta) && !Values.IsWin(eval))
             {
+                if (Traccia && ply <= 1)
+                {
+                    Console.Error.WriteLine($"    STEP9 ply={ply} depth={depth} eval={eval}"
+                        + $" statico={_staticEvalHistory[ply + StackOffset]} grezzo={unadjustedStaticEval}"
+                        + $" ttHit={(probe.Found ? 1 : 0)} ttVal={ttScore} ttDepth={probe.Data.Depth}"
+                        + $" ttMove={(ttMove == Move.None ? "none" : "si")} ttCapture={(ttCapture ? 1 : 0)}"
+                        + $" ttPv={(ttPv ? 1 : 0)} improving={(improving ? 1 : 0)}"
+                        + $" oppWors={(opponentWorsening ? 1 : 0)} corr={correctionValue}"
+                        + $" alpha={alpha} beta={beta}");
+                }
+
                 int futilityMult = Math.Min(45 + (depth * 4), 85);
                 futilityMult -= 20 * (probe.Found ? 0 : 1);
 
@@ -1822,6 +1843,7 @@ public sealed class Search
             // conta), e i figli del null move (che la fonte non conta: do_null_move non tocca il
             // contatore). Il risultato era un conteggio gonfiato, che rendeva NON confrontabili
             // tutti i numeri di nodi misurati contro l'oracolo.
+            long _nodiPrimaDellaMossa = _nodes;
             _nodes++;
             pos.DoMove(m, st, givesCheck, frame.DirtyThreats, frame.DirtyPiece, frame.DirtyPawnPairs);
 
@@ -1839,6 +1861,15 @@ public sealed class Search
             int childCutoffCnt = _cutoffCntHistory[ply + StackOffset + 1];
             if (childCutoffCnt > 1) r += 264 + (childCutoffCnt > 2 ? 1095 : 0) + (allNode ? 1138 : 0);
             else if (m == ttMove) r -= 2179;
+
+            if (Traccia && ply == 0)
+            {
+                Console.Error.WriteLine($"    R mc={moveCount} base={Reduction(improving, depth, moveCount, localDelta)}"
+                    + $" impr={(improving ? 1 : 0)} d={depth} delta={localDelta} rootDelta={_rootDelta}"
+                    + $" ttPv={(ttPv ? 1 : 0)} cutNode={(cutNode ? 1 : 0)} ttCap={(ttCapture ? 1 : 0)}"
+                    + $" cutoffCnt1={_cutoffCntHistory[ply + StackOffset + 1]} allNode={(allNode ? 1 : 0)}"
+                    + $" corr={correctionValue} alpha={alpha} eval={eval} rPrima={r}");
+            }
 
             int statScore = _movePick.ComputeStatScore(pos, m, captureStage, contRefs,
                 _movedPieceHistory[ply + StackOffset], Types.Opposite(pos.SideToMove));
@@ -1895,8 +1926,12 @@ public sealed class Search
             }
             else if (!isPvNode || moveCount > 1)
             {
-                int rNoTt = r + (ttMove == Move.None ? 1127 : 0);
-                int searchDepth = newDepth - (rNoTt > 5234 ? 1 : 0) - (rNoTt > 5487 && newDepth > 2 ? 1 : 0);
+                // search.cpp:1397-1399 — la fonte MUTA "r" invece di usare una variabile locale.
+                // Verificato che "r" non viene piu' letto dopo questo punto nell'iterazione, quindi
+                // e' neutro sul comportamento; si trascrive comunque com'e' perche' altrimenti le
+                // due tracce di audit non sono confrontabili (differivano di esattamente 1127).
+                if (ttMove == Move.None) r += 1127;
+                int searchDepth = newDepth - (r > 5234 ? 1 : 0) - (r > 5487 && newDepth > 2 ? 1 : 0);
                 score = -Negamax(pos, searchDepth, ply + 1, -(alpha + 1), -alpha, cutNode: !cutNode);
             }
             else
@@ -1927,6 +1962,14 @@ public sealed class Search
 
             pos.UndoMove(m);
             _accumulatorStack.Pop();
+
+            if (Traccia && ply <= 3)
+            {
+                Console.Error.WriteLine($"  PLY{ply} d={depth} mc={moveCount} {m.FromSq}{m.ToSq}"
+                    + $" score={score} alpha={alpha} beta={beta} costo={_nodes - _nodiPrimaDellaMossa}"
+                    + $" nodi={_nodes} r={r} newDepth={newDepth} ttHit={(probe.Found ? 1 : 0)}"
+                    + $" ttMove={(ttMove == Move.None ? "none" : ttMove.FromSq.ToString().ToLower() + ttMove.ToSq.ToString().ToLower())}");
+            }
 
 
             // Bookkeeping delle rootMoves, search.cpp:1437-1506 — SOLO alla radice, PRIMA
