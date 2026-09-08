@@ -1424,7 +1424,17 @@ public sealed class Search
             // statica e quella di qui aggiorna sempre la sua main history (e, se non era un
             // pedone/promozione e non c'è già un hit di TT qui, anche la sua pawn history).
             Move parentMoveForEvalDiff = _currentMoveHistory[ply + StackOffset - 1];
-            if (parentMoveForEvalDiff.IsOk && !_inCheckHistory[ply + StackOffset - 1] && !_captureStageHistory[ply + StackOffset - 1])
+
+            // Terza condizione: "!priorCapture" (search.cpp:979), che nella fonte e'
+            // "pos.captured_piece()", cioe' se la mossa precedente ha CATTURATO davvero un pezzo.
+            // Fino al 2026-09-08 qui si leggeva invece il "captureStage" del genitore, che NON e'
+            // la stessa cosa: capture_stage include anche le promozioni a donna QUIETE, che non
+            // catturano nulla (position.h:365-372). Dopo una promozione a donna quieta saltavamo
+            // quindi questo bonus, che la fonte applica. Nota che gli altri due punti che usano
+            // priorCapture (search.cpp:887 e lo Step 23) lo leggevano gia' correttamente da
+            // pos.CapturedPiece(): era sbagliato solo qui.
+            if (parentMoveForEvalDiff.IsOk && !_inCheckHistory[ply + StackOffset - 1]
+                && pos.CapturedPiece() == Piece.None)
             {
                 int evalDiff = Math.Clamp(-(_staticEvalHistory[ply + StackOffset - 1] + staticEval), -189, 194) + 60;
                 _movePick.ApplyEvalDiffMainBonus(Types.Opposite(pos.SideToMove), parentMoveForEvalDiff, evalDiff * 11);
