@@ -220,8 +220,22 @@ public sealed class SearchThreadPool
             if (cand.BestMove is not { } candMove) continue;
             if (best.BestMove is not { } bestMove) { best = cand; continue; }
 
-            bool bestDecisive = Values.IsDecisive(best.ScoreCp);
-            bool candDecisive = Values.IsDecisive(cand.ScoreCp);
+            // thread.cpp:378-384 — il flag "decisivo" ha TRE condizioni nella fonte, non una.
+            // Le altre due proteggono da un caso che qui si verifica eccome, e che il commento
+            // della fonte descrive alla lettera: "Aborted (d1) searches may lead to inexact win
+            // (or loss) scores". Gli helper vengono cancellati a meta' iterazione quando il thread
+            // principale finisce, quindi la loro rootMoves[0] puo' portare un punteggio da
+            // fail-high/fail-low (un BOUND, non un valore esatto) oppure restare a -Infinite se
+            // non e' mai stata valutata. Senza le guardie, un simile punteggio conta come
+            // "decisivo" e per la regola sotto vince il voto INCONDIZIONATAMENTE: la mossa di un
+            // helper interrotto, cercata a profondita' irrisoria, finisce giocata sulla
+            // scacchiera.
+            //
+            // Il commento precedente in testa a questo file sosteneva che IsInexact fosse "sempre
+            // falso per costruzione" perche' la nostra ricerca completa sempre l'ultima iterazione
+            // a finestra piena. E' vero per il thread principale, FALSO per gli helper.
+            bool bestDecisive = best.ScoreCp != -Values.Infinite && Values.IsDecisive(best.ScoreCp) && !best.IsInexact;
+            bool candDecisive = cand.ScoreCp != -Values.Infinite && Values.IsDecisive(cand.ScoreCp) && !cand.IsInexact;
             long bestVotes = votes.GetValueOrDefault(bestMove);
             long candVotes = votes.GetValueOrDefault(candMove);
 

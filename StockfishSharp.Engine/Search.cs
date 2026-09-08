@@ -110,6 +110,11 @@ public sealed class SearchResult
     public long Nodes;
     public int Depth;
     public long TbHits;
+
+    /// <summary><c>RootMove::is_inexact()</c>, search.h:139 — vero se il punteggio della mossa
+    /// migliore e' un BOUND (fail-high/fail-low) e non un valore esatto. Serve al voto fra thread:
+    /// vedi il commento in <c>SearchThreadPool.GetBestResult</c>.</summary>
+    public bool IsInexact;
 }
 
 public sealed class Search
@@ -857,6 +862,7 @@ public sealed class Search
                 result.BestMove = bestRootMove.Pv[0];
                 result.Pv = [.. bestRootMove.Pv];
                 result.ScoreCp = bestRootMove.Score;
+                result.IsInexact = bestRootMove.IsInexact;
                 result.AverageScore = bestRootMove.AverageScore;
                 result.Depth = depth;
                 result.SelDepth = bestRootMove.SelDepth;
