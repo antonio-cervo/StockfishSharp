@@ -61,6 +61,32 @@ Tre livelli, in ordine di costo crescente. Nessuno da solo basta — l'hanno dim
 Regola operativa: **ogni riga vagliata va annotata qui sotto**, con l'esito, cosi' le sessioni
 successive non la riesaminino da capo. Un audit che si ripete da zero ogni volta non converge.
 
+## PUNTO DI RIPRESA per la prossima sessione
+
+**Piano concordato con l'utente: instrumentare l'oracolo per scovare le cause delle divergenze
+residue.** Lo strumento e' pronto e versionato: `tools/oracolo-traccia.patch` (istruzioni di build,
+validazione obbligatoria e trappole in testa al file).
+
+**Procedimento che ha funzionato, da ripetere**:
+1. `tools/nodi_bassa_profondita.py N` per trovare le posizioni che divergono alla profondita' piu'
+   bassa possibile (il conteggio nodi e' il segnale piu' severo);
+2. `tools/divide.py FEN D` per scendere al figlio piu' piccolo che diverge;
+3. strumentare ENTRAMBI i motori sulle stesse grandezze e confrontarle voce per voce. La voce che
+   non combacia e' la causa: non serve piu' formulare ipotesi.
+
+**Da dove ripartire, in ordine di taglia**:
+- profondita' 2: restano **6 posizioni su 51** con conteggio nodi diverso. La piu' anomala e'
+  `5k2/7R/4P2p/5K2/p1r2P1p/8/8/8 b - - 0 1`, l'unica dove usiamo PIU' nodi dell'oracolo
+  (410 contro 318): tutte le altre ne usano meno.
+- `8/8/1P6/5pr1/8/1R6/7k/2K5 b - - 1 1`: identico a profondita' 1, 384 contro 378 a profondita' 2.
+- il finale `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11`, dove il rapporto di nodi esplode a 12-13x
+  fra profondita' 11 e 13 per poi rientrare a 1,1x.
+
+**Ordine di priorita' suggerito**: prima le divergenze a profondita' 2 (albero minuscolo, causa
+isolabile in una sessione), poi risalire. Ogni causa trovata a profondita' bassa ne elimina molte a
+profondita' alta — la correzione della maschera sui bound, trovata su un caso da 57 nodi, ha portato
+l'accordo a profondita' 3 dall'88,2% al 94,1%.
+
 ## LO STRUMENTO DECISIVO: compilare l'oracolo (2026-09-08 sera)
 
 Sulla macchina c'e' **g++ 16.1.0 (MinGW-W64)**. L'oracolo si compila dal sorgente di riferimento e
