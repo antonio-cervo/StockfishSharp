@@ -121,6 +121,13 @@ public sealed class SearchResult
     /// <see cref="Search.SuAggiornamentoPv"/> descrive gia' questo risultato finale. Il chiamante
     /// UCI la usa per decidere se ristampare (search.cpp:255-256).</summary>
     public bool UciPvSent;
+
+    /// <summary>La riga "info" finale gia' COSTRUITA dal motore con la stessa logica di
+    /// <c>output_pv</c> (sostituzione del punteggio da tablebase, campo "bound", ramo
+    /// "usePreviousScore"). Il layer UCI la stampa cosi' com'e' invece di riformattare a mano —
+    /// quando <see cref="UciPvSent"/> e' falso, cioe' quando il motore non l'ha gia' emessa lui
+    /// (unico caso residuo: sotto Lazy SMP il voto ha scelto un thread diverso dal principale).</summary>
+    public InfoIterazione? InfoFinale;
 }
 
 /// <summary>Il contenuto di <c>InfoFull</c> (uci.h) riempito da <c>SearchManager::output_pv</c>
@@ -1156,6 +1163,33 @@ public sealed class Search
 
         result.Nodes = _nodes;
         result.TbHits = _tbHits;
+
+        // search.cpp:250-256 — la mossa di ponder ripescata dalla TT ALLUNGA rootMoves[0].pv, e in
+        // quel caso la riga gia' emessa per l'ultima iterazione non descrive piu' il risultato:
+        // va ristampata. Il punto e' che la fonte ristampa passando dalla STESSA output_pv, non da
+        // una formattazione a parte — cosi' la riga finale eredita la sostituzione del punteggio da
+        // TABLEBASE, il campo "bound" e il ramo "usePreviousScore".
+        //
+        // Fino al 2026-09-09 questa parte stava nel layer UCI e riformattava "result" a mano.
+        // Effetto misurato su "8/8/8/3k4/8/8/3KB3/3B4 w - - 0 1" (KBBvK con alfieri dello STESSO
+        // colore, cioe' patta) con le tablebase configurate: le righe per iterazione dicevano
+        // correttamente "cp 0", la riga finale diceva "cp 186" — il punteggio grezzo della ricerca
+        // invece di quello delle tablebase. Trovato solo perche' l'audit ha finalmente coperto il
+        // percorso Syzygy, che nessuno strumento configurava.
+        if (_rootMoves.Count > 0 && _rootMoves[0].Pv.Count == 1
+            && _rootMoves[0].ExtractPonderFromTt(_tt, pos))
+        {
+            result.Pv = [.. _rootMoves[0].Pv];
+            uciPvSent = false;
+        }
+
+        result.InfoFinale = CostruisciInfoPv(_rootDepth);
+        if (!uciPvSent && result.InfoFinale != null)
+        {
+            SuAggiornamentoPv?.Invoke(result.InfoFinale);
+            uciPvSent = true;
+        }
+
         // search.cpp:217 — "bool uciPvSent = iterative_deepening();": il valore risale al chiamante,
         // che decide se ristampare la riga finale (search.cpp:255-256). Un'iterazione interrotta
         // (catch sopra) NON ha emesso nulla per quella profondita', quindi il valore resta quello
@@ -1173,9 +1207,18 @@ public sealed class Search
     /// solo su quanto e' lunga la PV mostrata, mai sulla mossa scelta.</summary>
     private bool EmettiPv(int depth)
     {
-        var callback = SuAggiornamentoPv;
-        if (callback == null || _threadIdx != 0 || _rootMoves.Count == 0)
-            return true; // la fonte assegna uciPvSent anche quando la GUI non ascolta
+        var info = CostruisciInfoPv(depth);
+        if (info != null) SuAggiornamentoPv?.Invoke(info);
+        return true; // la fonte assegna uciPvSent anche quando la GUI non ascolta
+    }
+
+    /// <summary>Il corpo di <see cref="EmettiPv"/> che CALCOLA la riga, separato dall'emissione:
+    /// serve anche alla riga finale (search.cpp:255-256), che nella fonte passa dalla stessa
+    /// <c>output_pv</c> e non da una formattazione a parte.</summary>
+    private InfoIterazione? CostruisciInfoPv(int depth)
+    {
+        if (_threadIdx != 0 || _rootMoves.Count == 0)
+            return null;
 
         var rm = _rootMoves[0];
 
@@ -1205,8 +1248,7 @@ public sealed class Search
         if (!(isTbScore || usePreviousScore))
             info.Bound = rm.InexactLower ? "lowerbound" : rm.InexactUpper ? "upperbound" : "";
 
-        callback(info);
-        return true;
+        return info;
     }
 
     /// <param name="isPvNode"><c>constexpr bool PvNode = nodeType != NonPV</c>, search.cpp:706 — il

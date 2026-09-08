@@ -792,19 +792,15 @@ void HandleGo(string[] toks)
         }
         finally { search.SuAggiornamentoPv = null; }
 
-        // search.cpp:250-256 — "RootMove::extract_ponder_from_tt" (search.cpp:2350) ALLUNGA la PV
-        // di una mossa quando questa e' lunga 1, e in quel caso azzera uciPvSent: la riga gia'
-        // emessa per l'ultima iterazione mostrava una PV piu' corta e va ristampata. Altrimenti la
-        // riga finale si ristampa solo se non ne e' stata emessa nessuna (iterazione interrotta).
-        if (result.Pv.Count == 1 && result.BestMove is { } bm0 && bm0 != Move.None
-            && ExtractPonderFromTt(bm0) is { } ponder)
-        {
-            result.Pv.Add(ponder);
-            result.UciPvSent = false;
-        }
-
-        if (!result.UciPvSent)
-            Console.WriteLine($"info depth {result.Depth} seldepth {result.SelDepth} score {StockfishSharp.Uci.UciScore.Format(result.ScoreCp, position)} nodes {result.Nodes} tbhits {result.TbHits} pv {FormatPv(result.Pv)}");
+        // search.cpp:250-256 — l'estrazione della mossa di ponder dalla TT e la ristampa della riga
+        // finale sono ora DENTRO il motore (Search_), che le fa passare dalla stessa "output_pv"
+        // delle righe per iterazione: e' l'unico modo perche' la riga finale erediti la
+        // sostituzione del punteggio da tablebase, il campo "bound" e il ramo "usePreviousScore".
+        // Qui resta solo il caso in cui il motore NON l'ha emessa lui — sotto Lazy SMP, quando il
+        // voto ha scelto un thread diverso dal principale — e anche allora si stampa la riga gia'
+        // costruita dal motore, senza riformattarla.
+        if (!result.UciPvSent && result.InfoFinale is { } infoFinale)
+            Console.WriteLine(FormatInfo(infoFinale));
 
         WaitWhilePondering();
         PrintBestmove(result.BestMove, result.Pv);

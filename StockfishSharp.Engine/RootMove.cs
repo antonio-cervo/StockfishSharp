@@ -62,6 +62,35 @@ public sealed class RootMove
             rm => rm.PreviousScore);
     }
 
+    /// <summary><c>RootMove::extract_ponder_from_tt</c>, search.cpp:2350-2366 — quando la PV e'
+    /// lunga una sola mossa, prova a ripescare dalla TT la risposta dell'avversario e ad ALLUNGARE
+    /// la PV con essa. Ritorna vero se ci e' riuscita.
+    ///
+    /// Stava nel layer UCI e operava su una COPIA della PV: cosi' la mossa di ponder finiva nella
+    /// riga stampata ma non in <c>rootMoves[0].pv</c>, mentre nella fonte e' proprio quel campo a
+    /// essere modificato — ed e' quello che <c>output_pv</c> legge subito dopo (search.cpp:250-256).
+    /// Portata qui, dove vive nella fonte.</summary>
+    public bool ExtractPonderFromTt(TranspositionTable tt, Position pos)
+    {
+        var st = new StateInfo();
+        pos.DoMove(Pv[0], st);
+
+        if (!pos.IsDraw(1))
+        {
+            var probe = tt.Probe(pos.Key);
+            if (probe.Found)
+            {
+                var legali = new List<Move>();
+                MoveGen.Generate(GenType.Legal, pos, legali);
+                if (legali.Contains(probe.Data.Move))
+                    Pv.Add(probe.Data.Move);
+            }
+        }
+
+        pos.UndoMove(Pv[0]);
+        return Pv.Count > 1;
+    }
+
     /// <summary><c>std::find(rootMoves.begin(), rootMoves.end(), move)</c> — cerca l'ingresso la
     /// cui pv[0] è <paramref name="m"/> (ogni mossa legale alla radice compare esattamente una
     /// volta nella lista).</summary>
