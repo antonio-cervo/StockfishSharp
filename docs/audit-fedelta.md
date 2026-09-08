@@ -417,8 +417,9 @@ scegliere la stessa mossa per caso, ma non visitare lo stesso NUMERO di nodi):
 | 8 | 48/49 | **49/49** |
 | 10 | 46/49 | **49/49** |
 | 12 | — | **49/49** |
+| 14 | — | **49/49** |
 
-Fino a profondita' 12 questo porting visita **esattamente lo stesso numero di nodi** dell'oracolo su
+Fino a profondita' 14 questo porting visita **esattamente lo stesso numero di nodi** dell'oracolo su
 tutte e 49 le posizioni confrontabili. Non e' un "quasi": e' l'albero identico.
 
 **Accordo di gioco a parita' di profondita'** (mossa scelta e scarto di punteggio):
@@ -431,9 +432,13 @@ tutte e 49 le posizioni confrontabili. Non e' un "quasi": e' l'albero identico.
 | 9 | 73,6% (mediana 24 cp) | **100% (0 cp)** |
 | 12 | 81,1% (mediana 22 cp, peggiore 236 cp) | **100% (0 cp, peggiore 0 cp)** |
 
+| 16 | — | **100% (mediana 0 cp, peggiore 2 cp)** |
+
 A profondita' 12, su 51 posizioni, il motore sceglie la stessa mossa dell'oracolo **e le assegna lo
 stesso identico punteggio in centesimi**, in tutti e 51 i casi. E' il risultato che a inizio
-giornata sembrava fuori portata: si partiva da 81,1% con uno scarto peggiore di 236 cp.
+giornata sembrava fuori portata: si partiva da 81,1% con uno scarto peggiore di 236 cp. A
+profondita' 16 la mossa e' ancora sempre la stessa e il residuo di punteggio e' di **2 cp nel caso
+peggiore**.
 
 Bench: 2.145.601 -> 2.117.244 -> 2.304.916 -> **2.182.360** nodi (oracolo 2.497.913). Il bench si
 muove in entrambe le direzioni: non e' una metrica di qualita', e' solo la forma dell'albero che si
@@ -546,6 +551,9 @@ in su compaiono divergenze vere: **e' li' che va concentrato l'audit.**
 
 ### A parita' di TEMPO (quello che conta in partita)
 
+MISURA DA RIFARE: e' precedente a tutte le correzioni del 2026-09-08 sera, quando l'accordo a
+parita' di PROFONDITA' e' passato da 73-83% a 100%. Il numero sotto e' quindi storico.
+
 | | accordo | profondita' media |
 |---|---|---|
 | oracolo, 2 s | 49/51 = 96,1% | 32,5 |
@@ -558,10 +566,21 @@ COMPARABILE o INFERIORE all'oracolo (rapporto 0,46-0,66); sul bench a profondita
 contro 2,50 M. E' la **velocita' grezza: 398.000 nodi/s contro 1.600.000, cioe' 4,0x** — C# contro
 C++ con intrinseche AVX2, non un difetto di fedelta'.
 
+AGGIORNAMENTO 2026-09-08 sera: ora che a parita' di profondita' l'accordo e' del 100% fino a d16 e
+il conteggio nodi e' identico fino a d12, questa conclusione si rafforza invece di indebolirsi —
+cio' che resta del divario in partita e' velocita', non fedelta'. Il che rende la velocita' il
+prossimo fronte naturale, DOPO aver chiuso le divergenze oltre d12.
+
 Anomalia annotata: nel finale `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11` il rapporto di nodi
 esplode a 12-13x a profondita' 11-13, per rientrare a 1,1x da d14. Non spiegata.
 
-### IL RIPRODUTTORE MINIMO, da attaccare per primo
+### CHIUSO il 2026-09-08 sera: il riproduttore minimo
+
+`8/8/1P6/5pr1/8/1R6/7k/2K5 b - - 1 1` ora coincide con l'oracolo a profondita' 1, 2 e 3 (13, 378 e
+466 nodi, stesso punteggio e stessa PV). Anche la posizione da cui era stato ricavato,
+`8/8/1P6/5pr1/8/4R3/7k/2K5 w - - 0 1`, e' in parita' piena. Testo storico sotto.
+
+### (storico) IL RIPRODUTTORE MINIMO, da attaccare per primo
 
 Ottenuto per divide successivi dal disaccordo a profondita' 3 su
 `8/8/1P6/5pr1/8/4R3/7k/2K5 w - - 0 1` (identico all'oracolo fino a d2, 283 nodi):
