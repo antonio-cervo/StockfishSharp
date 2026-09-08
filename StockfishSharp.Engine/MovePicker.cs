@@ -42,13 +42,17 @@ public sealed class MovePicker
     // Nella fonte e' "Bitboard threatByLesser[KING + 1]" sullo stack (movepick.cpp:200).
     private readonly ulong[] _threatByLesser = new ulong[7];
 
-    private readonly Position _pos;
-    private readonly MovePick _hist;
+    // Non piu' readonly: l'istanza viene RIUSATA per ply invece di essere allocata a ogni nodo.
+    // Nella fonte "MovePicker mp(...)" e' un oggetto sullo STACK, quindi a costo zero; qui era una
+    // sealed class con 22 campi costruita a ogni nodo del ciclo principale, della quiescenza e del
+    // ProbCut — misurato: 258 byte allocati per nodo, quasi tutti questi.
+    private Position _pos = null!;
+    private MovePick _hist = null!;
     private readonly ContinuationRef[] _contRefs = new ContinuationRef[6];
-    private readonly Move _ttMove;
-    private readonly int _depth;
-    private readonly int _ply;
-    private readonly int _threshold;
+    private Move _ttMove;
+    private int _depth;
+    private int _ply;
+    private int _threshold;
 
     private Stage _stage;
     private bool _skipQuiets;
@@ -57,18 +61,21 @@ public sealed class MovePicker
     // per indice invece che per puntatore — stessa aritmetica di cur/endCur/endBadCaptures/
     // endCaptures/endGenerated, solo come interi invece che puntatori. Passati dal chiamante (vedi
     // nota sopra), non allocati qui.
-    private readonly Move[] _moves;
-    private readonly int[] _values;
-    private readonly List<Move> _genBuffer;
+    private Move[] _moves = null!;
+    private int[] _values = null!;
+    private List<Move> _genBuffer = null!;
     private int _cur, _endCur, _endBadCaptures, _endCaptures, _endGenerated;
 
     /// <summary>Costruttore per ricerca principale e quiescenza — movepick.cpp:153-177.
     /// <paramref name="movesBuf"/>/<paramref name="valuesBuf"/> (dimensione <see
     /// cref="Ply.MaxMoves"/>) e <paramref name="genBuffer"/> sono buffer riusati dal chiamante per
     /// livello di profondità — vedi nota in testa al file.</summary>
-    public MovePicker(Position pos, MovePick hist, Move ttMove, int depth, int ply, ContinuationRef[] contRefs,
+    public void Init(Position pos, MovePick hist, Move ttMove, int depth, int ply, ContinuationRef[] contRefs,
         Move[] movesBuf, int[] valuesBuf, List<Move> genBuffer)
     {
+        _skipQuiets = false;
+        _cur = _endCur = _endBadCaptures = _endCaptures = _endGenerated = 0;
+        _threshold = 0;
         _pos = pos;
         _hist = hist;
         _ttMove = ttMove;
@@ -87,9 +94,13 @@ public sealed class MovePicker
 
     /// <summary>Costruttore per ProbCut — movepick.cpp:181-189: genera solo catture con SEE almeno
     /// pari alla soglia data.</summary>
-    public MovePicker(Position pos, MovePick hist, Move ttMove, int threshold,
+    public void InitProbCut(Position pos, MovePick hist, Move ttMove, int threshold,
         Move[] movesBuf, int[] valuesBuf, List<Move> genBuffer)
     {
+        _skipQuiets = false;
+        _cur = _endCur = _endBadCaptures = _endCaptures = _endGenerated = 0;
+        _depth = 0;
+        _ply = 0;
         _pos = pos;
         _hist = hist;
         _ttMove = ttMove;

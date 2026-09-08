@@ -362,6 +362,28 @@ public sealed class Search
     private readonly List<Move>[] _capturesSearchedBufs = BuildPerPlyGenBufs(2);
     private readonly List<Move>[] _legalScratchBufs = BuildPerPlyGenBufs();
 
+    // Un MovePicker riusabile per ply e per RUOLO, invece di allocarne uno a ogni nodo: nella
+    // fonte "MovePicker mp(...)" e' un oggetto sullo STACK, quindi gratis, mentre qui era una
+    // sealed class con 22 campi costruita a ogni nodo del ciclo principale, della quiescenza e del
+    // ProbCut.
+    //
+    // Servono TRE slot per ply, non uno:
+    //   0 = ciclo mosse principale di Negamax (e la quiescenza, che puo' condividerlo: quando
+    //       Negamax si tuffa in quiescenza lo fa a "depth <= 0", cioe' PRIMA di costruire il
+    //       proprio MovePicker)
+    //   1 = ricerca di verifica delle Singular Extensions, che rientra allo STESSO ply mentre il
+    //       MovePicker esterno e' ancora vivo dentro il proprio ciclo mosse (non serve un quarto
+    //       livello: con excludedMove impostata lo Step 16 non puo' rientrare di nuovo)
+    //   2 = ProbCut, che vive prima del ciclo principale ma durante il quale girano i figli
+    private readonly MovePicker[] _movePickerPool = BuildMovePickerPool();
+
+    private static MovePicker[] BuildMovePickerPool()
+    {
+        var pool = new MovePicker[((Ply.MaxPly + StackOffset + 2) * 3) + 3];
+        for (int i = 0; i < pool.Length; i++) pool[i] = new MovePicker();
+        return pool;
+    }
+
     private static StateInfo[] BuildStateInfoPool()
     {
         var pool = new StateInfo[Ply.MaxPly + StackOffset + 2];
@@ -1477,7 +1499,8 @@ public sealed class Search
                 // del MovePicker principale del ciclo mosse (costruito più sotto, allo Step 14) —
                 // sicuro perché non c'è mai sovrapposizione: questo ProbCut finisce prima che
                 // quello inizi.
-                var probCutMp = new MovePicker(pos, _movePick, ttMove, probCutBeta - staticEval,
+                var probCutMp = _movePickerPool[(ply * 3) + 2];
+                probCutMp.InitProbCut(pos, _movePick, ttMove, probCutBeta - staticEval,
                     _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
 
                 Move pcMove;
@@ -1527,7 +1550,8 @@ public sealed class Search
 
         var contRefs = _contRefsBufs[ply];
         FillContinuationRefs(ply, contRefs);
-        var mp = new MovePicker(pos, _movePick, ttMove, depth, ply, contRefs,
+        var mp = _movePickerPool[(ply * 3) + (excludedMove == default ? 0 : 1)];
+        mp.Init(pos, _movePick, ttMove, depth, ply, contRefs,
             _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
 
         int origAlpha = alpha;
@@ -2171,7 +2195,8 @@ public sealed class Search
         Move prevMove = _currentMoveHistory[ply + StackOffset - 1];
         Square prevSq = prevMove != Move.None ? prevMove.ToSq : Square.None;
 
-        var mp = new MovePicker(pos, _movePick, ttMove, Ply.DepthQs, ply, contRefs,
+        var mp = _movePickerPool[ply * 3];
+        mp.Init(pos, _movePick, ttMove, Ply.DepthQs, ply, contRefs,
             _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
 
         // Step 5. Ciclo su tutte le mosse pseudo-legali.

@@ -773,6 +773,7 @@ void HandleBench(string[] toks)
     int total = BenchDefaults.Count(f => !f.StartsWith("setoption", StringComparison.Ordinal));
     int cnt = 0;
     long totalNodes = 0;
+    long allocIniziali = GC.GetTotalAllocatedBytes(true);
     var sw = Stopwatch.StartNew();
 
     foreach (string entry in BenchDefaults)
@@ -802,6 +803,7 @@ void HandleBench(string[] toks)
     Console.Error.WriteLine($"Total time (ms) : {elapsedMs}");
     Console.Error.WriteLine($"Nodes searched  : {totalNodes}");
     Console.Error.WriteLine($"Nodes/second    : {1000 * totalNodes / elapsedMs}");
+    Console.Error.WriteLine($"Byte allocati/nodo : {(GC.GetTotalAllocatedBytes(true) - allocIniziali) / (double)Math.Max(1, totalNodes):F1}");
 }
 
 // UCIEngine::move, uci.cpp — la rappresentazione interna dell'arrocco è "il re cattura la

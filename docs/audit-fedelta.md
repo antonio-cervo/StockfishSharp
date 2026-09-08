@@ -140,6 +140,31 @@ zero via `Position.Set(fen)`, e verifica anche il ripristino dopo `UndoMove`. Co
 pedone, 4 casi su 5 falliscono con messaggi precisi. Un test che passa senza saper fallire non prova
 nulla — vedi il caso di `NnueIncrementalTests`, che copriva solo il caso facile.
 
+### Allocazioni: ripreso il filo lasciato aperto (2026-09-08)
+
+Il piano di porting aveva lasciato annotato "restano ~210 byte/nodo, i candidati successivi sono le
+allocazioni residue". Ripreso e misurato: il bench stampa ora **byte allocati per nodo** nel
+riepilogo, cosi' la metrica resta sott'occhio.
+
+Scansione sistematica delle allocazioni dentro i corpi dei metodi (non gli inizializzatori di campo)
+sui file del percorso caldo. Esito:
+- `DirtyThreat` e' una `readonly struct`: `new DirtyThreat(...)` non alloca sull'heap. Falso allarme.
+- I wrapper di `NnueLayers` che restituiscono array **non sono chiamati dal motore**, solo dai test.
+- **`MovePicker` era una `sealed class` con 22 campi, costruita a OGNI nodo** (ciclo principale,
+  quiescenza e ProbCut). Nella fonte `MovePicker mp(...)` e' un oggetto sullo stack. Convertito a
+  istanza riusabile per ply, con **tre slot** per ply:
+  0 ciclo principale (condiviso con la quiescenza, che parte a `depth <= 0` cioe' prima che
+  Negamax costruisca il proprio), 1 verifica delle Singular Extensions (rientra allo STESSO ply
+  mentre il MovePicker esterno e' vivo), 2 ProbCut.
+
+**Risultato**: da **258,8 a 130,4 byte/nodo (-50%)**, con **nodi IDENTICI** (1.664.300) e 124/124
+test — la verifica che una conversione di soli buffer deve lasciare invariato il conteggio nodi.
+Velocita': 326-351k nodi/s contro 337-339k prima, cioe' dentro la varianza: **nessun guadagno di
+velocita' dimostrato**, solo meno pressione sul GC (che conta soprattutto a piu' thread).
+
+Prossimi candidati per i 130 byte/nodo rimasti: bisezionare fra percorso NNUE e percorso di ricerca
+(a suo tempo erano 137 senza NNUE, quindi oggi il grosso potrebbe essere altrove).
+
 ### Discrepanze TROVATE E CORRETTE il 2026-09-07
 | dove | cosa | commit |
 |---|---|---|
