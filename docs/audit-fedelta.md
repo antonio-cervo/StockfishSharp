@@ -532,6 +532,57 @@ Due errori commessi scrivendo quel test, tutti e due generalizzabili e da non ri
 (39/51 e 6/51 prima della correzione della generazione: due posizioni su 51 non dicono nulla in
 nessuna direzione). I punteggi divergono quasi ovunque — e' il punto 2 qui sotto.
 
+### Vagliato il 2026-09-08 (quarto giro): position.cpp
+
+**DUE discrepanze trovate, di cui una e' un meccanismo INTERO mai portato.**
+
+1. **`rule50` veniva incrementato dentro `DoNullMove`** (commit 401b064). Nella fonte
+   `++st->rule50` compare una volta sola, dentro `do_move` (position.cpp:839): il contatore conta
+   MOSSE VERE. Lungo una linea con N mosse nulle il nostro contatore era N avanti. Non e' innocuo:
+   `rule50` smorza la valutazione statica (`v -= v * rule50_count() / 199`), decide la patta e
+   declassa i punteggi di matto in `ValueFromTt`.
+   **Costo misurato, riportato per intero**: la correzione FEDELE fa PEGGIO sulla metrica di
+   qualita' (da 44/43/43 a 41/41 su 51). Si e' tenuta lo stesso — ed e' stata proprio quella
+   anomalia a far trovare la seconda discrepanza.
+
+2. **`adjust_key50` MAI PORTATO** (commit 87711ce). Nella fonte la chiave della TT non e' quella
+   grezza: `Position::key()` e' `adjust_key50(st->key)` (position.h:319-324), che sopra 14 mezze
+   mosse perturba la chiave di un valore che cambia ogni 8 unita' di `rule50`. Serve a impedire che
+   due posizioni identiche sulla scacchiera ma a orizzonti di patta diversi condividano la stessa
+   entry. Da noi `Position.Key` restituiva `_st.Key`.
+   **Effetto sulla parita' di nodi col bench**: 2.159.687 -> **2.440.725** contro i **2.497.913**
+   dell'oracolo, cioe' dal 33% di scarto di stamattina al **2,3%**.
+
+**Buco di COPERTURA colmato: `GivesCheck`** (commit dc4c0c3, `GivesCheckTests.cs`). `DoMove` non
+ricalcola gli scacchi, si fida del flag (`CheckersBB = givesCheck ? AttackersTo(re) & Pieces(us) :
+0`). Ne segue un'asimmetria: un falso NEGATIVO rompe il perft (evasioni non generate), un falso
+POSITIVO e' **invisibile** al perft, perche' il ramo "true" ricalcola comunque gli attaccanti veri e
+ottiene 0. In ricerca pero' il flag decide potature ed estensioni. **Verificato, non argomentato**:
+con una mutazione che fa restituire "true" a ogni promozione, tutti e 22 i test di perft passano e
+perft(4) da' ancora 422.333; il test nuovo fallisce.
+
+**Restano da vagliare in `position.cpp`**: i candidati dello strumento sono in gran parte intrinseche
+AVX-512 (non portate per scelta) e `set_state`/`do_castling`, gia' coperti dal perft e dai test
+sulle chiavi incrementali.
+
+### 5. Lead aperto: 3 nodi di quiescenza
+
+Riproduttore piu' piccolo di tutti: `8/2p5/3p4/KP5r/3R1p1k/8/4P1P1/8 b - - 1 11`, **scarto costante
+di 3 nodi gia' a profondita' 1** (20 contro 23), con lo stesso punteggio fino a d3. Le 15 mosse
+legali di radice coincidono (perft 1 = 15 in entrambi), quindi i 3 nodi sono dentro la quiescenza.
+
+Gia' verificati fedeli riga per riga e da NON ricontrollare: il blocco di potatura della quiescenza
+(search.cpp:1786-1821, incluso `moveCount > 2`, i due rami di futility e la SEE a -74), il calcolo
+di `futilityBase`, entrambe le smorzature (441/583 nello stand pat, 462/562 in fondo), e
+`score<CAPTURES>` (`captureHistory + 7 * PieceValue`).
+
+**Candidato residuo**: l'ORDINE delle catture. `if (moveCount > 2) continue` fa sopravvivere solo le
+prime due, quindi un ordine diverso cambia quali mosse si cercano. L'ordine di `GenType.Captures`
+non e' verificato da nulla — il perft valida solo l'ordine di `GenType.Legal`, e il test nuovo sui
+tipi di generazione valida gli INSIEMI, non le sequenze. Prossimo passo naturale: confrontare la
+sequenza di `GenType.Captures` con quella della fonte, e il comportamento di
+`PartialInsertionSort` sui valori pari.
+
 ### 3. Checklist dello strumento, da vagliare
 
 `python tools/audit_fedelta.py search.cpp` produce ~81 candidati sul corpo di `search()`. Molti sono
