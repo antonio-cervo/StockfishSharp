@@ -142,6 +142,45 @@ posizioni di matto/stallo dove l'oracolo non stampa la riga info — artefatto d
 `4k3/3q1r2/1N2r1b1/3ppN2/2nPP3/1B1R2n1/2R1Q3/3K4 w - - 5 1` (1.821 contro 1.050, l'unica dove ne
 usiamo molti di piu').
 
+## RISOLTA: il filtro di legalita' scorreva la lista ALL'INDIETRO
+
+E' la causa del lead "3 nodi di quiescenza" rimasto aperto per piu' sessioni
+(`8/2p5/3p4/KP5r/3R1p1k/8/4P1P1/8 b - - 1 11`, 20 nodi contro 23 gia' a profondita' 1).
+
+`generate<LEGAL>` (movegen.cpp:281-287) scarta le mosse illegali con una rimozione O(1) che
+sostituisce l'elemento con l'ULTIMO della lista, e il ciclo va **in avanti**, senza avanzare quando
+rimuove (rieesamina la stessa posizione):
+
+```cpp
+while (cur != moveList)
+    if ((...) && !pos.legal(*cur))
+        *cur = *(--moveList);
+    else
+        ++cur;
+```
+
+Da noi lo stesso trucco, ma il ciclo andava **all'indietro**. Stesso INSIEME di mosse (per questo
+il perft non se ne accorgeva mai), ORDINE diverso.
+
+Il commento che stava nel codice diceva: *"l'ordine delle mosse generate non e' mai un requisito,
+l'ordinamento vero avviene altrove"*. E' falso, per due motivi:
+- `rootMoves` e' costruita in quest'ordine, quindi `rootMoves[0]` e' la prima mossa legale generata
+  e alla prima iterazione (TT vuota) diventa il **ttMove della radice**, che ordina l'intera ricerca;
+- `PartialInsertionSort` di MovePicker e' **stabile**: a pari punteggio decide l'ordine di
+  generazione.
+
+**Come si e' visto** — nessuna deduzione: `go perft 1` stampa le mosse in ordine di generazione, su
+entrambi i motori. Le due liste differivano ESATTAMENTE per le due mosse di re agli estremi (la
+fonte apriva con h4g5 e chiudeva con h4g4, noi il contrario): cioe' per quale mossa la rimozione
+aveva tirato in testa al posto della `f4f3` illegale (pedone inchiodato dalla torre in d4).
+
+Dopo la correzione la posizione coincide a profondita' 1, 3, 5 e 8 (23, 122, 766, 3.689 nodi).
+
+**Buco di copertura da colmare**: nessun test valida l'ORDINE di `GenType.Legal` — il perft valida
+solo i conteggi, e il test sui tipi di generazione valida gli INSIEMI. Un confronto dell'ordine
+contro `go perft 1` dell'oracolo su qualche posizione con pezzi inchiodati sarebbe il guardiano
+naturale.
+
 ## RISOLTA: in quiescenza la patta valeva +-1 invece di 0
 
 Trovata attaccando `5rk1/q6p/2p3bR/1pPp1rP1/1P1Pp3/P3B1Q1/1K3P2/R7 w - - 93 90`, che era l'UNICA

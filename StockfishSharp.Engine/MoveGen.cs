@@ -52,22 +52,35 @@ public static class MoveGen
         if (pos.Checkers() != 0) GenerateAll(us, GenType.Evasions, pos, moveList);
         else GenerateAll(us, GenType.NonEvasions, pos, moveList);
 
-        for (int i = moveList.Count - 1; i >= start; i--)
+        // movegen.cpp:281-287 — il ciclo va IN AVANTI, e su una mossa illegale NON avanza: la
+        // sostituisce con l'ULTIMA della lista ("*cur = *(--moveList)") e ri-esamina quella stessa
+        // posizione. Fino al 2026-09-08 qui si scorreva ALL'INDIETRO, con la stessa rimozione O(1)
+        // ma direzione opposta: stesso INSIEME di mosse, ORDINE diverso.
+        //
+        // Il commento che stava qui diceva che "l'ordine delle mosse generate non è mai un
+        // requisito, l'ordinamento vero avviene altrove". E' FALSO, ed e' costato una divergenza
+        // reale: rootMoves e' costruita in quest'ordine, quindi rootMoves[0] e' la prima mossa
+        // legale generata, e alla prima iterazione (TT vuota) diventa il ttMove della radice, che
+        // ordina l'intera ricerca. Su "8/2p5/3p4/KP5r/3R1p1k/8/4P1P1/8 b - - 1 11" la nostra
+        // prima mossa di radice era h4g4 e quella della fonte h4g5 — le due liste differivano
+        // ESATTAMENTE per le due mosse di re agli estremi, cioe' per quale mossa la rimozione
+        // aveva tirato in testa. Anche piu' in basso l'ordine conta: il PartialInsertionSort di
+        // MovePicker e' stabile, quindi a pari punteggio decide l'ordine di generazione.
+        int cur = start;
+        int end = moveList.Count;
+        while (cur != end)
         {
-            Move m = moveList[i];
+            Move m = moveList[cur];
             bool needsCheck = (pinned & Bitboards.SquareBB(m.FromSq)) != 0
                             || m.FromSq == ksq
                             || m.TypeOf == MoveType.EnPassant;
 
             if (needsCheck && !pos.Legal(m))
-            {
-                // Rimozione O(1): sostituisce con l'ultimo elemento invece di scalare la lista —
-                // stesso trucco della fonte (*cur = *(--moveList)), l'ordine delle mosse generate
-                // non è mai un requisito (l'ordinamento vero avviene altrove, in fase di ricerca).
-                moveList[i] = moveList[^1];
-                moveList.RemoveAt(moveList.Count - 1);
-            }
+                moveList[cur] = moveList[--end];
+            else
+                ++cur;
         }
+        moveList.RemoveRange(end, moveList.Count - end);
     }
 
     private static void GenerateAll(Color us, GenType type, Position pos, List<Move> moveList)
