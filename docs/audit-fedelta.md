@@ -107,6 +107,41 @@ history con le loro costanti; il `bonusScale` del countermove; `update_quiet_his
 `set_check_info`; `score<QUIETS>` col bonus scacco; `TranspositionTable::probe`; `Zobrist::noPawns`;
 il `bonusScale` di search.cpp:1580-1592.
 
+## RISOLTA anche la seconda: il ProbCut non registrava la mossa nello stack
+
+**Caso**: `1r3k2/4q3/2Pp3b/3Bp3/2Q2p2/1p1P2P1/1P2KP2/3N4 w - - 0 1` a profondita' 3, 342 nodi
+contro 343 — **un solo nodo**.
+
+**Catena**: 296 righe di traccia, **UNA sola diversa** — l'oracolo cerca in quiescenza la cattura
+`f2e3`, noi no. Ingresso in quiescenza IDENTICO in tutto (`alpha=818 beta=819 best=-33 statico=-33
+fbase=273 ttHit=0`), quindi la differenza e' nel ciclo mosse. Tracciata la generazione: **la mossa
+c'e' in entrambi, ma il nostro `prevSq` vale g3 dove la fonte ha e3**. `f2e3` e' una RIPRESA su e3,
+e con `prevSq` corretto la fonte la esenta dalla potatura di futility (search.cpp:1791,
+`move.to_sq() != prevSq`); col nostro sbagliato la potavamo.
+
+**CAUSA**: search.cpp:1074 usa `do_move(pos, move, st, ss)`, il do_move del **Worker**, che oltre a
+muovere REGISTRA la mossa (`ss->currentMove` e i puntatori di continuation history scelti da
+`[inCheck][capture][pezzo][casa]`, search.cpp:655-671). Il nostro ProbCut chiamava il `DoMove` nudo
+di `Position`: **tutto il suo sottoalbero girava col contesto rimasto dalla mossa precedente.**
+
+**Corretto nello stesso passaggio un errore d'ORDINE**: tuffo in quiescenza, tetto alla profondita'
+e controllo di ripetizione imminente vanno PRIMA di Step 1/2/3 (search.cpp:729-742). Con l'ordine
+sbagliato lo Step 3 restringeva alpha/beta e alla quiescenza arrivava una finestra piu' stretta
+(beta 31998 invece di 32001 gia' al primo nodo).
+
+**RISULTATO: parita' di nodi PIENA a profondita' 2 e 3** (49/49; le due che il tabulato segna sono
+posizioni di matto/stallo dove l'oracolo non stampa la riga info — artefatto dello strumento).
+
+| stesso numero di nodi | prima | dopo |
+|---|---|---|
+| profondita' 2 | 47/51 | **49/51 (= tutte)** |
+| profondita' 3 | 40/51 | **49/51 (= tutte)** |
+
+**Frontiera successiva: profondita' 4**, dove restano 5 divergenze vere su 51. La piu' piccola e'
+`4k2r/1pb2ppp/1p2p3/1R1p4/3P4/2r1PN2/P4PPP/1R4K1 b - - 3 22` (591 contro 594); la piu' anomala e'
+`4k3/3q1r2/1N2r1b1/3ppN2/2nPP3/1B1R2n1/2R1Q3/3K4 w - - 5 1` (1.821 contro 1.050, l'unica dove ne
+usiamo molti di piu').
+
 ## PUNTO DI RIPRESA per la prossima sessione
 
 **Piano concordato con l'utente: instrumentare l'oracolo per scovare le cause delle divergenze
@@ -216,10 +251,10 @@ Piu' la normalizzazione `(none)` == `0000` (matto/stallo: formato del layer UCI,
 | profondita' | stessa mossa | scarto di punteggio (mediana / peggiore) |
 |---|---|---|
 | 1 | **51/51 = 100,0%** | **0 cp / 0 cp** |
-| 3 | **51/51 = 100,0%** | 0 cp / 17 cp |
-| 6 | 43/51 = 84,3% | 1 cp / 77 cp |
-| 9 | 39/51 = 76,5% | 22 cp / 126 cp |
-| 12 | 41/51 = 80,4% | 24 cp / 146 cp |
+| 3 | **51/51 = 100,0%** | **0 cp / 0 cp** |
+| 6 | 45/51 = 88,2% | 0 cp / 77 cp |
+| 9 | 36/51 = 70,6% | 16 cp / 117 cp |
+| 12 | 42/51 = 82,4% | 14 cp / 129 cp |
 
 **A profondita' 1 siamo IDENTICI all'oracolo**: stessa mossa su tutte le 51 posizioni e scarto di
 punteggio zero. Convalida insieme valutazione NNUE, quiescenza e generazione mosse. Da profondita' 3
