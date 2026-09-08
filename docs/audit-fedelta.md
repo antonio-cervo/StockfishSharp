@@ -597,6 +597,17 @@ e' B1, `none().to_sq()` e' A1) ma NON lo e': per il null move la fonte non indic
 `Move.None` (casa A1 = 0) riproduce esattamente quel piano. Ogni altra lettura e' protetta da
 `is_ok()`, che scarta entrambi i valori.
 
+### Checklist dello strumento su search.cpp: primo blocco vagliato (2026-09-08)
+
+Degli ~80 candidati "assenti" la grande maggioranza sono falsi positivi da rinomina. Vagliati e
+**VERIFICATI FEDELI** (non ricontrollare):
+`ttPv` e la sua ereditarieta' su fail-low (search.cpp:1617); il bonus/malus da taglio di TT
+(search.cpp:880-889); il **penalize(1)** della entry inutile (search.cpp:915-921, condizione e
+costante identiche); il probe della posizione DOPO la mossa di TT (search.cpp:895-905, incluso l'uso
+del valore GREZZO e di `pos.key()` — che ora, con `adjust_key50` portato, e' davvero la stessa
+chiave); Step 9 futility completo, incluso `futilityMult -= 20 * !ss->ttHit`; l'espressione di
+`followPV` (search.cpp:772-775); la soglia del MovePicker di ProbCut (`probCutBeta - ss->staticEval`).
+
 ### 5. Lead aperto: 3 nodi di quiescenza
 
 Riproduttore piu' piccolo di tutti: `8/2p5/3p4/KP5r/3R1p1k/8/4P1P1/8 b - - 1 11`, **scarto costante
