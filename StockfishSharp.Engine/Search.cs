@@ -137,10 +137,17 @@ public sealed class Search
     /// duplicano lavoro invece di esplorare parti diverse dell'albero.</summary>
     private readonly int _threadIdx;
 
-    public Search(TranspositionTable? sharedTt = null, int threadIdx = 0)
+    public Search(TranspositionTable? sharedTt = null, int threadIdx = 0, SharedHistories? shared = null)
     {
         _tt = sharedTt ?? new TranspositionTable();
         _threadIdx = threadIdx;
+
+        // Worker::Worker, search.cpp:171-172 — un thread SOLO non e' un caso speciale nella fonte:
+        // ha comunque le sue SharedHistories, semplicemente con moltiplicatore 1. Il default qui
+        // serve agli usi fuori dal pool (test, strumenti) che costruiscono una Search da sola.
+        _ownsShared = shared is null;
+        _shared = shared ?? new SharedHistories(1);
+        _movePick.AttachShared(_shared);
     }
     // N9 — accumulatore NNUE aggiornato in modo incrementale invece di ricalcolato da zero a ogni
     // Evaluate.StaticEval; sincronizzato con la ricerca via Push()/Pop() attorno a ogni DoMove/
@@ -495,11 +502,16 @@ public sealed class Search
     // minori/non-pedoni per colore (history.h:227-248, sizeMinus1 = CORRHIST_BASE_SIZE-1 =
     // UINT_16_HISTORY_SIZE-1) più una continuation history a parte (ss-2/ss-4).
     private const int CorrectionHistoryLimit = 1024; // CORRECTION_HISTORY_LIMIT, history.h:41
-    private const int CorrHistSize = 65536; // CORRHIST_BASE_SIZE, history.h:39-40
-    private readonly short[,] _pawnCorrHistory = new short[CorrHistSize, Colors.Nb];
-    private readonly short[,] _minorCorrHistory = new short[CorrHistSize, Colors.Nb];
-    private readonly short[,] _nonPawnWhiteCorrHistory = new short[CorrHistSize, Colors.Nb];
-    private readonly short[,] _nonPawnBlackCorrHistory = new short[CorrHistSize, Colors.Nb];
+    // Le quattro correction history "unificate" (pawn/minor/nonPawn) NON sono piu' nostre: vivono
+    // in SharedHistories, condivise da tutti i thread e dimensionate sul loro numero
+    // (UnifiedCorrectionHistory = DynStats<..., CORRHIST_BASE_SIZE>, history.h:189-191). La quinta,
+    // _continuationCorrHistory, resta per thread: nella fonte e' un membro di Worker (search.h:352).
+    private readonly SharedHistories _shared;
+
+    /// <summary>Vero se questa Search si e' costruita da sola le tabelle condivise (uso fuori dal
+    /// pool: test e strumenti). In quel caso e' lei a doverle azzerare in <see cref="NewGame"/>;
+    /// dentro il pool le azzera il pool, una volta per tutti i thread.</summary>
+    private readonly bool _ownsShared;
     // CorrectionHistory<Continuation>, history.h:183-185 — [pezzo/casa all'ancestro ss-2 o ss-4]
     // [pezzo/casa della mossa ss-1, valutata al nodo corrente]. Le celle mai scritte condividono
     // il sentinella [Piece.None,A1,...] esattamente come la fonte condivide un'unica entry
@@ -511,6 +523,7 @@ public sealed class Search
     public void NewGame()
     {
         _tt.Clear();
+        if (_ownsShared) _shared.Clear();
         _movePick.Clear();
 
         // ThreadPool::clear(), thread.cpp:272-278 — questi due valori influenzano il tempo
@@ -520,15 +533,8 @@ public sealed class Search
         _bestPreviousScore = Values.Infinite;
 
         // Worker::clear(), search.cpp:696-697,708-710 — pawn/minor/nonpawn a -5, continuation a
-        // +5 (segno diverso, fedele alla fonte).
-        for (int k = 0; k < CorrHistSize; k++)
-            for (int c = 0; c < Colors.Nb; c++)
-            {
-                _pawnCorrHistory[k, c] = -5;
-                _minorCorrHistory[k, c] = -5;
-                _nonPawnWhiteCorrHistory[k, c] = -5;
-                _nonPawnBlackCorrHistory[k, c] = -5;
-            }
+        // +5 (segno diverso, fedele alla fonte). Le prime quattro sono ora condivise fra i thread:
+        // le azzera SharedHistories una volta sola, non ogni thread per conto suo.
         for (int p1 = 0; p1 < PieceSlots.Nb; p1++)
             for (int s1 = 0; s1 < Squares.Nb; s1++)
                 for (int p2 = 0; p2 < PieceSlots.Nb; p2++)
@@ -544,10 +550,10 @@ public sealed class Search
         Color us = pos.SideToMove;
         Move m = _currentMoveHistory[ply + StackOffset - 1]; // (ss-1)->currentMove
 
-        int pcv = _pawnCorrHistory[pos.PawnKey & (CorrHistSize - 1), (byte)us];
-        int micv = _minorCorrHistory[pos.MinorPieceKey & (CorrHistSize - 1), (byte)us];
-        int wnpcv = _nonPawnWhiteCorrHistory[pos.NonPawnKey(Color.White) & (CorrHistSize - 1), (byte)us];
-        int bnpcv = _nonPawnBlackCorrHistory[pos.NonPawnKey(Color.Black) & (CorrHistSize - 1), (byte)us];
+        int pcv = _shared.PawnCorrHistory[pos.PawnKey & (ulong)_shared.CorrSizeMinus1, (byte)us];
+        int micv = _shared.MinorCorrHistory[pos.MinorPieceKey & (ulong)_shared.CorrSizeMinus1, (byte)us];
+        int wnpcv = _shared.NonPawnWhiteCorrHistory[pos.NonPawnKey(Color.White) & (ulong)_shared.CorrSizeMinus1, (byte)us];
+        int bnpcv = _shared.NonPawnBlackCorrHistory[pos.NonPawnKey(Color.Black) & (ulong)_shared.CorrSizeMinus1, (byte)us];
 
         int cntcv;
         if (m.IsOk)
@@ -581,10 +587,10 @@ public sealed class Search
         Move m = _currentMoveHistory[ply + StackOffset - 1];
 
         const int nonPawnWeight = 186;
-        UpdateCorrHistoryEntry(ref _pawnCorrHistory[pos.PawnKey & (CorrHistSize - 1), (byte)us], bonus);
-        UpdateCorrHistoryEntry(ref _minorCorrHistory[pos.MinorPieceKey & (CorrHistSize - 1), (byte)us], bonus * 150 / 128);
-        UpdateCorrHistoryEntry(ref _nonPawnWhiteCorrHistory[pos.NonPawnKey(Color.White) & (CorrHistSize - 1), (byte)us], bonus * nonPawnWeight / 128);
-        UpdateCorrHistoryEntry(ref _nonPawnBlackCorrHistory[pos.NonPawnKey(Color.Black) & (CorrHistSize - 1), (byte)us], bonus * nonPawnWeight / 128);
+        UpdateCorrHistoryEntry(ref _shared.PawnCorrHistory[pos.PawnKey & (ulong)_shared.CorrSizeMinus1, (byte)us], bonus);
+        UpdateCorrHistoryEntry(ref _shared.MinorCorrHistory[pos.MinorPieceKey & (ulong)_shared.CorrSizeMinus1, (byte)us], bonus * 150 / 128);
+        UpdateCorrHistoryEntry(ref _shared.NonPawnWhiteCorrHistory[pos.NonPawnKey(Color.White) & (ulong)_shared.CorrSizeMinus1, (byte)us], bonus * nonPawnWeight / 128);
+        UpdateCorrHistoryEntry(ref _shared.NonPawnBlackCorrHistory[pos.NonPawnKey(Color.Black) & (ulong)_shared.CorrSizeMinus1, (byte)us], bonus * nonPawnWeight / 128);
 
         if (m.IsOk)
         {

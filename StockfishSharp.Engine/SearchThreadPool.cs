@@ -4,9 +4,16 @@
 // (System.Threading.Tasks), non parte dell'algoritmo. Chiamata "SearchThreadPool" invece di
 // "ThreadPool" per non collidere con System.Threading.ThreadPool.
 //
-// L'UNICA cosa che i thread della fonte condividono davvero è la transposition table
-// (Search::SharedState la passa per riferimento a ogni Worker, thread.h:194-204) — le history/
-// MovePick/AccumulatorStack restano sempre private per thread, esattamente come nella fonte.
+// I thread della fonte condividono DUE cose: la transposition table (Search::SharedState la passa
+// per riferimento a ogni Worker, thread.h:194-204) e le SharedHistories (correction history,
+// continuation history, pawn history — history.h:204-257, una copia per nodo NUMA). Restano private
+// per thread: mainHistory, lowPlyHistory, captureHistory, continuationCorrectionHistory,
+// ttMoveHistory, il MovePicker e l'AccumulatorStack (search.h:349-357).
+//
+// NOTA STORICA, seconda della serie: fino al 2026-09-08 questo commento diceva che la TT era
+// "L'UNICA cosa che i thread condividono davvero" e che le history "restano sempre private per
+// thread, esattamente come nella fonte". Era falso, e l'affermazione scritta qui ha fatto da
+// coperchio a un pezzo mai portato per settimane — vedi docs/audit-fedelta.md, punto 2-ter.
 // La TT stessa non richiede sincronizzazione esplicita: TranspositionTable.cs è già un array di
 // struct (non riferimenti), quindi letture/scritture concorrenti su elementi diversi sono
 // naturalmente sicure, e su un elemento condiviso possono al più produrre un mismatch di chiave
@@ -48,20 +55,28 @@ public sealed class SearchThreadPool
 {
     private readonly TranspositionTable _tt = new();
     private readonly List<Search> _searches = [];
+    private SharedHistories _sharedHistories = new(1);
     private (bool useRule50, int probeDepth, int probeLimit) _syzygyOptions = (true, 1, 7);
 
     public int ThreadCount => _searches.Count;
 
     /// <summary>Ricrea il pool con N thread di ricerca, tutti condividenti la stessa <see
-    /// cref="TranspositionTable"/> — <c>Threads.set</c>, thread.cpp (le history/MovePick/
-    /// AccumulatorStack di ciascuno restano private, ricreate da zero).</summary>
+    /// cref="TranspositionTable"/> e le stesse <see cref="SharedHistories"/> — <c>Threads.set</c>,
+    /// thread.cpp:208-216 (MovePicker, AccumulatorStack e le history per thread restano private,
+    /// ricreate da zero).</summary>
     public void SetThreadCount(int n)
     {
         n = Math.Max(1, n);
         _searches.Clear();
+
+        // thread.cpp:208-216 — le SharedHistories si ricreano insieme ai thread e sono dimensionate
+        // sul loro numero (next_power_of_two, fatto dentro il costruttore). Una sola istanza per
+        // tutti: e' proprio la condivisione a essere il punto (vedi SharedHistories.cs).
+        _sharedHistories = new SharedHistories(n);
+
         for (int i = 0; i < n; i++)
         {
-            var s = new Search(_tt, _searches.Count); // threadIdx, search.cpp:173
+            var s = new Search(_tt, _searches.Count, _sharedHistories); // threadIdx, search.cpp:173
             s.SetSyzygyOptions(_syzygyOptions.useRule50, _syzygyOptions.probeDepth, _syzygyOptions.probeLimit);
             _searches.Add(s);
         }
@@ -104,6 +119,13 @@ public sealed class SearchThreadPool
     public void NewGame()
     {
         if (_searches.Count == 0) SetThreadCount(1);
+
+        // Le tabelle condivise si azzerano UNA volta sola qui, non dentro ogni Search.NewGame():
+        // nella fonte i thread se ne spartiscono le fette (clear_range, search.cpp:696-697), qui
+        // basta un riempimento solo. Prima delle Search, perche' Search.NewGame azzera quelle
+        // private e non deve trovarsi le condivise ancora sporche a meta'.
+        _sharedHistories.Clear();
+
         foreach (var s in _searches) s.NewGame();
     }
 

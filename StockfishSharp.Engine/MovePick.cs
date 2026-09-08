@@ -67,10 +67,18 @@ public sealed class MovePick
     // [colore][move.raw()] esattamente come la fonte.
     private readonly short[,] _mainHistory = new short[Colors.Nb, 65536];
 
-    // ContinuationHistory, history.h:137-143 — ContinuationHistoryBlock::table[2][2] della fonte:
-    // indicizzata [scacco del nodo genitore][la sua mossa era una cattura][pezzo mosso lì][sua
-    // casa di arrivo][pezzo di questa mossa][sua casa di arrivo].
-    private readonly short[,,,,,] _continuationHistory = new short[2, 2, PieceSlots.Nb, Squares.Nb, PieceSlots.Nb, Squares.Nb];
+    // ContinuationHistory, history.h:137-143 — ContinuationHistoryBlock::table[2][2] della fonte.
+    // NON e' piu' nostra: vive in SharedHistories, condivisa da tutti i thread (search.h:356).
+    private SharedHistories _shared = null!;
+    private short[,,,,,] _continuationHistory = null!;
+
+    /// <summary>Aggancia le tabelle condivise fra i thread — <c>Worker::Worker</c>, search.cpp:171-172
+    /// (<c>sharedHistory(...)</c> e <c>continuationHistory(sharedHistory.continuationHistory())</c>).</summary>
+    public void AttachShared(SharedHistories shared)
+    {
+        _shared = shared;
+        _continuationHistory = shared.ContinuationHistory;
+    }
 
     private static readonly (int Lookback, int Weight)[] ConthistBonuses =
         [(1, 520), (2, 390), (3, 145), (4, 251), (5, 66), (6, 209)]; // search.cpp:2018-2019
@@ -104,25 +112,13 @@ public sealed class MovePick
     // due usi della fonte (bonus di ordinamento da differenza di valutazione statica, bonus al
     // "countermove" quieto su fail-low puro) non sono ancora portati (le tecniche a cui
     // appartengono non lo sono).
-    private const int PawnHistorySize = 8192;
     private const int PawnHistoryLimit = 8192; // AtomicStats<i16,8192,...> D, history.h:146
-    private readonly short[,,] _pawnHistory = new short[PawnHistorySize, PieceSlots.Nb, Squares.Nb];
 
     public void Clear()
     {
         for (int c = 0; c < Colors.Nb; c++)
             for (int m = 0; m < 65536; m++)
                 _mainHistory[c, m] = -5; // Worker::clear(), search.cpp:691 — mainHistory.fill(-5)
-
-        // search.cpp:699-704 — continuationHistory[inCheck][capture][...].fill(-586) per le 4
-        // combinazioni.
-        for (int ic = 0; ic < 2; ic++)
-            for (int cs = 0; cs < 2; cs++)
-                for (int p1 = 0; p1 < PieceSlots.Nb; p1++)
-                    for (int s1 = 0; s1 < Squares.Nb; s1++)
-                        for (int p2 = 0; p2 < PieceSlots.Nb; p2++)
-                            for (int s2 = 0; s2 < Squares.Nb; s2++)
-                                _continuationHistory[ic, cs, p1, s1, p2, s2] = -586;
 
         for (int p = 0; p < PieceSlots.Nb; p++)
             for (int s = 0; s < Squares.Nb; s++)
@@ -131,10 +127,8 @@ public sealed class MovePick
 
         _ttMoveHistory = 0; // Worker::clear(), search.cpp:706
 
-        for (int k = 0; k < PawnHistorySize; k++)
-            for (int p = 0; p < PieceSlots.Nb; p++)
-                for (int s = 0; s < Squares.Nb; s++)
-                    _pawnHistory[k, p, s] = -1338; // clear_range(-1338, ...), search.cpp:697
+        // continuationHistory e pawnHistory sono condivise fra i thread: le azzera SharedHistories,
+        // una volta sola, non ogni thread per conto suo (vedi SharedHistories.Clear).
     }
 
     /// <summary><c>lowPlyHistory.fill(102)</c>, iterative_deepening, search.cpp:326 — a differenza
@@ -263,7 +257,7 @@ public sealed class MovePick
         UpdateHistory(ref _mainHistory[(byte)opponent, parentMove.Raw], scaledBonus * 215 / 32768, MainHistoryLimit);
 
         if (Types.TypeOf(prevPiece) != PieceType.Pawn && parentMove.TypeOf != MoveType.Promotion)
-            UpdateHistory(ref _pawnHistory[pos.PawnKey & (PawnHistorySize - 1), (byte)prevPiece, (byte)prevSq], scaledBonus * 324 / 8192, PawnHistoryLimit);
+            UpdateHistory(ref _shared.PawnHistory[pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, (byte)prevPiece, (byte)prevSq], scaledBonus * 324 / 8192, PawnHistoryLimit);
     }
 
     /// <summary>Ramo "bonus per il countermove di cattura che ha causato il fail-low puro",
@@ -284,7 +278,7 @@ public sealed class MovePick
     /// perché nella fonte ha guardie aggiuntive (nessun hit di TT, pezzo del genitore non un
     /// pedone, mossa del genitore non una promozione).</summary>
     public void ApplyEvalDiffPawnBonus(Position pos, Piece prevPiece, Square prevSq, int bonus) =>
-        UpdateHistory(ref _pawnHistory[pos.PawnKey & (PawnHistorySize - 1), (byte)prevPiece, (byte)prevSq], bonus, PawnHistoryLimit);
+        UpdateHistory(ref _shared.PawnHistory[pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, (byte)prevPiece, (byte)prevSq], bonus, PawnHistoryLimit);
 
     /// <summary><c>ss-&gt;statScore</c>, search.cpp:1342-1349 — usato da Reduction() in Search.cs
     /// per rifinire la riduzione LMR in base a quanto la history "approva" la mossa. Per le
@@ -333,7 +327,7 @@ public sealed class MovePick
         Square to = m.ToSq;
         int cont0 = ContinuationScore(contRefs[0], pc, to);
         int cont1 = ContinuationScore(contRefs[1], pc, to);
-        int pawnScore = _pawnHistory[pos.PawnKey & (PawnHistorySize - 1), (byte)pc, (byte)to];
+        int pawnScore = _shared.PawnHistory[pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, (byte)pc, (byte)to];
         return cont0 + cont1 + pawnScore;
     }
 
@@ -345,7 +339,7 @@ public sealed class MovePick
     public int GetLowPlyHistoryValue(int ply, Move m) => _lowPlyHistory[ply, m.Raw];
 
     public int GetPawnHistoryValue(Position pos, Piece pc, Square to) =>
-        _pawnHistory[pos.PawnKey & (PawnHistorySize - 1), (byte)pc, (byte)to];
+        _shared.PawnHistory[pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, (byte)pc, (byte)to];
 
     /// <summary>Lettura pubblica di un livello di continuation history (0=ss-1..5=ss-6) — usata
     /// da <see cref="MovePicker"/> per lo score delle mosse quiete (movepick.cpp:233-237).</summary>
@@ -380,7 +374,7 @@ public sealed class MovePick
         UpdateContinuationHistories(contRefs, currentInCheck, pc, move.ToSq, bonus * 750 / 1024);
 
         // search.cpp:2056-2057 — scala diversamente un bonus (raro, "bonus > -4") da un malus.
-        UpdateHistory(ref _pawnHistory[pos.PawnKey & (PawnHistorySize - 1), (byte)pc, (byte)move.ToSq],
+        UpdateHistory(ref _shared.PawnHistory[pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, (byte)pc, (byte)move.ToSq],
             bonus * (bonus > -4 ? 1104 : 459) / 1024, PawnHistoryLimit);
     }
 
