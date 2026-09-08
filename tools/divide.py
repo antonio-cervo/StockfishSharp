@@ -15,7 +15,8 @@ DEPTH = int(sys.argv[2]) if len(sys.argv) > 2 else 5
 def apri(cmd):
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, text=True, bufsize=1, cwd=ROOT)
-    for c in ["setoption name Threads value 1", "setoption name Hash value 16"]:
+    for c in ["setoption name Threads value 1", "setoption name Hash value 16",
+              "setoption name OwnBook value false"]:
         p.stdin.write(c + "\n")
     p.stdin.flush()
     return p

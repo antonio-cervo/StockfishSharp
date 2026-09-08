@@ -27,9 +27,18 @@ ORACLE = [ROOT + r'\stockfish-reference-binary\stockfish\stockfish-windows-x86-6
 
 src = io.open(ROOT + r'\StockfishSharp.Uci\Program.cs', encoding='utf-8').read()
 i = src.index('Defaults')
-fens = [f for f in re.findall(r'"([^"]*?/[^"]*? [wb] [^"]*?)"', src[i:i + 20000]) if f.count('/') == 7]
+# La lista Defaults contiene DUE posizioni Chess960, racchiuse fra righe
+# "setoption name UCI_Chess960 value true/false". Vanno escluse: senza quell'opzione i diritti di
+# arrocco della FEN si interpretano diversamente e si confronterebbero due posizioni diverse.
+fens, chess960 = [], False
+for riga in re.findall(r'"([^"]*)"', src[i:i + 20000]):
+    if riga.startswith("setoption name UCI_Chess960"):
+        chess960 = riga.rstrip().endswith("true")
+        continue
+    if riga.count('/') == 7 and re.search(r' [wb] ', riga) and not chess960:
+        fens.append(riga)
 
-DEPTHS = [int(a) for a in sys.argv[1:]] or [1, 3, 6, 9, 12]
+DEPTHS = [int(a) for a in sys.argv[1:] if a.lstrip('-').isdigit()] or [1, 3, 6, 9, 12]
 
 
 def cerca(cmd, fen, d):

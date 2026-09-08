@@ -21,7 +21,7 @@ def per_depth(cmd, fen, maxd):
     """Ritorna {depth: (score, bestmove-della-pv)} prendendo l'ULTIMA riga info per ogni depth."""
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, text=True, bufsize=1, cwd=ROOT)
-    for c in ["setoption name Threads value 1", "setoption name Hash value 16",
+    for c in ["setoption name Threads value 1", "setoption name Hash value 16", "setoption name OwnBook value false",
               "ucinewgame", "position fen " + fen]:
         p.stdin.write(c + "\n")
     p.stdin.flush()

@@ -61,52 +61,81 @@ Tre livelli, in ordine di costo crescente. Nessuno da solo basta — l'hanno dim
 Regola operativa: **ogni riga vagliata va annotata qui sotto**, con l'esito, cosi' le sessioni
 successive non la riesaminino da capo. Un audit che si ripete da zero ogni volta non converge.
 
-## Grado di fedelta' DI GIOCO (misure del 2026-09-08 sera)
+## Grado di fedelta' DI GIOCO (misure del 2026-09-08 sera, CORRETTE)
 
-Non e' la fedelta' del codice: e' quanto il motore SCEGLIE le stesse mosse dell'oracolo. Vanno
-separati due fattori, altrimenti si confonde "pensa diversamente" con "e' piu' lento".
+Non e' la fedelta' del codice: e' quanto il motore SCEGLIE le stesse mosse dell'oracolo, a parita'
+di profondita' e a 1 thread per entrambi.
 
-### A parita' di PROFONDITA' (fedelta' depurata dalla velocita')
+### PRIMA: tre difetti del MISURATORE, non del motore
 
-`python tools/accordo_profondita.py 1 3 6 9 12` — 54 posizioni, 1 thread:
+I numeri di una prima versione di questa sezione erano tutti sbagliati. Le cause, tutte trovate
+perche' l'utente ha fatto notare che a parita' di profondita' e senza fattore tempo ci si aspetta
+coincidenza ESATTA:
+
+1. **Il libro di aperture.** Sulle posizioni coperte il motore risponde senza cercare: si misurava
+   il libro. La posizione iniziale risultava un disaccordo a ogni profondita' solo per questo.
+   Rimedio: opzione UCI `OwnBook` (nostra, non della fonte) spenta nei test.
+2. **Il dialogo UCI si desincronizzava** riusando un solo processo per tutte le posizioni: lo stesso
+   confronto dava 50/53, 51/53 e 52/53 in tre esecuzioni. Verificato PRIMA che non fossero i motori:
+   entrambi ripetono esattamente mossa, punteggio e nodi su 3 esecuzioni a profondita' 12. Rimedio:
+   un processo nuovo per posizione.
+3. **Le due posizioni Chess960** della lista bench venivano testate senza `UCI_Chess960`, quindi con
+   diritti di arrocco interpretati diversamente. Escluse.
+
+Piu' la normalizzazione `(none)` == `0000` (matto/stallo: formato del layer UCI, non gioco).
+
+### La curva, dopo le correzioni (51 posizioni, 1 thread, libro spento, ripetibile)
 
 | profondita' | stessa mossa | scarto di punteggio (mediana / peggiore) |
 |---|---|---|
-| 1 | 49/54 = 90,7% | **0 cp / 0 cp** |
-| 3 | 43/54 = 79,6% | 0 cp / 35 cp |
-| 6 | 41/54 = 75,9% | 6 cp / 168 cp |
-| 9 | 37/54 = 68,5% | 25 cp / 108 cp |
-| 12 | 40/54 = 74,1% | 23 cp / 236 cp |
+| 1 | **51/51 = 100,0%** | **0 cp / 0 cp** |
+| 3 | 45/51 = 88,2% | 0 cp / 35 cp |
+| 6 | 43/51 = 84,3% | 9 cp / 168 cp |
+| 9 | 38/51 = 74,5% | 25 cp / 108 cp |
+| 12 | 42/51 = 82,4% | 22 cp / 236 cp |
 
-Lettura: **alla foglia siamo identici** — a profondita' 1 lo scarto di punteggio e' zero su tutte e
-54 le posizioni, il che convalida insieme valutazione NNUE e quiescenza. Da li' in su l'accordo
-scende e si assesta sul 70-75%: e' la ricerca a divergere, non la valutazione.
-
-Le 5 posizioni che a profondita' 1 danno mossa diversa hanno punteggio IDENTICO: sono pareggi di
-punteggio rotti in modo diverso alla radice. **Lead piccolo e pulito, piu' promettente dei 3 nodi di
-quiescenza.**
+**A profondita' 1 siamo IDENTICI all'oracolo**: stessa mossa su tutte le 51 posizioni e scarto di
+punteggio zero. Convalida insieme valutazione NNUE, quiescenza e generazione mosse. Da profondita' 3
+in su compaiono divergenze vere: **e' li' che va concentrato l'audit.**
 
 ### A parita' di TEMPO (quello che conta in partita)
 
-`python tools/quality.py 2000 1` — 51 posizioni, 2 s, verita' congelata:
-
-| | accordo | profondita' media raggiunta |
+| | accordo | profondita' media |
 |---|---|---|
-| oracolo, stesso budget | 49/51 = 96,1% | 32,5 |
-| noi | 41-42/51 = 80-82% | 19,3 |
+| oracolo, 2 s | 49/51 = 96,1% | 32,5 |
+| noi, 2 s | 41-42/51 = 80-82% | 19,3 |
 
-### Perche' il divario a tempo e' piu' grande di quello a profondita'
+### Perche' il divario a tempo e' maggiore di quello a profondita'
 
-**Non e' il fattore di ramificazione.** Misurato su 3 posizioni a profondita' 10-16: nei mediogiochi
-usiamo un numero di nodi COMPARABILE o INFERIORE all'oracolo (rapporto 0,46-0,66 a d13-d16), e sul
-bench a profondita' 13 stiamo a 2,24 M contro 2,50 M.
+**Non e' il fattore di ramificazione**: a profondita' 13-16 nei mediogiochi usiamo un numero di nodi
+COMPARABILE o INFERIORE all'oracolo (rapporto 0,46-0,66); sul bench a profondita' 13 siamo a 2,24 M
+contro 2,50 M. E' la **velocita' grezza: 398.000 nodi/s contro 1.600.000, cioe' 4,0x** — C# contro
+C++ con intrinseche AVX2, non un difetto di fedelta'.
 
-E' la VELOCITA' GREZZA: 398.000 nodi/s contro 1.600.000, cioe' **4,0x**. E' il divario C# contro C++
-con intrinseche AVX2 sulla rete, non un difetto di fedelta'.
+Anomalia annotata: nel finale `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11` il rapporto di nodi
+esplode a 12-13x a profondita' 11-13, per rientrare a 1,1x da d14. Non spiegata.
 
-**Anomalia trovata proprio con questa misura**: nel finale `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11`
-il rapporto di nodi esplode a **12-13x** a profondita' 11-13 (68.620 contro 5.624), per poi
-rientrare a 1,1x da d14. Non e' spiegato: candidato prioritario per la prossima sessione.
+### IL RIPRODUTTORE MINIMO, da attaccare per primo
+
+Ottenuto per divide successivi dal disaccordo a profondita' 3 su
+`8/8/1P6/5pr1/8/4R3/7k/2K5 w - - 0 1` (identico all'oracolo fino a d2, 283 nodi):
+
+> **`8/8/1P6/5pr1/8/1R6/7k/2K5 b - - 1 1`**
+> profondita' 1: IDENTICO (13 nodi, cp -13)
+> profondita' 2: **384 nodi contro 378, cp -30 contro -31** — stessa mossa (g5g8) e stessa PV
+
+E' il caso piu' piccolo mai isolato. **Tutti e 12 i figli sono identici** all'oracolo se cercati da
+soli a profondita' 1 (punteggio E nodi): la differenza sta unicamente in come la radice li combina
+a profondita' 2.
+
+Gia' verificati fedeli su questo percorso, da NON ricontrollare: `update_all_stats` e
+`update_quiet_histories` riga per riga; la sequenza di aspirazione a profondita' 2, tracciata e
+ricalcolata a mano (8 fail-low, finestre -49 -> -54 -> -72 -> -80 -> -90 -> -104 -> -122 -> -145,
+con `delta += 47*delta/128`: coincide esattamente con la formula della fonte).
+
+Nota per chi instrumenta la radice: **il riscaldamento JIT dell'avvio esegue una propria ricerca**
+(8 thread, profondita' 10 su startpos) e i suoi nodi di radice finiscono nel trace. Vanno
+riconosciuti e scartati, altrimenti sembrano iterazioni assurde del caso in esame.
 
 ## Strumenti di misura (tools/)
 
