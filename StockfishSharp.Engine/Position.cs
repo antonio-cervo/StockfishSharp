@@ -1180,7 +1180,14 @@ public sealed class Position
         }
 
         _st.Key ^= Zobrist.Side;
-        _st.Rule50++;
+
+        // NIENTE "_st.Rule50++" qui. Nella fonte "++st->rule50" compare una volta sola, dentro
+        // do_move (position.cpp:839); do_null_move non lo tocca — il contatore delle 50 mosse
+        // conta MOSSE VERE, e una mossa nulla non lo e'. Fino al 2026-09-08 qui c'era un
+        // incremento inventato, e non era innocuo: rule50 smorza la valutazione statica
+        // ("v -= v * rule50_count() / 199", evaluate.cpp), decide la patta ("rule50 > 99") e
+        // declassa i punteggi di matto inaffidabili in ValueFromTt ("100 - rule50Count"). Lungo
+        // una linea con N mosse nulle il nostro contatore era N piu' avanti di quello della fonte.
         _st.PliesFromNull = 0;
         _sideToMove = Types.Opposite(_sideToMove);
 
