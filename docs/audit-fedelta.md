@@ -99,6 +99,24 @@ indicato. Elenco cumulativo: aggiungere qui, non rifare.
 - **Audit delle costanti**: su `search.cpp` resta una sola costante non trovata ed e' un falso
   positivo (`100000UL`). `movepick.cpp`, `history.h`, `timeman.cpp`, `evaluate.cpp`: zero mancanti.
 
+### Vagliato il 2026-09-08 (secondo giro)
+
+- **`movepick.cpp`**: entrambi i costruttori di `MovePicker` fedeli, `pseudo_legal(ttm)` incluso e
+  `capture_stage` per il ProbCut. `score<QUIETS>` fedele in tutti i termini: `threatByLesser`, il
+  bonus 16384 per gli scacchi, il termine +/-20 per casa minacciata da pezzo minore, la low-ply
+  history. `score<EVASIONS>` fedele (`1 << 28`). Il resto dei candidati segnalati dallo strumento e'
+  il `MoveSorter` AVX-512, non portato per scelta dichiarata.
+- **Semantica temporale su `Search.cs`** (metodo 4): tutte le chiamate a `_movePick.*` classificate
+  PRE/POST rispetto alle mutazioni. Solo due sono POST, ed erano i due bug gia' corretti. Pulito.
+- **Assunzioni dichiarate** (metodo 5): 55 censite. Vagliate quelle di `SearchThreadPool.cs`,
+  `RootMove.cs` e la testata di `Search.cs`. Trovati un errore vero (spareggio del voto sulla
+  profondita' invece che sulla lunghezza della PV) e due commenti OBSOLETI che affermavano il falso.
+  **Restano ~50 da vagliare.**
+- **Allocazioni sul percorso caldo**: tre trovate e convertite a buffer riusabili
+  (`threatByLesser` in `Score(QUIETS)`, e le due `List<Move>` in `Position.PseudoLegal` e
+  `Position.IsDraw` — quest'ultima chiamata su decine di milioni di nodi con `rule50 > 99`).
+  Nodi identici, quindi cambio neutro sul comportamento.
+
 ### Discrepanze TROVATE E CORRETTE il 2026-09-07
 | dove | cosa | commit |
 |---|---|---|

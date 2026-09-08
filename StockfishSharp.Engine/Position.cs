@@ -35,6 +35,14 @@ public sealed class Position
     private readonly Square[] _castlingRookSquare = new Square[16];
     private readonly ulong[] _castlingPath = new ulong[16];
 
+    // Buffer riusabili: PseudoLegal (mosse non-Normal) e IsDraw (regola delle 50 mosse sotto
+    // scacco) generavano una List<Move> nuova a OGNI chiamata. Nella fonte sono
+    // "MoveList<...>(*this)" sullo stack. IsDraw in particolare e' caldissima: in una singola
+    // esecuzione del bench si contano decine di milioni di nodi con rule50 > 99. Sicuri come
+    // campi di istanza: ogni thread del pool ha la propria Position.
+    private readonly List<Move> _pseudoLegalScratch = [];
+    private readonly List<Move> _drawScratch = [];
+
     private StateInfo _st = null!;
     private int _gamePly;
     private Color _sideToMove;
@@ -352,10 +360,10 @@ public sealed class Position
 
         if (m.TypeOf != MoveType.Normal)
         {
-            var list = new List<Move>();
-            if (Checkers() != 0) MoveGen.Generate(GenType.Evasions, this, list);
-            else MoveGen.Generate(GenType.NonEvasions, this, list);
-            return list.Contains(m);
+            _pseudoLegalScratch.Clear();
+            if (Checkers() != 0) MoveGen.Generate(GenType.Evasions, this, _pseudoLegalScratch);
+            else MoveGen.Generate(GenType.NonEvasions, this, _pseudoLegalScratch);
+            return _pseudoLegalScratch.Contains(m);
         }
 
         if (pc == Piece.None || Types.ColorOf(pc) != us) return false;
@@ -459,9 +467,9 @@ public sealed class Position
         if (_st.Rule50 > 99)
         {
             if (Checkers() == 0) return true;
-            var moves = new List<Move>();
-            MoveGen.Generate(GenType.Legal, this, moves);
-            if (moves.Count > 0) return true;
+            _drawScratch.Clear();
+            MoveGen.Generate(GenType.Legal, this, _drawScratch);
+            if (_drawScratch.Count > 0) return true;
         }
 
         return IsRepetition(ply);

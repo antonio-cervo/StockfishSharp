@@ -38,6 +38,10 @@ public sealed class MovePicker
     private const int GoodQuietThreshold = -14000; // movepick.cpp:280
     private const int LowPlyHistorySize = 5; // LOW_PLY_HISTORY_SIZE, history.h
 
+    // Riusato invece di allocarlo a ogni Score(QUIETS), cioe' a ogni nodo che genera mosse quiete.
+    // Nella fonte e' "Bitboard threatByLesser[KING + 1]" sullo stack (movepick.cpp:200).
+    private readonly ulong[] _threatByLesser = new ulong[7];
+
     private readonly Position _pos;
     private readonly MovePick _hist;
     private readonly ContinuationRef[] _contRefs = new ContinuationRef[6];
@@ -286,7 +290,8 @@ public sealed class MovePicker
 
         // threatByLesser[KING+1], movepick.cpp:201-210 — indicizzato per PieceType (0=None/King
         // non usati, restano 0 come nella fonte).
-        var threatByLesser = new ulong[7];
+        var threatByLesser = _threatByLesser;
+        Array.Clear(threatByLesser);
         ulong pawnThreat = _pos.AttacksBy(PieceType.Pawn, them);
         threatByLesser[(byte)PieceType.Knight] = pawnThreat;
         threatByLesser[(byte)PieceType.Bishop] = pawnThreat;
