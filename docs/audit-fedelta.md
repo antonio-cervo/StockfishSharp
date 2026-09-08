@@ -363,6 +363,39 @@ causa principale: resta da cercare altrove (contesa sulla TT, `Interlocked`, fal
 Il divario di VELOCITA' ASSOLUTA e' un'altra cosa e non e' un difetto di fedelta': 4,7x a 1 thread,
 atteso fra C# e C++ con intrinseche AVX2 sulla NNUE.
 
+### 2-ter. TROVATO: le history condivise fra thread non lo sono (2026-09-08)
+
+Emerso vagliando `history.h` con lo strumento. **Non era una deviazione dichiarata da nessuna
+parte**: e' un pezzo mai portato.
+
+Nella fonte le history sono divise in due gruppi (search.h:349-357):
+
+| gruppo | tabelle | dove vivono |
+|---|---|---|
+| per thread (`Worker`) | `mainHistory`, `lowPlyHistory`, `captureHistory`, `continuationCorrectionHistory`, `ttMoveHistory` | una copia per thread |
+| **condivise** (`SharedHistories`, history.h:204-257) | **`correctionHistory`** (pawn/minor/nonPawn), **`continuationHistory[2][2]`**, **`pawnHistory`** | **una sola copia per nodo NUMA, usata da TUTTI i thread di quel nodo** |
+
+E le due condivise dinamiche **scalano col numero di thread** (`DynStats`, history.h:91-101):
+`SharedHistories(next_power_of_two(threadCount))` (thread.cpp:214), quindi con 8 thread
+`correctionHistory` ha 8 x 65536 voci e `pawnHistory` 8 x 8192.
+
+**Da noi**: tutte e tre sono campi di istanza (`MovePick._continuationHistory`,
+`MovePick._pawnHistory`, `Search._pawnCorrHistory` e sorelle), cioe' **una copia privata per thread,
+a dimensione fissa non scalata**. Conseguenze, tutte nella direzione "piu' deboli a molti thread":
+1. i thread helper **non si scambiano nulla** attraverso queste tabelle — e' proprio il canale con
+   cui il Lazy SMP moderno guadagna Elo oltre alla sola TT condivisa;
+2. con 8 thread la tabella efficace e' 1/8 di quella della fonte, quindi molte piu' collisioni;
+3. `_continuationHistory` da sola e' ~8,4 MB per thread (67 MB a 8 thread) contro gli 8,4 MB totali
+   della fonte: anche peggio per la cache.
+
+E' il candidato numero uno per il divario di scalabilita' del punto 2-bis (5,36x contro 6,84x) e
+per la differenza di forza a molti thread.
+
+Nota di verifica, per non riaprirla: la `CorrectionBundle` unificata della fonte (un solo array
+indicizzato da quattro chiavi diverse) **non e' una differenza**, perche' ogni tipo legge un campo
+diverso del bundle — le nostre quattro tabelle separate sono funzionalmente equivalenti. La
+differenza sta solo nella dimensione e nella condivisione.
+
 ### 3. Checklist dello strumento, da vagliare
 
 `python tools/audit_fedelta.py search.cpp` produce ~81 candidati sul corpo di `search()`. Molti sono
