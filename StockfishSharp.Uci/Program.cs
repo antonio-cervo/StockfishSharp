@@ -406,7 +406,14 @@ while (Console.ReadLine() is { } line)
             break;
 
         case "eval":
-            Console.WriteLine($"info string static eval (side to move): {Evaluate.StaticEval(position)}");
+            if (Evaluate.NnueNetwork != null)
+            {
+                var (psqt, positional) = StockfishSharp.Engine.Nnue.NnueEvaluate.PsqtEPosizionale(Evaluate.NnueNetwork, position);
+                Console.WriteLine($"NNUE evaluation          {psqt + positional} (side to move, internal units)");
+                Console.WriteLine($"info string psqt {psqt} positional {positional}");
+            }
+
+            Console.WriteLine($"Final evaluation         {Evaluate.StaticEval(position)} (side to move, internal units)");
             break;
 
         case "flip":

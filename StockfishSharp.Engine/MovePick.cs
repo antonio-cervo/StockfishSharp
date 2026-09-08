@@ -183,7 +183,12 @@ public sealed class MovePick
         int malus = Math.Min((968 * depth) - 235, 2244);
 
         if (!isPvNode)
-            bonus += (int)((long)bonus * (quietsSearched.Count + capturesSearched.Count) / 256);
+            // search.cpp:1977-1979. "bonus" e' int e QUI PUO' ESSERE NEGATIVO (133*depth-81 e'
+            // negativo a profondita' 0, e statScore/28 puo' essere molto negativo); nella fonte
+            // moltiplica un u64, quindi l'espressione e' senza segno e la divisione per 256
+            // arrotonda verso meno infinito. Vedi AritmeticaFedele.
+            bonus += (int)AritmeticaFedele.DivisionePavimento(
+                (long)bonus * (quietsSearched.Count + capturesSearched.Count), 256);
 
         if (!pos.CaptureStage(bestMove))
         {

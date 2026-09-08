@@ -30,6 +30,21 @@ public static class NnueEvaluate
     /// ancora integrato — N7). Valore dal punto di vista del lato al tratto. <paramref
     /// name="accStack"/> (facoltativo, N9): se fornito, l'accumulatore viene aggiornato in modo
     /// incrementale invece di essere ricalcolato da zero — vedi AccumulatorStack.cs.</summary>
+    /// <summary>I due termini grezzi della rete, PRIMA di qualunque miscelazione — quello che la
+    /// fonte stampa come "NNUE evaluation ... (side to move, internal units)" in <c>Eval::trace</c>
+    /// (evaluate.cpp:89-91). Serve a confrontare con l'oracolo una grandezza OMOGENEA: il nostro
+    /// comando "eval" stampava solo il valore finale, che include complessita', materiale, optimism
+    /// e smorzamento per la regola delle 50 mosse, e quindi non era paragonabile a quel numero.</summary>
+    public static (int Psqt, int Positional) PsqtEPosizionale(NnueNetwork net, Position pos)
+    {
+        int bucket = (Bitboards.PopCount(pos.Pieces()) - 1) / 4;
+        var acc = NnueAccumulator.ComputeFromScratch(net, pos);
+        Span<byte> transformed = stackalloc byte[NnueArchitecture.L1];
+        NnueLayers.TransformBothPerspectives(acc, pos.SideToMove, transformed);
+        return (acc.MaterialPsqt(pos.SideToMove, bucket),
+                NnueLayers.Propagate(net.LayerStacks[bucket], transformed) / NnueCommon.OutputScale);
+    }
+
     public static int Evaluate(NnueNetwork net, Position pos, int optimism = 0, AccumulatorStack? accStack = null)
     {
         int numPieces = Bitboards.PopCount(pos.Pieces());

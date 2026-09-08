@@ -1879,11 +1879,11 @@ public sealed class Search
 
                 rm.AverageScore = rm.AverageScore == -Values.Infinite
                     ? score
-                    : (int)DivisionePavimento(((long)score * (long)w) + ((long)rm.AverageScore * (long)(scale - w)), (long)scale);
+                    : (int)AritmeticaFedele.DivisionePavimento(((long)score * (long)w) + ((long)rm.AverageScore * (long)(scale - w)), (long)scale);
 
                 rm.MeanSquaredScore = rm.MeanSquaredScore == -(long)Values.Infinite * Values.Infinite
                     ? (long)score * Math.Abs(score)
-                    : (int)DivisionePavimento((v2 * (long)wMss) + (rm.MeanSquaredScore * (long)(scale - wMss)), (long)scale);
+                    : (int)AritmeticaFedele.DivisionePavimento((v2 * (long)wMss) + (rm.MeanSquaredScore * (long)(scale - wMss)), (long)scale);
 
                 if (moveCount == 1 || score > alpha)
                 {
@@ -2116,6 +2116,19 @@ public sealed class Search
             if (alpha >= beta) return alpha;
         }
 
+        // Step 1. Inizializzazione del nodo — search.cpp:1678-1683. La quiescenza AGGIORNA LA PV
+        // nei nodi PV, esattamente come la ricerca principale: "ss->pv->clear()" qui, e
+        // "ss->pv->update(move, (ss+1)->pv)" su ogni nuova mossa migliore piu' sotto.
+        //
+        // NON e' cosmetico, ed e' stato un buco vero fino al 2026-09-08: la PV dell'iterazione
+        // precedente diventa lastIterationIdxPV (search.cpp:774), che alimenta followPv, che a sua
+        // volta disattiva IIR e la potatura delle mosse quiete a profondita' bassa lungo quella
+        // linea. Una PV troncata dove comincia la quiescenza = meno nodi marcati followPv = albero
+        // diverso. Sintomo osservato: a profondita' 1 la nostra PV era "b4c3" e quella dell'oracolo
+        // "b4c3 d2c3 e6d5", con punteggio e conteggio nodi IDENTICI; da profondita' 2 in poi i due
+        // motori divergevano.
+        if (isPvNode) _pvBuf[ply].Clear();
+
         bool inCheck = pos.Checkers() != 0;
         int moveCount = 0;
         Move bestMove = Move.None;
@@ -2275,6 +2288,15 @@ public sealed class Search
                 if (score > alpha)
                 {
                     bestMove = m;
+
+                    // "Update pv even in fail-high case", search.cpp:1840-1842.
+                    if (isPvNode)
+                    {
+                        _pvBuf[ply].Clear();
+                        _pvBuf[ply].Add(m);
+                        _pvBuf[ply].AddRange(_pvBuf[ply + 1]);
+                    }
+
                     if (score < beta) alpha = score;
                     else break; // fail high
                 }
@@ -2325,23 +2347,6 @@ public sealed class Search
                 : default;
         }
     }
-
-    /// <summary>Divisione intera con arrotondamento verso MENO INFINITO, non verso zero.
-    ///
-    /// Non e' un vezzo: nella fonte i pesi della media mobile delle RootMove sono <c>u64</c>
-    /// (search.cpp:1446-1468), quindi <c>value * w + rm.averageScore * (Scale - w)</c> viene
-    /// valutato in aritmetica SENZA SEGNO a 64 bit. Con somma negativa il valore diventa
-    /// <c>2^64 + somma</c>, e la divisione (unsigned) per <c>Scale</c> non tronca verso zero come
-    /// fa <c>/</c> in C#: dato che <c>Scale = 32</c> divide esattamente <c>2^64</c>, il cast finale
-    /// a 32 bit restituisce esattamente <c>floor(somma / 32)</c>.
-    ///
-    /// La differenza e' di 1 su ogni punteggio negativo non divisibile per 32, e non e' innocua:
-    /// <c>averageScore</c> e <c>meanSquaredScore</c> determinano la finestra di aspirazione
-    /// (<c>delta</c>) e l'<c>optimism</c> della radice, quindi un'unita' di scarto cambia la
-    /// finestra, quindi le ri-ricerche, quindi l'albero. Misurato: bastava a far divergere la
-    /// ricerca dall'oracolo gia' a profondita' 5.</summary>
-    private static long DivisionePavimento(long a, long b) =>
-        (a / b) - (a % b != 0 && (a < 0) != (b < 0) ? 1 : 0);
 
     /// <summary><c>is_shuffling</c>, search.cpp:153-160 — rileva mosse che vanno-e-vengono senza
     /// scopo (limita esplosioni di ricerca in finali con regola delle 50 mosse alta).</summary>
