@@ -25,6 +25,11 @@ def chiedi(cmd, th, fen, ms):
                          stderr=subprocess.DEVNULL, text=True, bufsize=1, cwd=ROOT)
     p.stdin.write("setoption name Threads value %d\n" % th)
     p.stdin.write("setoption name Hash value 256\n")
+    # LIBRO SPENTO. Trappola gia' documentata in accordo_profondita.py ma sfuggita in QUESTO
+    # strumento fino al 2026-09-08: con il libro attivo il motore risponde SENZA cercare sulle
+    # posizioni coperte, e su quelle si misura il libro invece della ricerca. L'oracolo ignora
+    # l'opzione, non ce l'ha.
+    p.stdin.write("setoption name OwnBook value false\n")
     p.stdin.write("ucinewgame\nposition fen " + fen + "\n")
     p.stdin.write("go movetime %d\n" % ms)
     p.stdin.flush()
