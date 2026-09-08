@@ -142,6 +142,56 @@ posizioni di matto/stallo dove l'oracolo non stampa la riga info — artefatto d
 `4k3/3q1r2/1N2r1b1/3ppN2/2nPP3/1B1R2n1/2R1Q3/3K4 w - - 5 1` (1.821 contro 1.050, l'unica dove ne
 usiamo molti di piu').
 
+## RISOLTA: il puntatore alla PV del figlio non veniva mai "annullato"
+
+Attaccando la profondita' 16 (`r3r1k1/2p2ppp/p1p1bn2/8/1q2P3/2NPQN2/PPP3PP/R4RK1 b - - 2 15`,
+135.032 nodi contro 134.436). `iterazioni.py` ha isolato subito il punto: iterazioni 1-14
+IDENTICHE, e alla 15 **stesso numero di nodi (98.593) e stesso punteggio (-34)**, ma la nostra PV
+lunga 16 mosse contro 15. Stesso albero, PV diversa: quindi bookkeeping della PV, non ricerca.
+
+Nella fonte il puntatore alla PV del figlio viene **azzerato in cima a ogni iterazione del ciclo
+mosse** (search.cpp:1144-1145):
+
+```cpp
+if (PvNode)
+    (ss + 1)->pv = nullptr;
+```
+
+e solo lo Step 20 lo ripunta al buffer locale (`(ss + 1)->pv = &pv;`, search.cpp:1411). Quando una
+mossa arriva all'aggiornamento della PV **senza essere passata dallo Step 20**, `PVMoves::update`
+(search.h:95-104) lo gestisce esplicitamente:
+
+```cpp
+void update(Move move, const PVMoves* childPv) {
+    length = childPv ? childPv->length : 0;   // <-- nullptr => PV lunga UNA mossa
+    ...
+}
+```
+
+Quando succede? Lo Step 20 ha condizione `moveCount == 1 || value > alpha`, ma lo Step 22 aggiorna
+la PV con `value + inc > alpha`: col **tie-break `inc`** (search.cpp:1511-1512, +1 su un nodo su
+otto quando una mossa PAREGGIA il miglior punteggio) una mossa che eguaglia alpha aggiorna la PV
+senza essere passata dallo Step 20. La fonte scrive li' una PV di una sola mossa; noi innestavamo
+la **continuazione stantia** lasciata dalla mossa precedente nel buffer `_pvBuf[ply + 1]`.
+
+Correzione: un flag locale al ciclo mosse (`pvFiglioValida`), falso in cima a ogni iterazione e
+vero solo nello Step 20 — l'equivalente del puntatore nullo, dato che un buffer per ply non si puo'
+"annullare".
+
+**Non e' cosmetico**: la PV di radice diventa `RootMove.PreviousPv`, che alimenta `followPV`, che
+gate-a IIR e la potatura delle mosse quiete a profondita' bassa. Una PV piu' lunga del dovuto
+cambia quindi l'albero dell'iterazione SUCCESSIVA. Bench 2.182.360 -> 2.520.660 nodi (oracolo
+2.497.913).
+
+**QUARTA volta in due giorni che un'assunzione scritta in un commento nasconde una divergenza.**
+Qui il commento diceva: *"una mossa che non arriva fin qui non aggiorna mai il proprio
+bestMove/PV/rootMove (stessa condizione moveCount==1||score>alpha dello Step 22), quindi non legge
+mai un buffer lasciato da una mossa precedente"*. La condizione dello Step 22 e' `score + inc >
+alpha`, non `score > alpha`.
+
+**Risultato**: profondita' 16 passa da 46/49 a **49/49**. Tutte e tre le divergenze rimaste erano
+questa stessa causa.
+
 ## RISOLTA: il BOUND scritto in TT usava una formula nostra
 
 `4r1k1/r1q2ppp/ppp2n2/4P3/5Rb1/1N1BQ3/PPP3PP/R5K1 w - - 1 17`, 5.667 nodi contro 5.798 a

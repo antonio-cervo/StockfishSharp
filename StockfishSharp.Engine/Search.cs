@@ -1880,6 +1880,17 @@ public sealed class Search
             moveCount++;
             _moveCountHistory[ply + StackOffset] = moveCount; // Stack::moveCount, search.cpp:1137
 
+            // search.cpp:1144-1145, "if (PvNode) (ss + 1)->pv = nullptr;" — il puntatore alla PV
+            // del figlio viene AZZERATO in cima a OGNI iterazione del ciclo mosse, e solo lo
+            // Step 20 (sotto) lo ripunta al buffer locale. Non e' bookkeeping innocuo: se una
+            // mossa arriva all'aggiornamento della PV senza essere passata dallo Step 20 — succede
+            // col tie-break "inc", dove "score + inc > alpha" e' vero ma "score > alpha" no —
+            // "PVMoves::update" (search.h:95-104) vede childPv nullo e produce una PV lunga UNA
+            // mossa, senza continuazione. Qui, con un buffer per ply che non si puo' "annullare",
+            // serve questo flag: senza, si innestava la continuazione STANTIA lasciata dalla mossa
+            // precedente e la PV usciva piu' lunga di quella della fonte a parita' di albero.
+            bool pvFiglioValida = false;
+
             bool captureStage = pos.CaptureStage(m);
             bool givesCheck = pos.GivesCheck(m);
 
@@ -2154,12 +2165,20 @@ public sealed class Search
 
             if (isPvNode && (moveCount == 1 || score > alpha))
             {
-                // (ss+1)->pv->clear(), search.cpp:1411-1412 — SOLO qui il buffer PV del figlio
-                // viene azzerato e poi (sotto, dopo il ritorno) riletto: una mossa che non arriva
+                // "(ss + 1)->pv = &pv; (ss + 1)->pv->clear();", search.cpp:1411-1412 — qui il
+                // buffer PV del figlio viene azzerato E il puntatore torna valido.
+                //
+                // NOTA STORICA: fino al 2026-09-08 qui c'era scritto che "una mossa che non arriva
                 // fin qui non aggiorna mai il proprio bestMove/PV/rootMove (stessa condizione
-                // "moveCount==1||score>alpha" del bookkeeping radice e dello Step 22 sotto), quindi
-                // non legge mai un buffer lasciato da una mossa precedente.
+                // moveCount==1||score>alpha dello Step 22), quindi non legge mai un buffer lasciato
+                // da una mossa precedente". E' FALSO: la condizione dello Step 22 e'
+                // "score + inc > alpha", non "score > alpha" — col tie-break "inc" a 1 una mossa
+                // che PAREGGIA alpha aggiorna la PV senza essere passata di qui. La fonte in quel
+                // caso ha il puntatore a nullptr e produce una PV lunga una mossa; noi innestavamo
+                // la continuazione stantia. Quarta volta in due giorni che un'assunzione scritta in
+                // un commento nasconde una divergenza reale.
                 _pvBuf[ply + 1].Clear();
+                pvFiglioValida = true;
 
                 // Step 20 (continua), search.cpp:1414-1420: se stiamo per tuffarci in quiescenza
                 // (newDepth<=0 dopo tutte le riduzioni/estensioni sopra) con la STESSA mossa già
@@ -2266,7 +2285,9 @@ public sealed class Search
                     {
                         _pvBuf[ply].Clear();
                         _pvBuf[ply].Add(m);
-                        _pvBuf[ply].AddRange(_pvBuf[ply + 1]);
+                        // "length = childPv ? childPv->length : 0", search.h:97 — con il puntatore
+                        // azzerato la fonte produce una PV lunga UNA mossa. Vedi pvFiglioValida.
+                        if (pvFiglioValida) _pvBuf[ply].AddRange(_pvBuf[ply + 1]);
                     }
 
                     if (score >= beta)
