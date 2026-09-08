@@ -215,9 +215,31 @@ continuava a leggere il valore vecchio, e lo Step 18 saltava una riduzione di ol
 
 Correzione: `ref bool ttPv = ref _ttPvHistory[ply + StackOffset];` — la variabile **e'** la cella.
 
-**Classe di errore, la stessa nei due casi**: un campo di `Stack` reso variabile locale. Vale la pena
-cercarne altri: ogni volta che la fonte scrive `ss->qualcosa` e noi teniamo una copia, una ricerca
-annidata sullo stesso ply puo' divergere in silenzio.
+**Classe di errore, la stessa nei due casi**: un campo di `Stack` reso variabile locale.
+
+### CENSIMENTO COMPLETO dei campi di `Stack` (2026-09-08) — classe CHIUSA
+
+Il perche' la classe esiste: DUE ricerche della fonte girano sullo **stesso `ss`** — la singolare
+(search.cpp:1254, `search<NonPV>(pos, ss, ...)`) e la verifica del null move (search.cpp:1037) — e
+riscrivono i campi del nodo che le ha chiamate. La fonte poi RILEGGE quei campi e vede i valori
+lasciati dalla ricerca annidata. Con una copia locale noi vedevamo quelli di ingresso.
+
+Passati in rassegna tutti i campi di `struct Stack` (search.h) uno per uno:
+
+| campo | esito |
+|---|---|
+| `currentMove`, `continuationHistory`, `continuationCorrectionHistory` | **ERA SBAGLIATO** — scritti in cima al ciclo invece che in `do_move` (Step 17). Corretto. |
+| `ttPv` | **ERA SBAGLIATO** — copia locale. Ora `ref` sulla cella. |
+| `staticEval` | **ERA SBAGLIATO** — copia locale riversata nell'array a fine blocco. Ora `ref`. |
+| `followPV` | **ERA SBAGLIATO** — copia locale, mentre la fonte lo rilegge dentro il ciclo mosse (search.cpp:1197). Ora `ref`. |
+| `moveCount` | corretto: la fonte stessa tiene un locale `moveCount` E scrive `ss->moveCount` (search.cpp:1137); noi facciamo lo stesso e le letture del genitore usano l'array. |
+| `statScore`, `cutoffCnt`, `reduction`, `ttHit` | corretti: gia' solo array, letture del genitore comprese. |
+| `excludedMove` | corretto: la fonte legge `ss->excludedMove` solo all'ingresso del nodo, noi lo passiamo come parametro. |
+| `pv` | corretto: `_pvBuf[ply]`. |
+| `ply`, `inCheck` | costanti per il nodo; le ricerche annidate riscriverebbero lo stesso valore. |
+
+Regola operativa che ne esce: **in questo porting un campo di `Stack` non puo' essere una variabile
+locale.** O e' l'elemento dell'array, o e' un `ref` a quell'elemento.
 
 ## RISOLTA, la piu' grossa finora: `PvNode` era DEDOTTO dalla finestra invece che propagato
 

@@ -1284,11 +1284,16 @@ public sealed class Search
         // Step 1/2/3 sono in un ordine leggermente diverso — nessuna dipendenza di dati fra
         // followPV e i controlli di patta/mate distance pruning sotto, quindi la posizione non
         // cambia il risultato.
-        bool followPv = ply == 0
+        // "ss->followPV" e' un campo di Stack e la fonte lo RILEGGE dentro il ciclo mosse
+        // (search.cpp:1197), dopo che la ricerca singolare della mossa precedente — che gira sullo
+        // stesso ss — puo' averlo riscritto con il proprio valore. Stessa classe di errore di
+        // ss->ttPv e ss->staticEval: con una copia locale il nodo esterno continuerebbe a leggere
+        // il valore di ingresso dove la fonte legge quello lasciato dalla ricerca annidata.
+        ref bool followPv = ref _followPvHistory[ply + StackOffset];
+        followPv = ply == 0
             || (_followPvHistory[ply + StackOffset - 1]
                 && ply - 1 < _lastIterationIdxPv.Count
                 && _currentMoveHistory[ply + StackOffset - 1] == _lastIterationIdxPv[ply - 1]);
-        _followPvHistory[ply + StackOffset] = followPv;
 
         // Step 2. Controllo di patta immediata — search.cpp:787-790 (qui senza il controllo di
         // ricerca interrotta, gestito a parte da _ct.ThrowIfCancellationRequested sopra).
