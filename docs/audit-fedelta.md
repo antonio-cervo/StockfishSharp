@@ -162,8 +162,38 @@ test — la verifica che una conversione di soli buffer deve lasciare invariato 
 Velocita': 326-351k nodi/s contro 337-339k prima, cioe' dentro la varianza: **nessun guadagno di
 velocita' dimostrato**, solo meno pressione sul GC (che conta soprattutto a piu' thread).
 
-Prossimi candidati per i 130 byte/nodo rimasti: bisezionare fra percorso NNUE e percorso di ricerca
-(a suo tempo erano 137 senza NNUE, quindi oggi il grosso potrebbe essere altrove).
+#### I 130 byte/nodo rimasti: chiusi (2026-09-08, commit 469818a)
+
+Primo tentativo per bisezione (NNUE acceso / NNUE spento): **fuorviante**. Spegnere la NNUE cambia
+anche la forma dell'albero e il numero di nodi, quindi confronta due ricerche diverse — sembrava
+dire "meta' e' NNUE", ed era falso. Metodo giusto: **attribuzione diretta**, sonde temporanee con
+`GC.GetAllocatedBytesForCurrentThread()` attorno a Eval, MovePicker e al totale del thread di
+ricerca (il bench a 1 thread rende il contatore per-thread esatto e attribuibile).
+
+    TOTALE 127,3 byte/nodo  ->  Eval 1,5   MovePick 121,7
+
+**Causa**: i sei `Select(() => ...)` di `MovePicker.NextMove` catturano `this`, quindi il
+compilatore alloca un delegate a ogni chiamata. Nella fonte `select<T>(Pred filter)` e' un template
+con un lambda, cioe' a costo zero. L'equivalente fedele in C# **non e' un `Func<bool>`** ma un
+parametro di tipo generico vincolato a struct (`where TF : struct, IFiltroMossa`), che il JIT
+specializza e inlina: stesso codice generato del template, zero allocazioni.
+
+**Risultato**: da **127,3 a 4,4 byte/nodo (-96,5%)**, **nodi IDENTICI** (1.664.300), 124/124 test.
+
+Due contaminazioni della MISURA scoperte per strada, entrambe corrette:
+- Il **riscaldamento JIT dell'avvio** (8 thread, ~800 ms) si sovrapponeva a bench e perft: rubava
+  CPU ai tempi e le sue allocazioni finivano nel contatore di processo. Sul perft valeva da solo
+  46 dei 47,4 byte/nodo misurati. Ora bench e perft lo aspettano.
+- Il **perft** allocava `new List<Move>() + new StateInfo()` a ogni nodo (81,1 byte/nodo, tutti
+  suoi): misurava soprattutto se stesso. Ora usa buffer per livello. E' anche lo strumento con cui
+  si misura il resto del motore, quindi doveva essere neutro.
+
+**Lezione di metodo, generalizzabile**: prima di attribuire un costo, verificare che lo strumento di
+misura non sia esso stesso la fonte del costo, e che nessun altro thread stia contribuendo al
+contatore. Il confronto "acceso/spento" e' valido solo se il lavoro misurato resta lo stesso.
+
+Restano 4,4 byte/nodo, di cui ~1,2 in `MoveGen.Generate` (crescita dei `List<Move>` di appoggio):
+sotto la soglia in cui vale la pena intervenire, ma annotati qui per non riaprire l'indagine.
 
 ### Discrepanze TROVATE E CORRETTE il 2026-09-07
 | dove | cosa | commit |
