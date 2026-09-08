@@ -1865,6 +1865,7 @@ public sealed class Search
             // Search_ le lascia comunque al loro posto relativo, search.h:149-151).
             if (ply == 0)
             {
+                // ATTENZIONE al segno della divisione qui sotto, vedi DivisionePavimento.
                 var rm = RootMove.Find(_rootMoves, m);
 
                 ulong n = (ulong)(_nodes - nodeCountBeforeMove);
@@ -1878,11 +1879,11 @@ public sealed class Search
 
                 rm.AverageScore = rm.AverageScore == -Values.Infinite
                     ? score
-                    : (int)((((long)score * (long)w) + ((long)rm.AverageScore * (long)(scale - w))) / (long)scale);
+                    : (int)DivisionePavimento(((long)score * (long)w) + ((long)rm.AverageScore * (long)(scale - w)), (long)scale);
 
                 rm.MeanSquaredScore = rm.MeanSquaredScore == -(long)Values.Infinite * Values.Infinite
                     ? (long)score * Math.Abs(score)
-                    : ((v2 * (long)wMss) + (rm.MeanSquaredScore * (long)(scale - wMss))) / (long)scale;
+                    : (int)DivisionePavimento((v2 * (long)wMss) + (rm.MeanSquaredScore * (long)(scale - wMss)), (long)scale);
 
                 if (moveCount == 1 || score > alpha)
                 {
@@ -2324,6 +2325,23 @@ public sealed class Search
                 : default;
         }
     }
+
+    /// <summary>Divisione intera con arrotondamento verso MENO INFINITO, non verso zero.
+    ///
+    /// Non e' un vezzo: nella fonte i pesi della media mobile delle RootMove sono <c>u64</c>
+    /// (search.cpp:1446-1468), quindi <c>value * w + rm.averageScore * (Scale - w)</c> viene
+    /// valutato in aritmetica SENZA SEGNO a 64 bit. Con somma negativa il valore diventa
+    /// <c>2^64 + somma</c>, e la divisione (unsigned) per <c>Scale</c> non tronca verso zero come
+    /// fa <c>/</c> in C#: dato che <c>Scale = 32</c> divide esattamente <c>2^64</c>, il cast finale
+    /// a 32 bit restituisce esattamente <c>floor(somma / 32)</c>.
+    ///
+    /// La differenza e' di 1 su ogni punteggio negativo non divisibile per 32, e non e' innocua:
+    /// <c>averageScore</c> e <c>meanSquaredScore</c> determinano la finestra di aspirazione
+    /// (<c>delta</c>) e l'<c>optimism</c> della radice, quindi un'unita' di scarto cambia la
+    /// finestra, quindi le ri-ricerche, quindi l'albero. Misurato: bastava a far divergere la
+    /// ricerca dall'oracolo gia' a profondita' 5.</summary>
+    private static long DivisionePavimento(long a, long b) =>
+        (a / b) - (a % b != 0 && (a < 0) != (b < 0) ? 1 : 0);
 
     /// <summary><c>is_shuffling</c>, search.cpp:153-160 — rileva mosse che vanno-e-vengono senza
     /// scopo (limita esplosioni di ricerca in finali con regola delle 50 mosse alta).</summary>
