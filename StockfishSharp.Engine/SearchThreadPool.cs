@@ -60,6 +60,21 @@ public sealed class SearchThreadPool
 
     public int ThreadCount => _searches.Count;
 
+    /// <summary><c>updates.onUpdateFull</c> — la fonte la invoca solo da <c>mainThread</c>
+    /// (search.cpp:495), quindi qui la si inoltra al solo thread 0. Sopravvive a
+    /// <see cref="SetThreadCount"/>: i Search vengono ricreati, la callback no.</summary>
+    public Action<InfoIterazione>? SuAggiornamentoPv
+    {
+        get => _suAggiornamentoPv;
+        set
+        {
+            _suAggiornamentoPv = value;
+            if (_searches.Count > 0) _searches[0].SuAggiornamentoPv = value;
+        }
+    }
+
+    private Action<InfoIterazione>? _suAggiornamentoPv;
+
     /// <summary>Ricrea il pool con N thread di ricerca, tutti condividenti la stessa <see
     /// cref="TranspositionTable"/> e le stesse <see cref="SharedHistories"/> — <c>Threads.set</c>,
     /// thread.cpp:208-216 (MovePicker, AccumulatorStack e le history per thread restano private,
@@ -78,6 +93,7 @@ public sealed class SearchThreadPool
         {
             var s = new Search(_tt, _searches.Count, _sharedHistories); // threadIdx, search.cpp:173
             s.SetSyzygyOptions(_syzygyOptions.useRule50, _syzygyOptions.probeDepth, _syzygyOptions.probeLimit);
+            if (i == 0) s.SuAggiornamentoPv = _suAggiornamentoPv; // solo mainThread, search.cpp:495
             _searches.Add(s);
         }
     }
@@ -229,6 +245,11 @@ public sealed class SearchThreadPool
         // senza questa propagazione, la prossima chiamata a Search_ del thread principale userebbe
         // i PROPRI valori (magari peggiori) invece di quelli della riga davvero scelta.
         _searches[0].SetPreviousScores(best.ScoreCp, best.AverageScore);
+
+        // search.cpp:255 — "if (!uciPvSent || bestThread != this)": se il voto ha scelto un thread
+        // diverso dal principale, le righe "info" emesse durante la ricerca (solo dal principale)
+        // descrivono un'ALTRA linea, quindi la riga finale va comunque ristampata.
+        if (!ReferenceEquals(best, results[0])) best.UciPvSent = false;
 
         return best;
     }

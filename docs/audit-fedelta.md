@@ -142,31 +142,121 @@ posizioni di matto/stallo dove l'oracolo non stampa la riga info — artefatto d
 `4k3/3q1r2/1N2r1b1/3ppN2/2nPP3/1B1R2n1/2R1Q3/3K4 w - - 5 1` (1.821 contro 1.050, l'unica dove ne
 usiamo molti di piu').
 
+## RISOLTA, la piu' grossa finora: `PvNode` era DEDOTTO dalla finestra invece che propagato
+
+Trovata il 2026-09-08 sera partendo dalla divergenza a profondita' 4 piu' piccola che esistesse:
+`4k2r/1pb2ppp/1p2p3/1R1p4/3P4/2r1PN2/P4PPP/1R4K1 b - - 3 22`, **591 nodi contro 594**.
+
+Nella fonte il tipo di nodo e' un **parametro di template**:
+
+```cpp
+template<NodeType nodeType>
+Value Search::Worker::search(...) {
+    constexpr bool PvNode   = nodeType != NonPV;   // search.cpp:706
+    constexpr bool rootNode = nodeType == Root;
+```
+
+e si propaga per STRUTTURA: `search<Root>` alla radice, `search<PV>` allo Step 20, `search<NonPV>`
+in ogni ricerca a finestra nulla. Da noi era invece **dedotto dalla finestra**:
+
+```csharp
+bool isPvNode = beta - alpha > 1;   // <-- l'errore
+```
+
+Le due cose coincidono quasi sempre, ma **non alla radice quando la finestra di aspiration ha
+larghezza 1** — situazione del tutto ordinaria: dopo un fail-high la fonte ricerca con
+`alpha = max(beta - delta, alpha)`, e nel caso in esame la radice cercava con `alpha=257 beta=258`.
+Li' la fonte resta in `search<Root>`, cioe' PV; noi diventavamo non-PV, e con noi **tutto il
+sottoalbero**. Conseguenza diretta: spariva lo **Step 20** (search.cpp:1406-1423, "For PV nodes
+only, do a full PV search on the first move or after a fail high"), e con esso la discesa PV che lo
+accompagna. Nelle tracce affiancate si vedeva a occhio nudo: dentro `PLY0 d=3 mc=2 e8e7` l'oracolo
+spendeva 27 nodi e noi 22, e i 5 nodi mancanti erano esattamente una catena
+`PLY1 d=1 -> PLY2 d=1 -> PLY3 d=1` a finestra nulla che noi non facevamo mai.
+
+`isPvNode` non serve solo allo Step 20: entra nel raffinamento LMR (`+ (isPvNode ? 1 : 0)`), in
+`allNode`, nelle condizioni di taglio da TT, nel razoring, nella scelta fra `qsearch<PV>` e
+`qsearch<NonPV>`. Era quindi una divergenza di comportamento diffusa, non un dettaglio di stampa.
+
+**Correzione**: `isPvNode` e' ora un PARAMETRO di `Negamax`, passato esplicitamente in tutti e 9 i
+punti di chiamata, ciascuno annotato con l'istanza di template della fonte che riproduce
+(search.cpp:395, 1020, 1037, 1081, 1254, 1372, 1387, 1402, 1422). Nessuna deduzione dalla finestra
+resta nel motore (verificato con `grep "beta - alpha > 1"`).
+
+**Effetto misurato**: il caso riproduttore passa a 594 = 594; le divergenze reali di conteggio nodi a
+profondita' 4 scendono da 5 a 3 su 49; bench 2.145.601 -> 2.117.244 nodi. 141/141 test verdi.
+
+**Lezione, la stessa di sempre**: "presenza non e' fedelta'". Lo Step 20 c'era ed era trascritto
+riga per riga; era la CONDIZIONE che lo governava a essere ricostruita per conto nostro invece che
+trascritta. Un parametro di template non e' un dettaglio di linguaggio da tradurre "in modo
+equivalente": e' un valore, e va fatto viaggiare come tale.
+
+## RISOLTA: non emettevamo alcuna riga "info" per iterazione
+
+Scoperta mentre si cercava a quale ITERAZIONE nascesse la divergenza sopra: il nostro motore
+stampava **una sola** riga `info` alla fine dell'intera ricerca, mentre la fonte ne emette una per
+ogni iterazione completata (`SearchManager::output_pv`, search.cpp:2273-2343, chiamata da
+search.cpp:497). Due danni distinti:
+
+- **di protocollo**: una GUI e lichess-bot non vedono alcun avanzamento durante una ricerca lunga;
+- **di diagnosi**: senza le righe intermedie non si puo' stabilire a quale iterazione nasce una
+  divergenza, che e' il primo passo da fare PRIMA di aprire le tracce riga per riga.
+
+Portato fedelmente, insieme a `uciPvSent` (search.cpp:324/342/498/542) che governa se la riga
+finale va ristampata, e al fatto che `extract_ponder_from_tt` ALLUNGA la PV e quindi obbliga a
+ristamparla. Verifica: su
+`4k2r/1pb2ppp/1p2p3/1R1p4/3P4/2r1PN2/P4PPP/1R4K1 b - - 3 22` a profondita' 4 le cinque righe emesse
+(d1, d2, d3, d4, d4 col ponder dalla TT) coincidono ora **una per una** con quelle dell'oracolo.
+
+Strumento nuovo: `tools/iterazioni.py "FEN" D` affianca le righe per iterazione. **E' il primo passo
+del procedimento, prima di `confronta_traccia.py`.**
+
+NON portato, assenza dichiarata: `syzygy_extend_pv` (search.cpp:2303), che allunga la PV mostrata
+quando la radice e' in tablebase con punteggio decisivo — incide su quanto e' lunga la PV stampata,
+mai sulla mossa scelta. Il `bench` non installa la callback (nessuna riga per iterazione li'),
+differenza deliberata per non cambiare l'output che gli strumenti di misura analizzano.
+
 ## PUNTO DI RIPRESA per la prossima sessione
 
 **Piano concordato con l'utente: instrumentare l'oracolo per scovare le cause delle divergenze
 residue.** Lo strumento e' pronto e versionato: `tools/oracolo-traccia.patch` (istruzioni di build,
 validazione obbligatoria e trappole in testa al file).
 
-**Procedimento che ha funzionato, da ripetere**:
+**Procedimento che ha funzionato, da ripetere in QUEST'ORDINE**:
 1. `tools/nodi_bassa_profondita.py N` per trovare le posizioni che divergono alla profondita' piu'
    bassa possibile (il conteggio nodi e' il segnale piu' severo);
-2. `tools/divide.py FEN D` per scendere al figlio piu' piccolo che diverge;
-3. strumentare ENTRAMBI i motori sulle stesse grandezze e confrontarle voce per voce. La voce che
-   non combacia e' la causa: non serve piu' formulare ipotesi.
+2. `tools/iterazioni.py FEN D` per stabilire a quale ITERAZIONE nasce la divergenza. Le iterazioni
+   precedenti identiche in mossa, punteggio E nodi escludono meta' delle ipotesi in un colpo solo, e
+   costano una riga di output invece di centinaia;
+3. `tools/confronta_traccia.py FEN D PREFISSO` per affiancare le tracce interne, scendendo di
+   livello (PLY -> QS -> QIN -> QGEN) finche' resta UNA riga diversa;
+4. quella riga nomina il campo colpevole: si va alla riga corrispondente della fonte e si confronta.
+   Non serve piu' formulare ipotesi.
 
-**Da dove ripartire, in ordine di taglia**:
-- profondita' 2: restano **6 posizioni su 51** con conteggio nodi diverso. La piu' anomala e'
-  `5k2/7R/4P2p/5K2/p1r2P1p/8/8/8 b - - 0 1`, l'unica dove usiamo PIU' nodi dell'oracolo
-  (410 contro 318): tutte le altre ne usano meno.
-- `8/8/1P6/5pr1/8/1R6/7k/2K5 b - - 1 1`: identico a profondita' 1, 384 contro 378 a profondita' 2.
-- il finale `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11`, dove il rapporto di nodi esplode a 12-13x
-  fra profondita' 11 e 13 per poi rientrare a 1,1x.
+**Stato al 2026-09-08 sera, dopo la correzione di `PvNode`** (51 posizioni; 2 sono matto/stallo e
+l'oracolo non emette conteggio, quindi il denominatore reale e' 49):
 
-**Ordine di priorita' suggerito**: prima le divergenze a profondita' 2 (albero minuscolo, causa
-isolabile in una sessione), poi risalire. Ogni causa trovata a profondita' bassa ne elimina molte a
-profondita' alta — la correzione della maschera sui bound, trovata su un caso da 57 nodi, ha portato
-l'accordo a profondita' 3 dall'88,2% al 94,1%.
+| profondita' | conteggio nodi identico |
+|---|---|
+| 2 | 49/49 |
+| 3 | 49/49 |
+| 4 | 46/49 |
+| 5 | 36/49 |
+
+**Da dove ripartire, in ordine di taglia** — le tre divergenze reali a profondita' 4:
+- `1r6/1P4bk/3qr1p1/N6p/3pp2P/6R1/3Q1PP1/1R4K1 w - - 1 42`: **1.093 contro 1.105 (-12)**, la piu'
+  piccola, da attaccare per prima;
+- `5k2/7R/4P2p/5K2/p1r2P1p/8/8/8 b - - 0 1`: 1.177 contro 1.086 (+91);
+- `4k3/3q1r2/1N2r1b1/3ppN2/2nPP3/1B1R2n1/2R1Q3/3K4 w - - 5 1`: 1.821 contro 1.050 (+771), di gran
+  lunga la piu' anomala — quasi il doppio dei nodi.
+
+Altri fili aperti, indipendenti: il finale `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11`, dove il
+rapporto di nodi esplode a 12-13x fra profondita' 11 e 13 per poi rientrare a 1,1x; e i 3 nodi di
+quiescenza del punto 5 in fondo a questo documento.
+
+**Ordine di priorita'**: sempre la divergenza piu' piccola alla profondita' piu' bassa. Ogni causa
+trovata li' ne elimina molte a profondita' alta — la maschera sui bound, trovata su un caso da 57
+nodi, porto' l'accordo a profondita' 3 dall'88,2% al 94,1%; `PvNode`, trovato su un caso da 594
+nodi, ha chiuso l'intera profondita' 3 e due terzi della 4.
 
 ## LO STRUMENTO DECISIVO: compilare l'oracolo (2026-09-08 sera)
 

@@ -116,6 +116,27 @@ public sealed class SearchResult
     /// migliore e' un BOUND (fail-high/fail-low) e non un valore esatto. Serve al voto fra thread:
     /// vedi il commento in <c>SearchThreadPool.GetBestResult</c>.</summary>
     public bool IsInexact;
+
+    /// <summary><c>uciPvSent</c>, search.cpp:243 — vero se l'ULTIMA riga "info" gia' emessa da
+    /// <see cref="Search.SuAggiornamentoPv"/> descrive gia' questo risultato finale. Il chiamante
+    /// UCI la usa per decidere se ristampare (search.cpp:255-256).</summary>
+    public bool UciPvSent;
+}
+
+/// <summary>Il contenuto di <c>InfoFull</c> (uci.h) riempito da <c>SearchManager::output_pv</c>
+/// (search.cpp:2273-2343) e passato a <c>updates.onUpdateFull</c>: una riga "info" per ITERAZIONE
+/// completata. Restano fuori i campi che il nostro layer UCI non stampa (multipv, wdl, hashfull,
+/// time/nps, che il chiamante ricava da se').</summary>
+public sealed class InfoIterazione
+{
+    public int Depth;
+    public int SelDepth;
+    public int ScoreCp;
+    /// <summary>"lowerbound", "upperbound" o stringa vuota (search.cpp:2317-2320).</summary>
+    public string Bound = "";
+    public long Nodes;
+    public long TbHits;
+    public List<Move> Pv = [];
 }
 
 public sealed class Search
@@ -136,6 +157,18 @@ public sealed class Search
     /// poche fonti di DIVERSITA' del Lazy SMP — senza, tutti i thread cercano la stessa finestra e
     /// duplicano lavoro invece di esplorare parti diverse dell'albero.</summary>
     private readonly int _threadIdx;
+
+    /// <summary><c>updates.onUpdateFull</c> (uci.h, chiamata da <c>SearchManager::output_pv</c>,
+    /// search.cpp:2342) — invocata a OGNI iterazione completata di iterative deepening. Fino al
+    /// 2026-09-08 questo motore non emetteva NULLA per iterazione: una sola riga "info" alla fine
+    /// dell'intera ricerca. Due conseguenze reali, entrambe misurate:
+    /// - di protocollo: una GUI (e lichess-bot) non vede alcun avanzamento durante una ricerca
+    ///   lunga, mentre la fonte ne emette una per profondita';
+    /// - di diagnosi: senza le righe intermedie non si puo' stabilire a quale ITERAZIONE nasce una
+    ///   divergenza dall'oracolo, che e' il primo passo prima di aprire le tracce riga per riga.
+    /// Solo il thread principale la invoca ("mainThread" nella fonte): <see cref="_threadIdx"/> 0.
+    /// </summary>
+    public Action<InfoIterazione>? SuAggiornamentoPv;
 
     public Search(TranspositionTable? sharedTt = null, int threadIdx = 0, SharedHistories? shared = null)
     {
@@ -800,12 +833,16 @@ public sealed class Search
         // sotto.
         double previousIterationElapsedMs = 0;
 
+        // search.cpp:324 — vero quando l'ultima riga "info" emessa descrive gia' lo stato corrente.
+        bool uciPvSent = false;
+
         try
         {
             for (int depth = 1; depth <= maxDepth; depth++)
             {
                 _rootDepth = depth;
                 totBestMoveChanges /= 2; // search.cpp:341, invecchia la metrica di instabilità
+                uciPvSent = false;       // search.cpp:342, insieme all'invecchiamento sopra
 
                 // search.cpp:356-357 — se l'iterazione precedente non ha lasciato margine
                 // (increaseDepth=false, impostato a fine iterazione precedente sotto), conta
@@ -865,7 +902,7 @@ public sealed class Search
                     // effettivo ogni 4 passi di searchAgain" (commento della fonte, issue #2717).
                     int adjustedDepth = Math.Max(1, depth - failedHighCnt - (3 * (searchAgainCounter + 1) / 4));
                     _rootDelta = beta - alpha; // search.cpp:394, ricalcolato a ogni tentativo
-                    bestValue = Negamax(pos, adjustedDepth, 0, alpha, beta, cutNode: false);
+                    bestValue = Negamax(pos, adjustedDepth, 0, alpha, beta, cutNode: false, isPvNode: true); // search<Root>, search.cpp:395
 
                     // search.cpp:403 — stable_sort: le mosse a pari punteggio (tutte le non-PV,
                     // rimaste a -Infinity) mantengono l'ordine relativo che avevano.
@@ -890,6 +927,14 @@ public sealed class Search
 
                     delta += 47 * delta / 128;
                 }
+
+                // search.cpp:492-499 — fine del ciclo MultiPV: lo "stable_sort" della fonte su
+                // [pvFirst, pvIdx] con multiPV=1 ordina UN solo elemento (nulla da fare qui), poi
+                // si aggiorna la GUI. La condizione della fonte e' "mainThread && !threads.stop &&
+                // (pvIdx + 1 == multiPV || nodes > NODES_LIMIT_OUTPUT)": qui !threads.stop e'
+                // implicito (un'iterazione interrotta non arriva a questo punto, vedi sotto) e
+                // "pvIdx + 1 == multiPV" e' sempre vero con multiPV=1, quindi resta solo mainThread.
+                uciPvSent = EmettiPv(depth);
 
                 // Bestmove/punteggio/PV presi dalla vera rootMoves[0] dopo l'ordinamento — non più
                 // da una ri-sonda della TT a posteriori (mai necessaria nella fonte, che usa sempre
@@ -948,6 +993,10 @@ public sealed class Search
                         _rootMoves[0].Pv.Clear();
                         _rootMoves[0].Pv.AddRange(lastBestMovePv);
                         _rootMoves[0].UnsetInexact();
+
+                        // search.cpp:541-542 — il ripristino ha cambiato mossa/punteggio DOPO
+                        // l'emissione: la riga gia' mandata non descrive piu' lo stato, va ristampata.
+                        uciPvSent = false;
                     }
                 }
 
@@ -1094,10 +1143,71 @@ public sealed class Search
 
         result.Nodes = _nodes;
         result.TbHits = _tbHits;
+        // search.cpp:217 — "bool uciPvSent = iterative_deepening();": il valore risale al chiamante,
+        // che decide se ristampare la riga finale (search.cpp:255-256). Un'iterazione interrotta
+        // (catch sopra) NON ha emesso nulla per quella profondita', quindi il valore resta quello
+        // dell'ultima iterazione completata — come nella fonte, dove il "break" su threads.stop
+        // avviene prima di output_pv.
+        result.UciPvSent = uciPvSent;
         return result;
     }
 
-    private int Negamax(Position pos, int depth, int ply, int alpha, int beta, bool cutNode, Move excludedMove = default)
+    /// <summary><c>SearchManager::output_pv</c>, search.cpp:2273-2343, ristretto a MultiPV=1 (il
+    /// ciclo "for i &lt; multiPV" ha una sola iterazione, i=0). Ritorna il valore che la fonte
+    /// assegna a <c>uciPvSent</c> (search.cpp:498, "pvIdx + 1 == multiPV": sempre vero qui).
+    /// NON portato: <c>syzygy_extend_pv</c> (search.cpp:2303) — estende/corregge la PV con le
+    /// tablebase quando la radice e' in TB e il punteggio e' decisivo; assenza dichiarata, incide
+    /// solo su quanto e' lunga la PV mostrata, mai sulla mossa scelta.</summary>
+    private bool EmettiPv(int depth)
+    {
+        var callback = SuAggiornamentoPv;
+        if (callback == null || _threadIdx != 0 || _rootMoves.Count == 0)
+            return true; // la fonte assegna uciPvSent anche quando la GUI non ascolta
+
+        var rm = _rootMoves[0];
+
+        // search.cpp:2286 — una mossa mai cercata in questa iterazione conserva -VALUE_INFINITE:
+        // si ripubblica allora il risultato dell'iterazione PRECEDENTE, a profondita' depth-1.
+        bool usePreviousScore = rm.Score == -Infinity;
+
+        int d = usePreviousScore ? Math.Max(1, depth - 1) : depth;
+        int v = usePreviousScore ? rm.PreviousScore : rm.UciScore;
+        if (v == -Infinity) v = Values.Zero;
+
+        bool isTbScore = _tbConfig.RootInTb && !Values.IsMateOrMated(v);
+        if (isTbScore) v = rm.TbScore;
+
+        var info = new InfoIterazione
+        {
+            Depth = d,
+            SelDepth = rm.SelDepth,
+            ScoreCp = v,
+            Nodes = _nodes,
+            TbHits = _tbHits,
+            Pv = [.. usePreviousScore ? rm.PreviousPv : rm.Pv],
+        };
+
+        // search.cpp:2317-2325 — i punteggi da tablebase e quelli ripescati dall'iterazione
+        // precedente sono ESATTI anche se i flag di quella RootMove dicono altro.
+        if (!(isTbScore || usePreviousScore))
+            info.Bound = rm.InexactLower ? "lowerbound" : rm.InexactUpper ? "upperbound" : "";
+
+        callback(info);
+        return true;
+    }
+
+    /// <param name="isPvNode"><c>constexpr bool PvNode = nodeType != NonPV</c>, search.cpp:706 — il
+    /// PARAMETRO DI TEMPLATE della fonte, che qui viaggia come argomento. Fino al 2026-09-08 era
+    /// dedotto dalla finestra ("beta - alpha > 1"): un'approssimazione che coincide quasi sempre ma
+    /// NON alla radice quando la finestra di aspiration ha larghezza 1 (alpha=v, beta=v+1, del
+    /// tutto normale dopo un fail-high, dove la fonte ricerca con "alpha = max(beta - delta,
+    /// alpha)"). In quel caso la fonte resta in <c>search&lt;Root&gt;</c>, cioe' PV, mentre noi
+    /// diventavamo non-PV e saltavamo lo Step 20 (search.cpp:1409) per l'INTERO sottoalbero: la
+    /// ricerca a finestra piena sulla prima mossa e dopo ogni fail-high spariva, e con essa la
+    /// discesa PV che la accompagna. Trovato affiancando le tracce su
+    /// "4k2r/1pb2ppp/1p2p3/1R1p4/3P4/2r1PN2/P4PPP/1R4K1 b - - 3 22" a profondita' 4, dove
+    /// l'oracolo spendeva 27 nodi sulla seconda mossa di radice e noi 22.</param>
+    private int Negamax(Position pos, int depth, int ply, int alpha, int beta, bool cutNode, bool isPvNode, Move excludedMove = default)
     {
         if ((++_visits & 2047) == 0)
         {
@@ -1115,7 +1225,8 @@ public sealed class Search
                 throw new OperationCanceledException();
         }
 
-        bool isPvNode = beta - alpha > 1;
+        // isPvNode arriva ora dal CHIAMANTE (vedi il commento sul parametro): e' il tipo di nodo
+        // della fonte, non una deduzione dalla finestra.
         bool allNode = !isPvNode && !cutNode; // search.cpp:726 — !(PvNode||cutNode)
         // search.cpp:727 — usato da Step 9 (futility) e Step 16 (Singular Extensions). Con
         // rootMoves reali, "rootMoves[pvIdx].score" letto qui è ORA lo stesso identico riferimento
@@ -1564,7 +1675,7 @@ public sealed class Search
                 _inCheckHistory[ply + StackOffset] = false;
                 _captureStageHistory[ply + StackOffset] = false;
 
-                int nullValue = -Negamax(pos, depth - R, ply + 1, -beta, -beta + 1, cutNode: false);
+                int nullValue = -Negamax(pos, depth - R, ply + 1, -beta, -beta + 1, cutNode: false, isPvNode: false); // search<NonPV>, search.cpp:1020
                 pos.UndoNullMove();
 
                 _currentMoveHistory[ply + StackOffset] = savedNullMove;
@@ -1580,7 +1691,7 @@ public sealed class Search
                     // Ricerca di verifica alle profondità alte, col null move disattivato finché
                     // il ply non supera _nmpMinPly (la ricorsione non è ammessa) — search.cpp:1034.
                     _nmpMinPly = ply + (3 * (depth - R) / 4);
-                    int v = Negamax(pos, depth - R, ply, beta - 1, beta, cutNode: false);
+                    int v = Negamax(pos, depth - R, ply, beta - 1, beta, cutNode: false, isPvNode: false); // search<NonPV>, search.cpp:1037
                     _nmpMinPly = 0;
 
                     if (v >= beta) return nullValue;
@@ -1661,7 +1772,7 @@ public sealed class Search
                     int pcValue = -Quiesce(pos, -probCutBeta, -probCutBeta + 1, ply + 1, isPvNode: false); // search.cpp:1077
 
                     if (pcValue >= probCutBeta && probCutDepth > 0)
-                        pcValue = -Negamax(pos, probCutDepth, ply + 1, -probCutBeta, -probCutBeta + 1, cutNode: !cutNode);
+                        pcValue = -Negamax(pos, probCutDepth, ply + 1, -probCutBeta, -probCutBeta + 1, cutNode: !cutNode, isPvNode: false); // search<NonPV>, search.cpp:1081
 
                     pos.UndoMove(pcMove);
                     _accumulatorStack.Pop();
@@ -1834,7 +1945,7 @@ public sealed class Search
                 int singularBeta = ttScore - (((59 + (66 * ((ttPv && !isPvNode) ? 1 : 0))) * depth) / 63);
                 int singularDepth = newDepth / 2;
 
-                int singularScore = Negamax(pos, singularDepth, ply, singularBeta - 1, singularBeta, cutNode, excludedMove: m);
+                int singularScore = Negamax(pos, singularDepth, ply, singularBeta - 1, singularBeta, cutNode, isPvNode: false, excludedMove: m); // search<NonPV>, search.cpp:1254
 
                 if (singularScore < singularBeta)
                 {
@@ -1929,7 +2040,7 @@ public sealed class Search
                 int d = Math.Max(1, Math.Min(newDepth - (r / 1024), newDepth + 2)) + (isPvNode ? 1 : 0);
 
                 _reductionHistory[ply + StackOffset] = newDepth - d; // search.cpp:1371
-                score = -Negamax(pos, d, ply + 1, -(alpha + 1), -alpha, cutNode: true);
+                score = -Negamax(pos, d, ply + 1, -(alpha + 1), -alpha, cutNode: true, isPvNode: false); // search<NonPV>, search.cpp:1372
                 _reductionHistory[ply + StackOffset] = 0; // search.cpp:1373
 
                 if (score > alpha)
@@ -1948,7 +2059,7 @@ public sealed class Search
                     // nodi non-PV e' la stessa cosa (beta==alpha+1), ma nei nodi PV questa era una
                     // ricerca a finestra PIENA, ripetuta subito dopo identica dallo Step 20.
                     if (newDepth > d)
-                        score = -Negamax(pos, newDepth, ply + 1, -(alpha + 1), -alpha, cutNode: !cutNode);
+                        score = -Negamax(pos, newDepth, ply + 1, -(alpha + 1), -alpha, cutNode: !cutNode, isPvNode: false); // search<NonPV>, search.cpp:1387
 
                     // search.cpp:1389-1390 "Post LMR continuation history updates" — MAI PORTATO
                     // fino al 2026-09-07: la mossa che ha superato alpha in ricerca ridotta viene
@@ -1970,7 +2081,7 @@ public sealed class Search
                 // due tracce di audit non sono confrontabili (differivano di esattamente 1127).
                 if (ttMove == Move.None) r += 1127;
                 int searchDepth = newDepth - (r > 5234 ? 1 : 0) - (r > 5487 && newDepth > 2 ? 1 : 0);
-                score = -Negamax(pos, searchDepth, ply + 1, -(alpha + 1), -alpha, cutNode: !cutNode);
+                score = -Negamax(pos, searchDepth, ply + 1, -(alpha + 1), -alpha, cutNode: !cutNode, isPvNode: false); // search<NonPV>, search.cpp:1402
             }
             else
             {
@@ -1995,7 +2106,7 @@ public sealed class Search
                         || probe.Data.Depth > 1))
                     newDepth = Math.Max(newDepth, 1);
 
-                score = -Negamax(pos, newDepth, ply + 1, -beta, -alpha, cutNode: false);
+                score = -Negamax(pos, newDepth, ply + 1, -beta, -alpha, cutNode: false, isPvNode: true); // search<PV>, search.cpp:1422
             }
 
             pos.UndoMove(m);

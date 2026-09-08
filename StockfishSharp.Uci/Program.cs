@@ -618,6 +618,16 @@ void HandleGo(string[] toks)
         return ponderMove;
     }
 
+    // UCIEngine::on_update_full (uci.cpp) — la riga "info" di un'iterazione. Il campo "bound", se
+    // presente, segue immediatamente il punteggio ("score cp 12 lowerbound"), come nella fonte.
+    string FormatInfo(StockfishSharp.Engine.InfoIterazione info)
+    {
+        string bound = info.Bound.Length > 0 ? " " + info.Bound : "";
+        return $"info depth {info.Depth} seldepth {info.SelDepth} score "
+             + StockfishSharp.Uci.UciScore.Format(info.ScoreCp, position) + bound
+             + $" nodes {info.Nodes} tbhits {info.TbHits} pv {FormatPv(info.Pv)}";
+    }
+
     void PrintBestmove(Move? bestMove, IReadOnlyList<Move>? pv)
     {
         // Matto/stallo: la TT salva Move.None come bestMove (Search.cs, "bestMove ?? Move.None"),
@@ -758,9 +768,29 @@ void HandleGo(string[] toks)
 
     searchTask = Task.Run(() =>
     {
-        var result = search.Search_(pos, depth, budget, ct, optimumMs: optimumMs,
-            isPondering: isPondering, maximumMsOverride: maximumMsOverride);
-        Console.WriteLine($"info depth {result.Depth} seldepth {result.SelDepth} score {StockfishSharp.Uci.UciScore.Format(result.ScoreCp, position)} nodes {result.Nodes} tbhits {result.TbHits} pv {FormatPv(result.Pv)}");
+        // updates.onUpdateFull (uci.h) — una riga "info" per ITERAZIONE completata, come la fonte.
+        search.SuAggiornamentoPv = info => Console.WriteLine(FormatInfo(info));
+        SearchResult result;
+        try
+        {
+            result = search.Search_(pos, depth, budget, ct, optimumMs: optimumMs,
+                isPondering: isPondering, maximumMsOverride: maximumMsOverride);
+        }
+        finally { search.SuAggiornamentoPv = null; }
+
+        // search.cpp:250-256 — "RootMove::extract_ponder_from_tt" (search.cpp:2350) ALLUNGA la PV
+        // di una mossa quando questa e' lunga 1, e in quel caso azzera uciPvSent: la riga gia'
+        // emessa per l'ultima iterazione mostrava una PV piu' corta e va ristampata. Altrimenti la
+        // riga finale si ristampa solo se non ne e' stata emessa nessuna (iterazione interrotta).
+        if (result.Pv.Count == 1 && result.BestMove is { } bm0 && bm0 != Move.None
+            && ExtractPonderFromTt(bm0) is { } ponder)
+        {
+            result.Pv.Add(ponder);
+            result.UciPvSent = false;
+        }
+
+        if (!result.UciPvSent)
+            Console.WriteLine($"info depth {result.Depth} seldepth {result.SelDepth} score {StockfishSharp.Uci.UciScore.Format(result.ScoreCp, position)} nodes {result.Nodes} tbhits {result.TbHits} pv {FormatPv(result.Pv)}");
 
         WaitWhilePondering();
         PrintBestmove(result.BestMove, result.Pv);
