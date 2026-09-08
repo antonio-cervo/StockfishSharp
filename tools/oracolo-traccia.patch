@@ -1,0 +1,70 @@
+# Instrumentazione dell'ORACOLO per il confronto con questo porting.
+#
+# Aggiunge tre tracce a src/search.cpp, tutte attive solo con la variabile d'ambiente SF_TRACE=1:
+#   STEP9   - ingressi della futility di nodo figlio (ply <= 1)
+#   R       - componenti della riduzione LMR alla radice, PRIMA del termine su statScore
+#   RADICE  - esito e COSTO IN NODI di ogni mossa di radice
+# Sono le stesse grandezze che il nostro motore puo' stampare: si confrontano voce per voce.
+#
+# COME SI USA
+#   cd ProgettiVS && mkdir -p oracolo-build
+#   cp -r stockfish-upstream-reference/src stockfish-upstream-reference/scripts oracolo-build/
+#   cp StockfishSharp/nnue-networks/nn-1a298aa575a0.nnue oracolo-build/src/
+#   cd oracolo-build && patch -p0 < ../StockfishSharp/tools/oracolo-traccia.patch
+#   cd src && PATH="<mingw64>/bin:$PATH" mingw32-make -j8 build ARCH=x86-64-avx2 COMP=mingw
+#
+# La cartella scripts/ SERVE: il Makefile chiama ../scripts/net.sh.
+#
+# VALIDARE SEMPRE il binario prodotto contro quello ufficiale prima di usarlo come oracolo
+# (stessa mossa, stesso punteggio, stesso numero di nodi su qualche posizione a profondita' fissa).
+# Fatto il 2026-09-08: bit-identico su 6 confronti.
+#
+# NEL PILOTARLO: scrivere stderr su FILE, non su subprocess.PIPE. Leggendo solo stdout il buffer di
+# stderr si riempie e il processo si BLOCCA senza mai emettere "bestmove".
+#
+--- stockfish-upstream-reference/src/search.cpp	2026-09-05 13:35:36.126498700 +0200
++++ oracolo-build/src/search.cpp	2026-09-08 18:06:50.062808100 +0200
+@@ -996,6 +996,16 @@
+     if (!ss->ttPv && depth < (seekMate ? 6 : 19) && eval >= beta && (!ttData.move || ttCapture)
+         && !is_loss(beta) && !is_win(eval))
+     {
++        if (ss->ply <= 1 && std::getenv("SF_TRACE"))
++            std::cerr << "    STEP9 ply=" << ss->ply << " depth=" << depth << " eval=" << eval
++                      << " statico=" << ss->staticEval << " ttHit=" << ss->ttHit
++                      << " ttVal=" << ttData.value << " ttDepth=" << ttData.depth
++                      << " ttMove=" << (ttData.move ? "si" : "none")
++                      << " ttCapture=" << ttCapture << " ttPv=" << ss->ttPv
++                      << " improving=" << improving << " oppWors=" << opponentWorsening
++                      << " corr=" << correctionValue << " alpha=" << alpha << " beta=" << beta
++                      << std::endl;
++
+         Value futilityMult = std::min(45 + depth * 4, 85);
+         futilityMult -= 20 * !ss->ttHit;
+ 
+@@ -1339,6 +1349,14 @@
+         else if (move == ttData.move)
+             r -= 2179;
+ 
++        if (rootNode && std::getenv("SF_TRACE"))
++            std::cerr << "    R mc=" << moveCount << " base=" << reduction(improving, depth, moveCount, delta)
++                      << " impr=" << improving << " d=" << depth << " delta=" << delta << " rootDelta=" << rootDelta
++                      << " ttPv=" << ss->ttPv << " cutNode=" << cutNode << " ttCap=" << ttCapture
++                      << " cutoffCnt1=" << (ss + 1)->cutoffCnt << " allNode=" << allNode
++                      << " corr=" << correctionValue << " alpha=" << alpha << " eval=" << eval
++                      << " rPrima=" << r << std::endl;
++
+         if (capture)
+             ss->statScore = 873 * int(PieceValue[pos.captured_piece()]) / 128
+                           + captureHistory[movedPiece][move.to_sq()][type_of(pos.captured_piece())];
+@@ -1434,6 +1452,11 @@
+         if (threads.stop.load(std::memory_order_relaxed))
+             return VALUE_ZERO;
+ 
++        if (rootNode && std::getenv("SF_TRACE"))
++            std::cerr << "  RADICE d=" << depth << " mc=" << moveCount << " " << UCIEngine::move(move, false)
++                      << " score=" << value << " alpha=" << alpha << " beta=" << beta
++                      << " costo=" << (nodes - nodeCount) << " nodi=" << nodes << " r=" << r << " newDepth=" << newDepth << std::endl;
++
+         if (rootNode)
+         {
+             RootMove& rm = *std::find(rootMoves.begin(), rootMoves.end(), move);
