@@ -437,7 +437,30 @@ public sealed class Position
 
     // --- Chiavi hash — position.h:160-166 ---
 
-    public ulong Key => _st.Key;
+    /// <summary><c>Position::key()</c>, position.h:319 — attenzione: NON e' la chiave grezza, e'
+    /// <c>adjust_key50(st->key)</c>. Fino al 2026-09-08 qui si restituiva <c>_st.Key</c> e
+    /// <c>adjust_key50</c> non era portato affatto.
+    ///
+    /// A cosa serve: due posizioni identiche sulla scacchiera ma con contatori delle 50 mosse molto
+    /// diversi NON hanno lo stesso valore, perche' l'orizzonte della patta e' diverso. Senza questo
+    /// aggiustamento condividono la stessa entry di TT e si scambiano valutazioni sbagliate —
+    /// tipicamente nei finali di manovra, dove il motore ripete posizioni con rule50 che cresce.
+    ///
+    /// La chiave GREZZA resta quella usata internamente (rilevazione ripetizioni, cuckoo, calcolo
+    /// incrementale in DoMove): li' serve l'identita' della posizione, non la sua valutabilita'.</summary>
+    public ulong Key => AdjustKey50(_st.Key, afterMove: false);
+
+    /// <summary><c>Position::adjust_key50&lt;AfterMove&gt;</c>, position.h:321-324. Sotto la soglia
+    /// la chiave e' intatta; sopra, viene perturbata da un valore che cambia ogni 8 mezze mosse del
+    /// contatore, cosi' che fasce diverse di rule50 non collidano fra loro.</summary>
+    private ulong AdjustKey50(ulong k, bool afterMove)
+    {
+        int soglia = 14 - (afterMove ? 1 : 0);
+        return _st.Rule50 < soglia ? k : k ^ MakeKey((ulong)((_st.Rule50 - soglia) / 8));
+    }
+
+    /// <summary><c>make_key</c>, types.h:421 — moltiplicatore e incremento di Knuth/LCG.</summary>
+    private static ulong MakeKey(ulong seed) => (seed * 6364136223846793005UL) + 1442695040888963407UL;
 
     public ulong MaterialKey => _st.MaterialKey;
 
