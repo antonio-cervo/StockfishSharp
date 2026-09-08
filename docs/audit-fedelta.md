@@ -399,37 +399,53 @@ validazione obbligatoria e trappole in testa al file).
 4. quella riga nomina il campo colpevole: si va alla riga corrispondente della fonte e si confronta.
    Non serve piu' formulare ipotesi.
 
-**Stato al 2026-09-08 sera**, dopo `PvNode` + slot `currentMove` + `ss->ttPv` (51 posizioni; 2 sono
+**Stato al 2026-09-08 sera**, dopo le sei correzioni della giornata (51 posizioni; 2 sono
 matto/stallo alla radice, dove l'oracolo non emette alcun conteggio: escluse dal denominatore, che
 diventa 49 — prima erano contate come divergenze e facevano apparire un 96,1% dove la parita' era
-piena):
+gia' piena).
 
-| profondita' | conteggio nodi identico |
-|---|---|
-| 2 | 49/49 |
-| 3 | 49/49 |
-| 4 | 49/49 |
-| 5 | 49/49 |
-| 6 | 49/49 |
-| 7 | 48/49 |
-| 8 | 48/49 |
-| 9 | 45/49 |
+**Conteggio nodi identico all'oracolo** (il segnale piu' severo che esista: due ricerche possono
+scegliere la stessa mossa per caso, ma non visitare lo stesso NUMERO di nodi):
 
-Bench: 2.145.601 -> 2.117.244 -> **2.304.916** nodi (oracolo 2.497.913). Il bench SALE avvicinandosi
-alla fonte: e' il segno che l'albero si sta conformando, non che il motore peggiora.
+| profondita' | prima della giornata | dopo |
+|---|---|---|
+| 2 | 43/49 | **49/49** |
+| 3 | 43/49 | **49/49** |
+| 4 | 44/49 | **49/49** |
+| 5 | 36/49 | **49/49** |
+| 6 | — | **49/49** |
+| 8 | 48/49 | **49/49** |
+| 10 | 46/49 | **49/49** |
+| 12 | — | **49/49** |
 
-**Da dove ripartire, in ordine di taglia**:
-- `5rk1/q6p/2p3bR/1pPp1rP1/1P1Pp3/P3B1Q1/1K3P2/R7 w - - 93 90` — l'UNICA divergenza a profondita' 7
-  (7.448 contro 7.237) e la piu' esplosiva a 8 e 9 (21.865 contro 9.538; 38.069 contro 13.350).
-  **Ha `rule50 = 93`**: e' territorio di `adjust_key50` e di `value_from_tt(..., r50c)`. Da
-  attaccare per prima, ed e' quasi certamente una causa unica.
-- profondita' 9, le altre tre: `4r1k1/r1q2ppp/ppp2n2/4P3/5Rb1/1N1BQ3/PPP3PP/R5K1 w - - 1 17`
-  (-131), `8/8/1P6/5pr1/8/4R3/7k/2K5 w - - 0 1` (-5.117),
-  `8/R7/2q5/8/6k1/8/1P5p/K6R w - - 0 124` (+280).
+Fino a profondita' 12 questo porting visita **esattamente lo stesso numero di nodi** dell'oracolo su
+tutte e 49 le posizioni confrontabili. Non e' un "quasi": e' l'albero identico.
 
-Altri fili aperti, indipendenti: il finale `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11`, dove il
-rapporto di nodi esplode a 12-13x fra profondita' 11 e 13 per poi rientrare a 1,1x; e i 3 nodi di
-quiescenza del punto 5 in fondo a questo documento.
+**Accordo di gioco a parita' di profondita'** (mossa scelta e scarto di punteggio):
+
+| profondita' | inizio giornata | dopo |
+|---|---|---|
+| 1 | 100% (0 cp) | 100% (0 cp) |
+| 3 | 88,7% (peggiore 35 cp) | **100% (0 cp)** |
+| 6 | 83,0% (mediana 9 cp) | **100% (0 cp)** |
+| 9 | 73,6% (mediana 24 cp) | **100% (0 cp)** |
+| 12 | 81,1% (mediana 22 cp, peggiore 236 cp) | **100% (0 cp, peggiore 0 cp)** |
+
+A profondita' 12, su 51 posizioni, il motore sceglie la stessa mossa dell'oracolo **e le assegna lo
+stesso identico punteggio in centesimi**, in tutti e 51 i casi. E' il risultato che a inizio
+giornata sembrava fuori portata: si partiva da 81,1% con uno scarto peggiore di 236 cp.
+
+Bench: 2.145.601 -> 2.117.244 -> 2.304.916 -> **2.182.360** nodi (oracolo 2.497.913). Il bench si
+muove in entrambe le direzioni: non e' una metrica di qualita', e' solo la forma dell'albero che si
+conforma a quella della fonte.
+
+**Da dove ripartire**: le divergenze rimaste cominciano a profondita' 12. Il procedimento e' lo
+stesso e ora e' molto piu' veloce, perche' il tetto di ply delle tracce si cambia da variabile
+d'ambiente (`SFS_PLY`/`SF_PLY`) senza ricompilare l'oracolo.
+
+Filo aperto indipendente: il finale `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11`, dove il rapporto
+di nodi esplode a 12-13x fra profondita' 11 e 13 per poi rientrare a 1,1x. Da rimisurare: e' una
+misura VECCHIA, precedente a tutte le correzioni di oggi.
 
 **Ordine di priorita'**: sempre la divergenza piu' piccola alla profondita' piu' bassa. Ogni causa
 trovata li' ne elimina molte a profondita' alta — la maschera sui bound, trovata su un caso da 57
@@ -1114,7 +1130,16 @@ del valore GREZZO e di `pos.key()` — che ora, con `adjust_key50` portato, e' d
 chiave); Step 9 futility completo, incluso `futilityMult -= 20 * !ss->ttHit`; l'espressione di
 `followPV` (search.cpp:772-775); la soglia del MovePicker di ProbCut (`probCutBeta - ss->staticEval`).
 
-### 5. Lead aperto: 3 nodi di quiescenza
+### 5. CHIUSO il 2026-09-08: i "3 nodi di quiescenza"
+
+**Non era la quiescenza.** Era l'ORDINE di `GenType.Legal` — il filtro di legalita' scorreva la
+lista all'indietro invece che in avanti (vedi la sezione dedicata in testa a questo documento). La
+diagnosi qui sotto era andata nella direzione giusta ("candidato residuo: l'ORDINE delle catture...
+l'ordine di GenType.Captures non e' verificato da nulla") ma cercava nel generatore sbagliato: era
+`Legal`, non `Captures`. Il testo storico resta perche' le cose dichiarate "gia' verificate fedeli"
+qui sotto lo sono davvero.
+
+### 5-bis (storico). Lead aperto: 3 nodi di quiescenza
 
 Riproduttore piu' piccolo di tutti: `8/2p5/3p4/KP5r/3R1p1k/8/4P1P1/8 b - - 1 11`, **scarto costante
 di 3 nodi gia' a profondita' 1** (20 contro 23), con lo stesso punteggio fino a d3. Le 15 mosse
