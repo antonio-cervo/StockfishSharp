@@ -142,6 +142,51 @@ posizioni di matto/stallo dove l'oracolo non stampa la riga info — artefatto d
 `4k3/3q1r2/1N2r1b1/3ppN2/2nPP3/1B1R2n1/2R1Q3/3K4 w - - 5 1` (1.821 contro 1.050, l'unica dove ne
 usiamo molti di piu').
 
+## RISOLTA: lo slot `currentMove` sovrascritto dalla ricerca singolare
+
+Trovata subito dopo `PvNode`, sulla divergenza a profondita' 4 successiva per taglia:
+`1r6/1P4bk/3qr1p1/N6p/3pp2P/6R1/3Q1PP1/1R4K1 w - - 1 42`, **1.093 nodi contro 1.105**.
+
+Nella fonte i campi di Stack che descrivono la mossa appena giocata li scrive
+`Search::Worker::do_move` (search.cpp:663-671), cioe' allo **Step 17**:
+
+```cpp
+ss->currentMove         = move;
+ss->continuationHistory = &continuationHistory[ss->inCheck][capture][dirtyPiece.pc][move.to_sq()];
+```
+
+Da noi stavano in cima al ciclo mosse, **prima dello Step 16** (Singular Extensions). E la ricerca
+singolare gira sullo STESSO ply — `search<NonPV>(pos, ss, singularBeta - 1, singularBeta, ...)`,
+search.cpp:1254 — quindi il suo ciclo mosse riscriveva quegli slot con le proprie mosse candidate, e
+nessuno li ripristinava. Il figlio della mossa vera leggeva quindi come `(ss-1)->currentMove`
+l'ultima candidata della ricerca singolare invece della mossa appena giocata, sbagliando: main
+history (search.cpp:982 e 1597), continuation history e continuation correction history.
+
+**Come si e' visto**: la traccia MH stampa ogni scrittura di main history col sito della fonte. Allo
+stesso identico nodo (`nodi=499 ply=2 d=2 se=-205 se1=243`, bonus identico) la fonte scriveva sulla
+casella di `d6a6` e noi su quella di `d6c7`. Nessuna inferenza: la riga nomina la mossa.
+
+Correzione: le quattro assegnazioni si sono spostate dove la fonte le fa, subito prima di `DoMove`
+(verificato che nessuno le legge fra la cima del ciclo e li').
+
+## RISOLTA nello stesso caso: `ss->ttPv` trattato come variabile locale
+
+Con i nodi ormai identici (1.105 = 1.105) restava **1 cp** di scarto. La traccia PLY mostrava un
+solo campo diverso: `r`, di **esattamente 3023** — la costante di search.cpp:1317,
+`if (ss->ttPv) r -= 3023 + ...`. Cioe' la fonte applicava quel blocco e noi no.
+
+`ss->ttPv` e' un campo dello **Stack**, non una variabile locale, e DUE ricerche girano sullo stesso
+`ss` — la singolare (search.cpp:1254) e la verifica del null move (search.cpp:1037) — entrambe in
+grado di riscriverlo tramite search.cpp:1617 (`if (value <= alpha) ss->ttPv |= (ss-1)->ttPv`). Da noi
+era una copia locale: la scrittura delle ricerche annidate finiva nell'array ma il nodo esterno
+continuava a leggere il valore vecchio, e lo Step 18 saltava una riduzione di oltre tre ply.
+
+Correzione: `ref bool ttPv = ref _ttPvHistory[ply + StackOffset];` — la variabile **e'** la cella.
+
+**Classe di errore, la stessa nei due casi**: un campo di `Stack` reso variabile locale. Vale la pena
+cercarne altri: ogni volta che la fonte scrive `ss->qualcosa` e noi teniamo una copia, una ricerca
+annidata sullo stesso ply puo' divergere in silenzio.
+
 ## RISOLTA, la piu' grossa finora: `PvNode` era DEDOTTO dalla finestra invece che propagato
 
 Trovata il 2026-09-08 sera partendo dalla divergenza a profondita' 4 piu' piccola che esistesse:
@@ -232,22 +277,33 @@ validazione obbligatoria e trappole in testa al file).
 4. quella riga nomina il campo colpevole: si va alla riga corrispondente della fonte e si confronta.
    Non serve piu' formulare ipotesi.
 
-**Stato al 2026-09-08 sera, dopo la correzione di `PvNode`** (51 posizioni; 2 sono matto/stallo e
-l'oracolo non emette conteggio, quindi il denominatore reale e' 49):
+**Stato al 2026-09-08 sera**, dopo `PvNode` + slot `currentMove` + `ss->ttPv` (51 posizioni; 2 sono
+matto/stallo alla radice, dove l'oracolo non emette alcun conteggio: escluse dal denominatore, che
+diventa 49 — prima erano contate come divergenze e facevano apparire un 96,1% dove la parita' era
+piena):
 
 | profondita' | conteggio nodi identico |
 |---|---|
 | 2 | 49/49 |
 | 3 | 49/49 |
-| 4 | 46/49 |
-| 5 | 36/49 |
+| 4 | 49/49 |
+| 5 | 49/49 |
+| 6 | 49/49 |
+| 7 | 48/49 |
+| 8 | 48/49 |
+| 9 | 45/49 |
 
-**Da dove ripartire, in ordine di taglia** — le tre divergenze reali a profondita' 4:
-- `1r6/1P4bk/3qr1p1/N6p/3pp2P/6R1/3Q1PP1/1R4K1 w - - 1 42`: **1.093 contro 1.105 (-12)**, la piu'
-  piccola, da attaccare per prima;
-- `5k2/7R/4P2p/5K2/p1r2P1p/8/8/8 b - - 0 1`: 1.177 contro 1.086 (+91);
-- `4k3/3q1r2/1N2r1b1/3ppN2/2nPP3/1B1R2n1/2R1Q3/3K4 w - - 5 1`: 1.821 contro 1.050 (+771), di gran
-  lunga la piu' anomala — quasi il doppio dei nodi.
+Bench: 2.145.601 -> 2.117.244 -> **2.304.916** nodi (oracolo 2.497.913). Il bench SALE avvicinandosi
+alla fonte: e' il segno che l'albero si sta conformando, non che il motore peggiora.
+
+**Da dove ripartire, in ordine di taglia**:
+- `5rk1/q6p/2p3bR/1pPp1rP1/1P1Pp3/P3B1Q1/1K3P2/R7 w - - 93 90` — l'UNICA divergenza a profondita' 7
+  (7.448 contro 7.237) e la piu' esplosiva a 8 e 9 (21.865 contro 9.538; 38.069 contro 13.350).
+  **Ha `rule50 = 93`**: e' territorio di `adjust_key50` e di `value_from_tt(..., r50c)`. Da
+  attaccare per prima, ed e' quasi certamente una causa unica.
+- profondita' 9, le altre tre: `4r1k1/r1q2ppp/ppp2n2/4P3/5Rb1/1N1BQ3/PPP3PP/R5K1 w - - 1 17`
+  (-131), `8/8/1P6/5pr1/8/4R3/7k/2K5 w - - 0 1` (-5.117),
+  `8/R7/2q5/8/6k1/8/1P5p/K6R w - - 0 124` (+280).
 
 Altri fili aperti, indipendenti: il finale `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11`, dove il
 rapporto di nodi esplode a 12-13x fra profondita' 11 e 13 per poi rientrare a 1,1x; e i 3 nodi di

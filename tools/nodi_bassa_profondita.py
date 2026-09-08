@@ -54,14 +54,23 @@ def cerca(cmd, fen, d):
 
 
 for d in DEPTHS:
-    uguali, diversi = 0, []
+    uguali, diversi, esclusi = 0, [], 0
     for fen in fens:
         na, nb = cerca(OURS, fen, d), cerca(ORACLE, fen, d)
+        # Matto/stallo alla radice: l'oracolo emette "bestmove (none)" senza alcuna riga "info
+        # depth ... nodes", quindi non c'e' NULLA da confrontare. Contarle come divergenze faceva
+        # apparire un 96,1% dove la parita' era piena: sono escluse dal denominatore.
+        if nb < 0:
+            esclusi += 1
+            continue
         if na == nb:
             uguali += 1
         else:
             diversi.append((fen, na, nb))
-    print("  profondita' %d:  stesso numero di nodi %2d/%d = %5.1f%%"
-          % (d, uguali, len(fens), 100.0 * uguali / len(fens)), flush=True)
+    tot = len(fens) - esclusi
+    print("  profondita' %d:  stesso numero di nodi %2d/%d = %5.1f%%%s"
+          % (d, uguali, tot, 100.0 * uguali / max(1, tot),
+             "   (%d posizioni escluse: matto/stallo alla radice)" % esclusi if esclusi else ""),
+          flush=True)
     for fen, na, nb in diversi:
         print("      nostro %8s | oracolo %8s  (%+d)  %s" % (f"{na:,}", f"{nb:,}", na - nb, fen), flush=True)

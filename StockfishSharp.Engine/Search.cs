@@ -1333,10 +1333,17 @@ public sealed class Search
 
         var probe = _tt.Probe(pos.Key);
         int ttScore = probe.Found ? ValueFromTt(probe.Data.Value, ply, pos.Rule50Count) : Values.None;
-        bool ttPv = excludedMove != default
-            ? _ttPvHistory[ply + StackOffset]
+        // "ss->ttPv" e' un campo dello Stack, non una variabile locale: due ricerche girano sullo
+        // STESSO ss (la singolare, search.cpp:1254, e la verifica del null move, search.cpp:1037) e
+        // possono riscriverlo tramite search.cpp:1617 ("if (value <= alpha) ss->ttPv |= (ss-1)->ttPv").
+        // Fino al 2026-09-08 qui c'era una copia locale: la scrittura fatta da quelle ricerche
+        // annidate finiva nell'array ma il nodo esterno continuava a leggere il valore vecchio, e lo
+        // Step 18 saltava "r -= 3023 + ..." (oltre tre ply di riduzione in meno) dove la fonte lo
+        // applicava. Con "ref" la variabile E' la cella, come nella fonte.
+        ref bool ttPv = ref _ttPvHistory[ply + StackOffset];
+        ttPv = excludedMove != default
+            ? ttPv
             : isPvNode || (probe.Found && probe.Data.IsPv);
-        _ttPvHistory[ply + StackOffset] = ttPv;
 
         // search.cpp:820 — "ttData.move = rootNode ? rootMoves[pvIdx].pv[0] : ttHit ? ttData.move
         // : Move::none();": alla radice la mossa usata per l'ordinamento di MovePicker e per tutti
@@ -1587,6 +1594,15 @@ public sealed class Search
                 && pos.CapturedPiece() == Piece.None)
             {
                 int evalDiff = Math.Clamp(-(_staticEvalHistory[ply + StackOffset - 1] + staticEval), -189, 194) + 60;
+                // Traccia del sito 982 (vedi MovePick.TracciaMh per gli altri due): sta qui e non
+                // in MovePick perche' solo qui si conoscono ply/profondita'/contatore nodi, che
+                // sono cio' che permette di allineare la riga con quella dell'oracolo.
+                if (Traccia)
+                    Console.Error.WriteLine($"    MH sito=982 m={parentMoveForEvalDiff.FromSq.ToString().ToLower()}{parentMoveForEvalDiff.ToSq.ToString().ToLower()}"
+                        + $" lato={(int)Types.Opposite(pos.SideToMove)} bonus={evalDiff * 11}"
+                        + $" prima={_movePick.TracciaMainHistory(Types.Opposite(pos.SideToMove), parentMoveForEvalDiff)}"
+                        + $" ply={ply} d={depth} nodi={_nodes}"
+                        + $" se={staticEval} se1={_staticEvalHistory[ply + StackOffset - 1]}");
                 _movePick.ApplyEvalDiffMainBonus(Types.Opposite(pos.SideToMove), parentMoveForEvalDiff, evalDiff * 11);
 
                 Square prevSqForEvalDiff = parentMoveForEvalDiff.ToSq;
@@ -1837,15 +1853,6 @@ public sealed class Search
             bool captureStage = pos.CaptureStage(m);
             bool givesCheck = pos.GivesCheck(m);
 
-            // Stack::currentMove per la continuation history del ply successivo (MovePick, i suoi
-            // (ss-1)..(ss-6)) — va registrata PRIMA di fare la mossa, "moved_piece" guarda la casa
-            // di partenza sulla posizione attuale; inCheck/captureStage selezionano la tabella
-            // come in do_move, search.cpp:663-671.
-            _movedPieceHistory[ply + StackOffset] = pos.MovedPiece(m);
-            _currentMoveHistory[ply + StackOffset] = m;
-            _inCheckHistory[ply + StackOffset] = inCheck;
-            _captureStageHistory[ply + StackOffset] = captureStage;
-
             // Step 18 (prima parte, prima di fare la mossa), search.cpp:1152-1162: r è in
             // "milliply" (/1024 per ply interi). "delta" qui è l'ampiezza LOCALE alfa-beta di
             // QUESTO nodo (diversa da _rootDelta).
@@ -1993,6 +2000,25 @@ public sealed class Search
             // contatore). Il risultato era un conteggio gonfiato, che rendeva NON confrontabili
             // tutti i numeri di nodi misurati contro l'oracolo.
             long _nodiPrimaDellaMossa = _nodes;
+
+            // Stack::currentMove e i puntatori di continuation history per il ply successivo. Nella
+            // fonte li scrive "Search::Worker::do_move" (search.cpp:663-671), cioe' allo **Step
+            // 17**, DOPO le Singular Extensions. Qui stavano invece in cima al ciclo mosse, prima
+            // dello Step 16 — e la ricerca singolare gira sullo STESSO ply (search.cpp:1254,
+            // "search<NonPV>(pos, ss, ...)"): il suo ciclo mosse riscriveva questi slot con le
+            // proprie mosse candidate, e nessuno li ripristinava. Il figlio della mossa vera
+            // leggeva quindi come "(ss-1)->currentMove" l'ULTIMA candidata della ricerca singolare
+            // invece della mossa appena giocata, sbagliando main history (search.cpp:982 e 1597),
+            // continuation history e continuation correction history.
+            // Trovato affiancando le tracce su
+            // "1r6/1P4bk/3qr1p1/N6p/3pp2P/6R1/3Q1PP1/1R4K1 w - - 1 42" a profondita' 4: allo stesso
+            // identico nodo (nodi=499, ply=2, d=2) la fonte leggeva d6a6 e noi d6c7.
+            // Nessuna lettura di questi slot avviene fra la cima del ciclo e qui (verificato).
+            _movedPieceHistory[ply + StackOffset] = pos.MovedPiece(m); // "dirtyPiece.pc", = piece_on(from)
+            _currentMoveHistory[ply + StackOffset] = m;
+            _inCheckHistory[ply + StackOffset] = inCheck;
+            _captureStageHistory[ply + StackOffset] = captureStage;
+
             _nodes++;
             pos.DoMove(m, st, givesCheck, frame.DirtyThreats, frame.DirtyPiece, frame.DirtyPawnPairs);
 
@@ -2018,6 +2044,16 @@ public sealed class Search
                     + $" ttPv={(ttPv ? 1 : 0)} cutNode={(cutNode ? 1 : 0)} ttCap={(ttCapture ? 1 : 0)}"
                     + $" cutoffCnt1={_cutoffCntHistory[ply + StackOffset + 1]} allNode={(allNode ? 1 : 0)}"
                     + $" corr={correctionValue} alpha={alpha} eval={eval} rPrima={r}");
+            }
+
+            // Le componenti vanno lette QUI, non nella traccia in fondo al ciclo: le history sono
+            // tabelle globali del thread e la ricorsione di questa stessa mossa le riscrive.
+            int tracciaMh = 0, tracciaC0 = 0, tracciaC1 = 0;
+            if (Traccia && !captureStage)
+            {
+                tracciaMh = _movePick.TracciaMainHistory(Types.Opposite(pos.SideToMove), m);
+                tracciaC0 = _movePick.TracciaContinuation(contRefs[0], _movedPieceHistory[ply + StackOffset], m.ToSq);
+                tracciaC1 = _movePick.TracciaContinuation(contRefs[1], _movedPieceHistory[ply + StackOffset], m.ToSq);
             }
 
             int statScore = _movePick.ComputeStatScore(pos, m, captureStage, contRefs,
@@ -2118,7 +2154,9 @@ public sealed class Search
                     + $"{(m.TypeOf == MoveType.Promotion ? char.ToLower(m.PromotionType.ToString()[0]).ToString() : "")}"
                     + $" score={score} alpha={alpha} beta={beta} costo={_nodes - _nodiPrimaDellaMossa}"
                     + $" nodi={_nodes} r={r} newDepth={newDepth} ttHit={(probe.Found ? 1 : 0)}"
-                    + $" ttMove={(ttMove == Move.None ? "none" : ttMove.FromSq.ToString().ToLower() + ttMove.ToSq.ToString().ToLower())}");
+                    + $" ttMove={(ttMove == Move.None ? "none" : ttMove.FromSq.ToString().ToLower() + ttMove.ToSq.ToString().ToLower())}"
+                    + $" sts={_statScoreHistory[ply + StackOffset]} corr={correctionValue} pv={(isPvNode ? 1 : 0)} cut={(cutNode ? 1 : 0)}"
+                    + $" mh={tracciaMh} c0={tracciaC0} c1={tracciaC1}");
             }
 
 
@@ -2323,8 +2361,7 @@ public sealed class Search
         // uguale a value.
         if (value <= alpha)
         {
-            ttPv = ttPv || _ttPvHistory[ply + StackOffset - 1];
-            _ttPvHistory[ply + StackOffset] = ttPv;
+            ttPv = ttPv || _ttPvHistory[ply + StackOffset - 1]; // "ttPv" E' _ttPvHistory[ply+off]
         }
 
         // search.cpp:1629-1638: aggiorna la correction history solo se la mossa migliore non è una

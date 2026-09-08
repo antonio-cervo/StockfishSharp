@@ -259,6 +259,7 @@ public sealed class MovePick
         ContinuationRef[] parentContRefs, bool parentInCheck, int scaledBonus, Color opponent)
     {
         UpdateContinuationHistories(parentContRefs, parentInCheck, prevPiece, prevSq, scaledBonus * 263 / 16384);
+        TracciaMh(1597, opponent, parentMove, scaledBonus * 215 / 32768);
         UpdateHistory(ref _mainHistory[(byte)opponent, parentMove.Raw], scaledBonus * 215 / 32768, MainHistoryLimit);
 
         if (Types.TypeOf(prevPiece) != PieceType.Pawn && parentMove.TypeOf != MoveType.Promotion)
@@ -276,8 +277,10 @@ public sealed class MovePick
     /// valutazione statica è cambiata da lì a qui (una mossa che ha portato a una posizione più
     /// brutta/migliore del previsto). Chiamata da Search.cs per ogni nodo non sotto scacco la cui
     /// mossa del genitore non era né sotto scacco né una cattura.</summary>
-    public void ApplyEvalDiffMainBonus(Color opponent, Move parentMove, int bonus) =>
+    public void ApplyEvalDiffMainBonus(Color opponent, Move parentMove, int bonus)
+    {
         UpdateHistory(ref _mainHistory[(byte)opponent, parentMove.Raw], bonus, MainHistoryLimit);
+    }
 
     /// <summary>Metà "pawn history" dello stesso ramo, search.cpp:983-985 — condizionata a parte
     /// perché nella fonte ha guardie aggiuntive (nessun hit di TT, pezzo del genitore non un
@@ -307,6 +310,25 @@ public sealed class MovePick
     /// Step 18 fa <c>r -= statScore * 439 / 4096</c>, la riduzione LMR diventava NEGATIVA
     /// (r medio -2684). Con r negativo "min(newDepth - r/1024, newDepth + 2)" ESTENDE invece di
     /// ridurre, e la ricerca non termina piu'.</remarks>
+    /// <summary>Solo per la traccia di audit (SFS_TRACE): espone i singoli addendi di
+    /// <see cref="ComputeStatScore"/>, che l'oracolo strumentato stampa allo stesso punto.</summary>
+    public int TracciaMainHistory(Color us, Move m) => _mainHistory[(byte)us, m.Raw];
+
+    /// <summary>Solo per l'audit (SFS_TRACE): stampa OGNI scrittura di main history, col SITO
+    /// della fonte che l'ha prodotta (982, 1597, 2049). L'oracolo strumentato stampa le stesse
+    /// righe negli stessi tre punti: la prima riga che non combacia nomina il sito colpevole. E'
+    /// cosi' che si e' trovato lo slot di currentMove sovrascritto dalla ricerca singolare
+    /// (2026-09-08). Filtrare per mossa/lato si fa a valle, con grep sulla traccia.</summary>
+    private void TracciaMh(int sito, Color us, Move m, int bonus)
+    {
+        if (Search.Traccia)
+            System.Console.Error.WriteLine($"    MH sito={sito} m={m.FromSq.ToString().ToLower()}{m.ToSq.ToString().ToLower()}"
+                + $" lato={(int)us} bonus={bonus} prima={_mainHistory[(byte)us, m.Raw]}");
+    }
+
+    /// <inheritdoc cref="TracciaMainHistory"/>
+    public int TracciaContinuation(ContinuationRef r, Piece pc, Square to) => ContinuationScore(r, pc, to);
+
     public int ComputeStatScore(Position pos, Move m, bool captureStage, ContinuationRef[] contRefs, Piece movedPiece, Color us)
     {
         if (captureStage)
@@ -370,6 +392,7 @@ public sealed class MovePick
     private void UpdateQuietHistory(Position pos, int ply, Move move, int bonus, ContinuationRef[] contRefs, bool currentInCheck)
     {
         Color us = pos.SideToMove;
+        TracciaMh(2049, us, move, bonus);
         UpdateHistory(ref _mainHistory[(byte)us, move.Raw], bonus, MainHistoryLimit);
 
         if (ply < LowPlyHistorySize)

@@ -1,10 +1,19 @@
 # Instrumentazione dell'ORACOLO per il confronto con questo porting.
 #
-# Aggiunge tre tracce a src/search.cpp, tutte attive solo con la variabile d'ambiente SF_TRACE=1:
+# Aggiunge a src/search.cpp le tracce sotto, tutte attive solo con la variabile SF_TRACE=1:
 #   STEP9   - ingressi della futility di nodo figlio (ply <= 1)
 #   R       - componenti della riduzione LMR alla radice, PRIMA del termine su statScore
-#   RADICE  - esito e COSTO IN NODI di ogni mossa di radice
-# Sono le stesse grandezze che il nostro motore puo' stampare: si confrontano voce per voce.
+#   PLY     - esito, COSTO IN NODI e stato interno di ogni mossa fino a ply 3. I campi che si sono
+#             rivelati decisivi: "r" (riduzione LMR), "sts" (ss->statScore) con le sue tre
+#             componenti mh/c0/c1 CATTURATE AL MOMENTO DEL CALCOLO (leggerle dopo il ritorno da'
+#             valori diversi: le history sono tabelle globali che la ricorsione riscrive), "corr"
+#             (correction_value), "pv" (PvNode) e "cut" (cutNode).
+#   MH      - OGNI scrittura di main history, col SITO della fonte che l'ha prodotta (982, 1597,
+#             2049). E' la traccia che ha nominato il colpevole il 2026-09-08: allo stesso nodo
+#             (nodi=499) la fonte leggeva come mossa del genitore d6a6 e noi d6c7, perche' il
+#             nostro slot currentMove era stato sovrascritto dalla ricerca singolare.
+# Sono le stesse grandezze che il nostro motore stampa con SFS_TRACE=1: si confrontano voce per
+# voce con tools/confronta_traccia.py.
 #
 # COME SI USA
 #   cd ProgettiVS && mkdir -p oracolo-build
@@ -23,14 +32,28 @@
 # stderr si riempie e il processo si BLOCCA senza mai emettere "bestmove".
 #
 --- stockfish-upstream-reference/src/search.cpp	2026-09-05 13:35:36.126498700 +0200
-+++ oracolo-build/src/search.cpp	2026-09-08 18:06:50.062808100 +0200
-@@ -996,6 +996,16 @@
-     if (!ss->ttPv && depth < (seekMate ? 6 : 19) && eval >= beta && (!ttData.move || ttCapture)
-         && !is_loss(beta) && !is_win(eval))
++++ oracolo-build/src/search.cpp	2026-09-08 20:37:19.510370300 +0200
+@@ -975,14 +975,31 @@
+     if (ss->inCheck)
+         goto moves_loop;
+ 
++    if (ss->ply <= 3 && std::getenv("SF_TRACE"))
++        std::cerr << "    EVALDIFF ply=" << ss->ply << " d=" << depth
++                  << " okMossa=" << ((ss - 1)->currentMove).is_ok()
++                  << " parentInCheck=" << ((ss - 1)->inCheck ? 1 : 0)
++                  << " priorCapture=" << (priorCapture ? 1 : 0)
++                  << " ttHit=" << (ss->ttHit ? 1 : 0)
++                  << " prevSq=" << (prevSq == SQ_NONE ? std::string("none") : UCIEngine::square(prevSq))
++                  << " pezzo=" << int(pos.piece_on(prevSq)) << std::endl;
++
+     // Use static evaluation difference to improve quiet move ordering
+     if (((ss - 1)->currentMove).is_ok() && !(ss - 1)->inCheck && !priorCapture)
      {
---- stockfish-upstream-reference/src/search.cpp	2026-09-05 13:35:36.126498700 +0200
-+++ oracolo-build/src/search.cpp	2026-09-08 19:13:39.255254100 +0200
-@@ -982,7 +982,11 @@
+         int evalDiff = std::clamp(-int((ss - 1)->staticEval + ss->staticEval), -189, 194) + 60;
++        if (std::getenv("SF_TRACE"))
++            std::cerr << "    MH sito=982 m=" << UCIEngine::move((ss - 1)->currentMove, false) << " lato=" << int(~us) << " bonus=" << (evalDiff * 11) << " prima=" << int(mainHistory[~us][((ss - 1)->currentMove).raw()])
++                      << " ply=" << ss->ply << " d=" << depth << " nodi=" << nodes
++                      << " se=" << ss->staticEval << " se1=" << (ss - 1)->staticEval << std::endl;
          mainHistory[~us][((ss - 1)->currentMove).raw()] << evalDiff * 11;
          if (!ttHit && type_of(pos.piece_on(prevSq)) != PAWN
              && ((ss - 1)->currentMove).type_of() != PROMOTION)
@@ -42,7 +65,7 @@
      }
  
  
-@@ -996,6 +1000,16 @@
+@@ -996,6 +1013,16 @@
      if (!ss->ttPv && depth < (seekMate ? 6 : 19) && eval >= beta && (!ttData.move || ttCapture)
          && !is_loss(beta) && !is_win(eval))
      {
@@ -59,7 +82,7 @@
          Value futilityMult = std::min(45 + depth * 4, 85);
          futilityMult -= 20 * !ss->ttHit;
  
-@@ -1303,6 +1317,7 @@
+@@ -1303,6 +1330,7 @@
          }
  
          u64 nodeCount = rootNode ? u64(nodes) : 0;
@@ -67,7 +90,7 @@
  
          // Step 17. Make the move
          do_move(pos, move, st, givesCheck, ss);
-@@ -1339,6 +1354,14 @@
+@@ -1339,6 +1367,18 @@
          else if (move == ttData.move)
              r -= 2179;
  
@@ -79,22 +102,32 @@
 +                      << " corr=" << correctionValue << " alpha=" << alpha << " eval=" << eval
 +                      << " rPrima=" << r << std::endl;
 +
++        int traccia_mh = capture ? 0 : mainHistory[us][move.raw()];
++        int traccia_c0 = capture ? 0 : (*contHist[0])[movedPiece][move.to_sq()];
++        int traccia_c1 = capture ? 0 : (*contHist[1])[movedPiece][move.to_sq()];
++
          if (capture)
              ss->statScore = 873 * int(PieceValue[pos.captured_piece()]) / 128
                            + captureHistory[movedPiece][move.to_sq()][type_of(pos.captured_piece())];
-@@ -1434,6 +1457,11 @@
+@@ -1434,6 +1474,12 @@
          if (threads.stop.load(std::memory_order_relaxed))
              return VALUE_ZERO;
  
 +        if (ss->ply <= 3 && std::getenv("SF_TRACE"))
 +            std::cerr << "  PLY" << ss->ply << " d=" << depth << " mc=" << moveCount << " " << UCIEngine::move(move, false)
 +                      << " score=" << value << " alpha=" << alpha << " beta=" << beta
-+                      << " costo=" << (nodes - nodeCountTraccia) << " nodi=" << nodes << " r=" << r << " newDepth=" << newDepth << " ttHit=" << ss->ttHit << " ttMove=" << (ttData.move ? UCIEngine::move(ttData.move, false) : std::string("none")) << std::endl;
++                      << " costo=" << (nodes - nodeCountTraccia) << " nodi=" << nodes << " r=" << r << " newDepth=" << newDepth << " ttHit=" << ss->ttHit << " ttMove=" << (ttData.move ? UCIEngine::move(ttData.move, false) : std::string("none")) << " sts=" << ss->statScore << " corr=" << correctionValue << " pv=" << PvNode << " cut=" << cutNode
++                      << " mh=" << traccia_mh << " c0=" << traccia_c0 << " c1=" << traccia_c1 << std::endl;
 +
          if (rootNode)
          {
              RootMove& rm = *std::find(rootMoves.begin(), rootMoves.end(), move);
-@@ -1597,7 +1625,11 @@
+@@ -1594,10 +1640,16 @@
+         update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq,
+                                       scaledBonus * 263 / 16384);
+ 
++        if (std::getenv("SF_TRACE") && ~us == BLACK && ((ss - 1)->currentMove).raw() == 2802)
++            std::cerr << "    MH sito=1597 bonus=" << (scaledBonus * 215 / 32768) << " prima=" << int(mainHistory[~us][((ss - 1)->currentMove).raw()]) << std::endl;
          mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 215 / 32768;
  
          if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
@@ -106,7 +139,55 @@
      }
  
      // Bonus for prior capture countermove that caused the fail low
-@@ -2053,6 +2085,8 @@
+@@ -1757,6 +1809,12 @@
+             alpha = bestValue;
+ 
+         futilityBase = ss->staticEval + 306;
++
++        if (ss->ply <= 5 && std::getenv("SF_TRACE"))
++            std::cerr << "  QIN" << ss->ply << " alpha=" << alpha << " beta=" << beta
++                      << " best=" << bestValue << " statico=" << ss->staticEval
++                      << " fbase=" << futilityBase << " ttHit=" << (ss->ttHit ? 1 : 0)
++                      << " ttVal=" << ttData.value << std::endl;
+     }
+ 
+     const PieceToHistory* contHist[] = {(ss - 1)->continuationHistory};
+@@ -1783,6 +1841,12 @@
+ 
+         moveCount++;
+ 
++        if (ss->ply <= 5 && std::getenv("SF_TRACE"))
++            std::cerr << "  QGEN" << ss->ply << " mc=" << moveCount << " " << UCIEngine::move(move, false)
++                      << " cap=" << (capture ? 1 : 0) << " chk=" << (givesCheck ? 1 : 0)
++                      << " prevSq=" << (prevSq == SQ_NONE ? std::string("none") : UCIEngine::square(prevSq))
++                      << " alpha=" << alpha << " fbase=" << futilityBase << std::endl;
++
+         // Step 6. Pruning
+         if (!is_loss(bestValue))
+         {
+@@ -1824,6 +1888,12 @@
+         do_move(pos, move, st, givesCheck, ss);
+ 
+         value = -qsearch<nodeType>(pos, ss + 1, -beta, -alpha);
++
++        if (ss->ply <= 5 && std::getenv("SF_TRACE"))
++            std::cerr << "  QS" << ss->ply << " mc=" << moveCount << " " << UCIEngine::move(move, false)
++                      << " score=" << value << " alpha=" << alpha << " beta=" << beta
++                      << " nodi=" << nodes << std::endl;
++
+         undo_move(pos, move);
+ 
+         assert(value > -VALUE_INFINITE && value < VALUE_INFINITE);
+@@ -2046,6 +2116,8 @@
+   const Position& pos, Stack* ss, Search::Worker& workerThread, Move move, int bonus) {
+ 
+     Color us = pos.side_to_move();
++    if (std::getenv("SF_TRACE") && us == BLACK && move.raw() == 2802)
++        std::cerr << "    MH sito=2049 bonus=" << bonus << " prima=" << int(workerThread.mainHistory[us][move.raw()]) << std::endl;
+     workerThread.mainHistory[us][move.raw()] << bonus;  // Untuned to prevent duplicate effort
+ 
+     if (ss->ply < LOW_PLY_HISTORY_SIZE)
+@@ -2053,6 +2125,8 @@
  
      update_continuation_histories(ss, pos.moved_piece(move), move.to_sq(), bonus * 750 / 1024);
  
