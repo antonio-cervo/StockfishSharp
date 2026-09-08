@@ -223,7 +223,7 @@ optionsMap.Add("EvalFile", new Option(DefaultNetworkPath, o =>
 // bot sulla prima mossa. Gira su una SearchThreadPool/Position dedicate, mai condivise con `search`/
 // `position` della partita reale, così non può interferire né lasciare stato residuo (history,
 // TT) quando la partita vera comincia.
-_ = Task.Run(() =>
+Task riscaldamento = Task.Run(() =>
 {
     try
     {
@@ -538,7 +538,10 @@ void HandleGo(string[] toks)
     var perftDepth = GetLong("perft");
     if (perftDepth.HasValue)
     {
+        riscaldamento.Wait(); // vedi la nota in HandleBench: falserebbe la misura delle allocazioni
+        long allocPrimaPerft = GC.GetTotalAllocatedBytes(true);
         long nodes = Perft.Run(position, (int)perftDepth.Value, root: true, MoveToUci);
+        Console.Error.WriteLine($"Byte allocati/nodo : {(GC.GetTotalAllocatedBytes(true) - allocPrimaPerft) / (double)Math.Max(1, nodes):F1}");
         Console.WriteLine($"\nNodes searched: {nodes}\n");
         return;
     }
@@ -765,6 +768,12 @@ void HandleBench(string[] toks)
         Console.Error.WriteLine($"info string bench: 'limitType' non supportato ({limitType}), uso 'depth'");
         limitType = "depth";
     }
+
+    // Il riscaldamento JIT dell'avvio gira su 8 thread per ~800 ms: se si sovrappone al bench ne
+    // falsa SIA i tempi (ruba CPU) SIA i byte allocati per nodo (le sue allocazioni finiscono nel
+    // conteggio di processo). Misurato: contava da solo ~130 byte/nodo su un bench da 1,7 M nodi,
+    // cioe' praticamente tutto il valore che stavamo inseguendo. Si aspetta che finisca.
+    riscaldamento.Wait();
 
     if (int.TryParse(ttSize, out int mb)) search.Resize(mb);
     search.NewGame();

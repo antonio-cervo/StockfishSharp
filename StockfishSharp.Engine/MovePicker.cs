@@ -142,17 +142,7 @@ public sealed class MovePicker
 
                 case Stage.GoodCapture:
                 {
-                    Move? gc = Select(() =>
-                    {
-                        if (_pos.SeeGe(_moves[_cur], -_values[_cur] / 18))
-                            return true;
-
-                        int idx = _endBadCaptures;
-                        (_moves[idx], _moves[_cur]) = (_moves[_cur], _moves[idx]);
-                        (_values[idx], _values[_cur]) = (_values[_cur], _values[idx]);
-                        _endBadCaptures++;
-                        return false;
-                    });
+                    Move? gc = Select(default(FiltroBuonaCattura));
                     if (gc.HasValue) return gc.Value;
 
                     _stage++;
@@ -173,7 +163,7 @@ public sealed class MovePicker
                 {
                     if (!_skipQuiets)
                     {
-                        Move? gq = Select(() => _values[_cur] > GoodQuietThreshold);
+                        Move? gq = Select(default(FiltroQuietaBuona));
                         if (gq.HasValue) return gq.Value;
                     }
 
@@ -185,7 +175,7 @@ public sealed class MovePicker
 
                 case Stage.BadCapture:
                 {
-                    Move? bc = Select(() => true);
+                    Move? bc = Select(default(FiltroTutte));
                     if (bc.HasValue) return bc.Value;
 
                     _cur = _endCaptures;
@@ -196,7 +186,7 @@ public sealed class MovePicker
 
                 case Stage.BadQuiet:
                     if (!_skipQuiets)
-                        return Select(() => _values[_cur] <= GoodQuietThreshold) ?? Move.None;
+                        return Select(default(FiltroQuietaScarsa)) ?? Move.None;
                     return Move.None;
 
                 case Stage.EvasionInit:
@@ -208,10 +198,10 @@ public sealed class MovePicker
 
                 case Stage.Evasion:
                 case Stage.QCapture:
-                    return Select(() => true) ?? Move.None;
+                    return Select(default(FiltroTutte)) ?? Move.None;
 
                 case Stage.Probcut:
-                    return Select(() => _pos.SeeGe(_moves[_cur], _threshold)) ?? Move.None;
+                    return Select(default(FiltroProbCut)) ?? Move.None;
 
                 default:
                     return Move.None; // assert(false) nella fonte — irraggiungibile
@@ -221,18 +211,70 @@ public sealed class MovePicker
 
     /// <summary>MovePicker::select, movepick.cpp:266-273 — non restituisce mai la mossa di TT
     /// (già emessa). <paramref name="filter"/> legge/modifica lo stato tramite <see cref="_cur"/>,
-    /// come il lambda catturante per riferimento della fonte.</summary>
-    private Move? Select(Func<bool> filter)
+    /// come il lambda catturante per riferimento della fonte.
+    ///
+    /// Il filtro è un TIPO GENERICO struct, non un <c>Func&lt;bool&gt;</c>: nella fonte
+    /// <c>select&lt;T&gt;(Pred filter)</c> è un template con un lambda, quindi a costo zero, mentre
+    /// un delegate C# si alloca a OGNI chiamata. Misurato: erano 121,7 dei 127,3 byte allocati per
+    /// nodo dell'intero motore, cioè quasi tutte le allocazioni della ricerca. Con un vincolo
+    /// <c>where TF : struct</c> il JIT specializza il metodo per ciascun filtro e ne inlinea la
+    /// chiamata: stesso codice generato del template, nessuna allocazione.</summary>
+    private Move? Select<TF>(TF filter) where TF : struct, IFiltroMossa
     {
         while (_cur < _endCur)
         {
             Move candidate = _moves[_cur];
-            bool ok = candidate != _ttMove && filter();
+            bool ok = candidate != _ttMove && filter.Ok(this);
             _cur++;
             if (ok) return candidate;
         }
 
         return null;
+    }
+
+    /// <summary>I lambda di movepick.cpp resi tipi struct — vedi la nota su <see cref="Select"/>.
+    /// Sono tipi annidati, quindi leggono e scrivono i campi privati del MovePicker esattamente
+    /// come i lambda che catturavano <c>this</c>.</summary>
+    private interface IFiltroMossa
+    {
+        bool Ok(MovePicker mp);
+    }
+
+    /// <summary>movepick.cpp:288-297 — buona cattura secondo la SEE; se la SEE la boccia, la
+    /// sposta nella zona delle cattive catture e la rifiuta.</summary>
+    private readonly struct FiltroBuonaCattura : IFiltroMossa
+    {
+        public bool Ok(MovePicker mp)
+        {
+            if (mp._pos.SeeGe(mp._moves[mp._cur], -mp._values[mp._cur] / 18))
+                return true;
+
+            int idx = mp._endBadCaptures;
+            (mp._moves[idx], mp._moves[mp._cur]) = (mp._moves[mp._cur], mp._moves[idx]);
+            (mp._values[idx], mp._values[mp._cur]) = (mp._values[mp._cur], mp._values[idx]);
+            mp._endBadCaptures++;
+            return false;
+        }
+    }
+
+    private readonly struct FiltroQuietaBuona : IFiltroMossa
+    {
+        public bool Ok(MovePicker mp) => mp._values[mp._cur] > GoodQuietThreshold;
+    }
+
+    private readonly struct FiltroQuietaScarsa : IFiltroMossa
+    {
+        public bool Ok(MovePicker mp) => mp._values[mp._cur] <= GoodQuietThreshold;
+    }
+
+    private readonly struct FiltroTutte : IFiltroMossa
+    {
+        public bool Ok(MovePicker mp) => true;
+    }
+
+    private readonly struct FiltroProbCut : IFiltroMossa
+    {
+        public bool Ok(MovePicker mp) => mp._pos.SeeGe(mp._moves[mp._cur], mp._threshold);
     }
 
     /// <summary>partial_insertion_sort, movepick.cpp:111-143 (solo ramo scalare) — ordina in modo

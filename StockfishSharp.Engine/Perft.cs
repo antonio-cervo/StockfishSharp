@@ -22,7 +22,28 @@ public static class Perft
     {
         if (depth == 0) return 1;
 
-        var moves = new List<Move>();
+        // Buffer per livello, allocati UNA volta qui e riusati da tutta la ricorsione. Non è una
+        // ottimizzazione fine a se stessa: il perft è anche il metro con cui si misurano i byte
+        // allocati per nodo del motore, e con un "new List<Move>() + new StateInfo()" per nodo
+        // misurava soprattutto se stesso (81,1 byte/nodo, tutti suoi).
+        var listPool = new List<Move>[depth + 1];
+        var statePool = new StateInfo[depth + 1];
+        for (int i = 0; i <= depth; i++)
+        {
+            listPool[i] = new List<Move>(Ply.MaxMoves);
+            statePool[i] = new StateInfo();
+        }
+
+        return Run(pos, depth, root, formatMove, listPool, statePool);
+    }
+
+    private static long Run(Position pos, int depth, bool root, Func<Move, string>? formatMove,
+        List<Move>[] listPool, StateInfo[] statePool)
+    {
+        if (depth == 0) return 1;
+
+        var moves = listPool[depth];
+        moves.Clear();
         MoveGen.Generate(GenType.Legal, pos, moves);
 
         bool leaf = depth == 2;
@@ -38,17 +59,18 @@ public static class Perft
             }
             else
             {
-                var st = new StateInfo();
-                pos.DoMove(m, st);
+                pos.DoMove(m, statePool[depth]);
                 if (leaf)
                 {
-                    var leafMoves = new List<Move>();
+                    // depth==2 qui, quindi listPool[1] non è mai in uso: la ricorsione si ferma prima.
+                    var leafMoves = listPool[depth - 1];
+                    leafMoves.Clear();
                     MoveGen.Generate(GenType.Legal, pos, leafMoves);
                     cnt = leafMoves.Count;
                 }
                 else
                 {
-                    cnt = Run(pos, depth - 1, root: false, null);
+                    cnt = Run(pos, depth - 1, root: false, null, listPool, statePool);
                 }
                 nodes += cnt;
                 pos.UndoMove(m);
