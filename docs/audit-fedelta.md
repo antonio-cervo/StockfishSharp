@@ -335,7 +335,42 @@ chiamata con `rule50 > 99` e re sotto scacco. Su questo percorso e' caldissimo (
 con r50 > 99 in una singola esecuzione). Non e' la causa del blocco, ma va convertito a buffer.
 **FATTO**: `Position._drawScratch` (e `_pseudoLegalScratch` per il gemello in `PseudoLegal`).
 
-### 2. Divergenza di punteggio a profondita' medie
+### 2. Divergenza di punteggio a profondita' medie — MOLTO RIDOTTA il 2026-09-08
+
+**Metodo che ha funzionato, da riusare**: restringere il riproduttore per "divide" successivi
+(`scratchpad/divide.py`): per ogni mossa di radice si cerca il FIGLIO a profondita' d-1 con entrambi
+i motori e si confronta punteggio E numero di nodi. Su Kiwipete a profondita' 2, **47 figli su 48
+combaciavano esattamente** — punteggio e nodi — e uno solo no. Ripetendo si scende in fretta a un
+caso minuscolo. Confronto per profondita' con `scratchpad/onset.py` (una ricerca SEPARATA per
+profondita': il nostro motore stampa una sola riga `info` a fine ricerca, non una per iterazione
+come la fonte).
+
+Riproduttore minimo attuale: `8/2p5/3p4/KP5r/5R1k/8/4P1P1/8 b - - 0 11`, nodi bit-identici
+all'oracolo fino a profondita' 4 (2 / 12 / 40 / 191), divergenza da 5.
+
+**Tre cause trovate e corrette** (commit 2ea0fe6 e 8d05f10):
+1. Media mobile delle RootMove: arrotondava verso zero invece che verso meno infinito
+   (vedi `AritmeticaFedele.cs`). Alimenta la finestra di aspirazione e l'optimism.
+2. `bonus` di `update_all_stats` (search.cpp:1979): stessa classe di errore. Su Kiwipete lo scarto
+   di nodi contro l'oracolo e' passato da ~65 a **3-4** su tutte le profondita' 3-6.
+3. La quiescenza non aggiornava mai la PV (search.cpp:1678-1683, 1840-1842), quindi la PV finiva
+   troncata dove comincia la quiescenza, e con essa `lastIterationIdxPV` -> `followPv` -> la
+   potatura dell'iterazione successiva.
+
+**VERIFICATO NON COLPEVOLE, non riaprire**: la valutazione. Sul caso divergente il valore grezzo
+della rete e' **-68 in entrambi i motori**. La differenza apparente ("noi -79, oracolo -68") era un
+confronto fra grandezze NON OMOGENEE: il nostro `eval` stampava il valore FINALE (con complessita',
+materiale, optimism e smorzamento per la regola delle 50 mosse), quello dell'oracolo il valore
+INTERMEDIO. Aggiunta al nostro `eval` la stessa scomposizione psqt/positional di `Eval::trace` per
+non ricascarci. Verificata a mano anche l'aritmetica finale: `material` = 534*16 + 15779 = 24323 da'
+esattamente -79 in entrambi, e `to_cp` e' lineare a posizione fissa (`to_cp(68)=24` implica a=283,
+da cui `to_cp(79)=27`, cioe' il "+0.27" stampato dall'oracolo).
+
+**Cosa resta**: sul riproduttore minimo il punteggio a d5 ora combacia ma i nodi no (370 contro
+425), e da d6 divergono di nuovo entrambi. Su Kiwipete lo scarto e' di 3-4 nodi fino a d6 e poi
+esplode a d7. Ripartire da li' con lo stesso metodo del divide.
+
+### 2-quater. (storico) Divergenza di punteggio a profondita' medie
 
 I punteggi combaciano ESATTAMENTE a profondita' 1 e divergono a profondita' variabile secondo la
 posizione (d2, d3, d5, d8, d9, o mai). Dopo le correzioni del 2026-09-07 la soglia si e' spostata
