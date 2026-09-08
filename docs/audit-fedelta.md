@@ -1140,6 +1140,21 @@ indicizzato da quattro chiavi diverse) **non e' una differenza**, perche' ogni t
 diverso del bundle — le nostre quattro tabelle separate sono funzionalmente equivalenti. La
 differenza sta solo nella dimensione e nella condivisione.
 
+### Vagliato il 2026-09-09: timeman.cpp — FEDELE, non ricontrollare
+
+Confronto riga per riga di `TimeManagement.cs` contro `timeman.cpp`. **Tutto fedele**, costanti
+comprese: `originalTimeAdjust` (0,3272 / 0,4141), `optConstant` (0,0029869 / 0,00033554 / 0,004905),
+`maxConstant` (3,3744 / 3,0608 / 3,1441), `optScale` (0,012112 / 3,22713 / 0,46866 / 0,19404),
+`maxScale` (6,873 / 12,352), il ramo `movestogo` (0,88 / 116,4 / 1,3 / 0,11), il calcolo di `mtg`
+col dimezzamento sotto il secondo, `timeLeft`, la formula finale di `optimumTime`/`maximumTime`
+(0,8097) e il bonus di un quarto quando Ponder e' acceso.
+
+NON portato, dichiarato: la modalita' `nodestime` (nodi al posto dei millisecondi) — opzione UCI
+inerte, non usata da nessuna GUI o bot reale.
+
+Vale la pena averlo verificato: e' l'area che sul bot ha gia' causato sconfitte reali, e restava
+l'ultimo file grosso di search/ mai confrontato riga per riga.
+
 ### Vagliato il 2026-09-08 (terzo giro): tt.cpp, movegen.cpp
 
 **`tt.cpp` — DUE discrepanze trovate, entrambe corrette** (commit 444ceb4):
