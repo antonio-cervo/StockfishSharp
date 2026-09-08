@@ -1,0 +1,67 @@
+# Posizioni per l'audit di fedelta', SCELTE per battere strade che le 51 del bench non battono.
+#
+# PERCHE' ESISTE: le Defaults del bench sono la lista di Stockfish stesso, cioe' proprio le
+# posizioni su cui la fonte e' piu' esercitata e messa a punto. Al 2026-09-09 il porting ha parita'
+# piena di conteggio nodi su quelle fino a profondita' 22 — il che dice molto, ma dice poco su
+# cio' che quelle 51 non toccano. Qui si cercano apposta i casi limite che in questa caccia hanno
+# gia' fruttato una causa a testa: rule50 alto, promozioni, arrocchi, finali di soli pedoni,
+# zugzwang, materiale insufficiente, ripetizioni imminenti.
+#
+# Le righe che iniziano con # sono commenti. Una FEN per riga.
+#
+# Uso:  python tools/nodi_bassa_profondita.py --fen tools/fen-varie.txt 8 12
+
+# --- rule50 alto: territorio di adjust_key50, value_from_tt(r50c) e della patta per 50 mosse.
+#     Una causa gia' trovata qui (patta di quiescenza a +-1 invece di 0).
+8/8/8/4k3/8/4K3/4P3/8 w - - 96 120
+r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 94 60
+8/5k2/8/8/3Q4/8/5K2/8 w - - 98 150
+4k3/8/4K3/8/8/8/8/4R3 w - - 90 100
+
+# --- promozioni, incluse le sottopromozioni e le promozioni con cattura.
+8/2P5/8/8/8/8/2p5/K6k w - - 0 1
+8/1P6/8/8/8/8/6p1/K6k b - - 0 1
+n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1
+n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1
+8/PPPk4/8/8/8/8/4Kppp/8 w - - 0 1
+
+# --- arrocco da entrambe le parti, e posizioni dove l'arrocco e' appena diventato illegale.
+r3k2r/pppq1ppp/2n1bn2/3pp3/3PP3/2N1BN2/PPPQ1PPP/R3K2R w KQkq - 6 8
+r3k2r/pppq1ppp/2n1bn2/3pp3/3PP3/2N1BN2/PPPQ1PPP/R3K2R b KQkq - 6 8
+r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1
+r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1
+
+# --- finali di soli pedoni: alberi profondi, zugzwang, la regola del quadrato.
+8/8/8/8/4k3/8/4P3/4K3 w - - 0 1
+8/p7/8/1P6/8/8/7p/K6k w - - 0 1
+8/8/p7/1p6/1P6/P7/8/k6K w - - 0 1
+4k3/8/8/8/8/8/4P3/4K3 w - - 0 1
+8/1p6/1P6/8/8/1p6/1P6/k6K w - - 0 1
+
+# --- zugzwang veri: il null move qui deve fallire, ed e' il punto in cui la verifica
+#     (search.cpp:1037, che gira sullo STESSO ss) entra in gioco.
+8/8/p1p5/1p5p/1P5p/8/PPP2K1p/4R1rk w - - 0 1
+1q1k4/2Rr4/8/2Q3K1/8/8/8/8 w - - 0 1
+7k/5K2/5P1p/3p4/6P1/3p4/8/8 w - - 0 1
+
+# --- materiale insufficiente e finali con tablebase a 5 pezzi (percorso Syzygy, se configurato).
+8/8/8/8/8/2K5/2B5/2k5 w - - 0 1
+8/8/8/3k4/8/8/3KB3/3B4 w - - 0 1
+8/8/8/8/8/4k3/4p3/4K3 b - - 0 1
+
+# --- en passant, incluso quello che scoprirebbe scacco (il ramo raro del filtro di legalita').
+8/8/8/2k5/2pP4/8/B7/4K3 b - d3 0 3
+8/8/8/8/k1pP3R/8/8/3K4 b - d3 0 1
+rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3
+
+# --- ripetizione imminente: attiva "upcoming_repetition" (search.cpp:736) e le tabelle cuckoo.
+8/8/8/8/6k1/8/6K1/7R w - - 20 60
+4k3/8/8/8/8/8/8/R3K2R w KQ - 10 30
+
+# --- mediogiochi molto tattici e molto chiusi, per far lavorare potatura e quiescenza in modi
+#     opposti fra loro.
+r1bqk2r/pp1n1ppp/2pbpn2/3p4/2PP4/2NBPN2/PPQ2PPP/R1B1K2R w KQkq - 4 8
+2rq1rk1/pb1nbppp/1p2pn2/2pp4/3P4/1PN1PN2/PBP1BPPP/R2Q1RK1 w - - 6 12
+r1b1k2r/ppppqppp/2n2n2/2b5/2B1P3/2N2N2/PPPP1PPP/R1BQ1RK1 w kq - 8 8
+1k1r4/pp1b1R2/3q2pp/4p3/2B5/4Q3/PPP2B2/2K5 b - - 0 1
+r1b2rk1/2q1b1pp/p2ppn2/1p6/3QP3/1BN1B3/PPP3PP/R4RK1 w - - 4 15

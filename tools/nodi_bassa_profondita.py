@@ -8,7 +8,12 @@ a quale profondita' comincia davvero.
 Processo nuovo per posizione e libro spento: vedi le trappole documentate in
 tools/accordo_profondita.py.
 
+Le posizioni sono per default le 51 Defaults del bench (la lista di Stockfish stesso). Con
+"--fen FILE" si usa invece un elenco di FEN da file, una per riga, righe "#" ignorate: serve a
+battere strade che le Defaults non battono — vedi tools/fen-varie.txt.
+
 Uso:  python tools/nodi_bassa_profondita.py 1 2 3
+      python tools/nodi_bassa_profondita.py --fen tools/fen-varie.txt 8 12
 """
 import subprocess, re, io, sys
 
@@ -25,6 +30,12 @@ for riga in re.findall(r'"([^"]*)"', src[i:i + 20000]):
         continue
     if riga.count('/') == 7 and re.search(r' [wb] ', riga) and not chess960:
         fens.append(riga)
+
+if "--fen" in sys.argv:
+    percorso = sys.argv[sys.argv.index("--fen") + 1]
+    fens = [r.strip() for r in io.open(percorso, encoding='utf-8')
+            if r.strip() and not r.lstrip().startswith("#")]
+    print("%d posizioni da %s\n" % (len(fens), percorso))
 
 DEPTHS = [int(a) for a in sys.argv[1:] if a.lstrip('-').isdigit()] or [1, 2, 3]
 
