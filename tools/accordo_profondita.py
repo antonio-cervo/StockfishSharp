@@ -38,7 +38,19 @@ for riga in re.findall(r'"([^"]*)"', src[i:i + 20000]):
     if riga.count('/') == 7 and re.search(r' [wb] ', riga) and not chess960:
         fens.append(riga)
 
-DEPTHS = [int(a) for a in sys.argv[1:] if a.lstrip('-').isdigit()] or [1, 3, 6, 9, 12]
+# Con "--fen FILE" si usa un elenco di FEN da file invece delle Defaults del bench (righe "#"
+# ignorate) — stesso comando di nodi_bassa_profondita.py. Con "--960" si accende UCI_Chess960 su
+# ENTRAMBI i motori, il che rende confrontabili anche quelle posizioni (senza l'opzione i diritti
+# di arrocco della FEN si interpretano diversamente: vedi la trappola 2 in testa al file).
+if "--fen" in sys.argv:
+    percorso = sys.argv[sys.argv.index("--fen") + 1]
+    fens = [r.strip() for r in io.open(percorso, encoding='utf-8')
+            if r.strip() and not r.lstrip().startswith("#")]
+CHESS960 = "--960" in sys.argv
+
+# NB: si escludono le opzioni "--..." PRIMA di isdigit(), altrimenti "--960" passerebbe il filtro
+# (lstrip('-') lo rende "960") e int() fallirebbe.
+DEPTHS = [int(a) for a in sys.argv[1:] if not a.startswith("-") and a.isdigit()] or [1, 3, 6, 9, 12]
 
 
 def cerca(cmd, fen, d):
@@ -48,6 +60,8 @@ def cerca(cmd, fen, d):
     p.stdin.write("setoption name Threads value 1\n")
     p.stdin.write("setoption name Hash value 64\n")
     p.stdin.write("setoption name OwnBook value false\n")  # l'oracolo la ignora, non ce l'ha
+    if CHESS960:
+        p.stdin.write("setoption name UCI_Chess960 value true\n")
     p.stdin.write("ucinewgame\n")
     p.stdin.write("position fen " + fen + "\n")
     p.stdin.write("go depth %d\n" % d)
