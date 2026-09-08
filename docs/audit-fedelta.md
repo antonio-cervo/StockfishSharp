@@ -61,6 +61,61 @@ Tre livelli, in ordine di costo crescente. Nessuno da solo basta — l'hanno dim
 Regola operativa: **ogni riga vagliata va annotata qui sotto**, con l'esito, cosi' le sessioni
 successive non la riesaminino da capo. Un audit che si ripete da zero ogni volta non converge.
 
+## LO STRUMENTO DECISIVO: compilare l'oracolo (2026-09-08 sera)
+
+Sulla macchina c'e' **g++ 16.1.0 (MinGW-W64)**. L'oracolo si compila dal sorgente di riferimento e
+si puo' STRUMENTARE. Questo chiude la stagione delle ipotesi: qualunque grandezza interna si puo'
+stampare da entrambe le parti e confrontare.
+
+    cd ProgettiVS && mkdir oracolo-build
+    cp -r stockfish-upstream-reference/src stockfish-upstream-reference/scripts oracolo-build/
+    cp StockfishSharp/nnue-networks/nn-1a298aa575a0.nnue oracolo-build/src/
+    cd oracolo-build/src
+    PATH=".../mingw64/bin:$PATH" mingw32-make -j8 build ARCH=x86-64-avx2 COMP=mingw
+
+**Serve la cartella `scripts/`** accanto a `src/` (il Makefile chiama `../scripts/net.sh`).
+
+**VALIDAZIONE OBBLIGATORIA, gia' fatta**: il binario compilato e' risultato bit-identico a quello
+ufficiale (stessa mossa, punteggio e numero di nodi su 6 confronti a profondita' 2 e 6). E la
+versione coincide: sorgente al tag `sf_19` (commit edb0d9d), binario che si annuncia "Stockfish 19".
+Quindi tutti i confronti fatti finora erano validi.
+
+**Trappola nel pilotare i due motori**: se la traccia va su `stderr` con `subprocess.PIPE` e si legge
+solo `stdout`, il buffer di stderr si riempie e il processo figlio si BLOCCA — il `bestmove` non
+arriva mai e il confronto resta appeso. Scrivere stderr su FILE.
+
+**Trappola nell'instrumentare il nostro motore**: inserire una riga prima di un `return` che sta
+sotto un `if` senza graffe rende il `return` INCONDIZIONATO. Usare invece un metodo
+`Esci(etichetta, valore)` che registra e restituisce: e' sicuro qualunque sia la struttura.
+
+**Trappola nel ricostruire**: `dotnet build` fallisce con `MSB3021` se un processo del motore tiene
+il DLL. Filtrare gli errori con `grep "error CS"` NON lo vede e si finisce per misurare il binario
+vecchio. Filtrare su `error|Errori`.
+
+### Il primo bug trovato cosi': eval da TT con "==" invece della maschera
+
+Strumentati entrambi i motori per stampare i componenti di `r` alla radice sulla stessa posizione,
+e confrontati voce per voce: **tutto combaciava** (base, improving, delta, rootDelta, ttPv, cutNode,
+ttCapture, allNode, correctionValue) **tranne `eval`: 35 da noi, 176 nell'oracolo**. I conti tornano
+esattamente: `3 * clamp(176 - 35, -64, 96) = 288`, che era lo scarto misurato su `r`.
+
+Causa: search.cpp:842-845 usa una MASCHERA (`ttData.bound & ...`), noi usavamo `==`. `BOUND_EXACT`
+vale 3 = `UPPER|LOWER`, quindi con la maschera un'entry esatta soddisfa entrambi i casi e con
+l'uguaglianza nessuno — e alla radice l'entry e' SEMPRE esatta.
+
+Controllati poi tutti e 7 i punti in cui la fonte usa `bound &`: hanno tutti il corrispondente
+corretto da noi. E i 5 punti in cui la fonte usa `==` sono `==` anche da noi.
+
+Effetto: il riproduttore minimo `8/pp2r1k1/2p1p3/3pP2p/1P1P1P1P/P5KR/8/8 w - - 0 1` passa da 22 a
+**57 nodi, identico all'oracolo**, a d2 e a d3. Stesso numero di nodi dell'oracolo a profondita' 2
+su 51 posizioni: **da 36/51 a 45/51**.
+
+### Metrica nuova: `tools/nodi_bassa_profondita.py`
+
+Confronta i CONTEGGI NODI posizione per posizione a profondita' bassa. E' il segnale piu' severo:
+due ricerche possono azzeccare la stessa mossa per caso, ma lo stesso numero di nodi significa quasi
+certamente lo stesso albero. A profondita' 1 siamo a **51/51**; a profondita' 2 a 45/51 (era 36).
+
 ## Grado di fedelta' DI GIOCO (misure del 2026-09-08 sera, CORRETTE)
 
 Non e' la fedelta' del codice: e' quanto il motore SCEGLIE le stesse mosse dell'oracolo, a parita'
