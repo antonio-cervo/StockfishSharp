@@ -44,6 +44,11 @@ def chiedi(cmd, th, fen, ms):
         if line.startswith("bestmove"):
             parti = line.split()
             mv = parti[1] if len(parti) > 1 else None
+            # "(none)" dell'oracolo e "0000" nostro sono LA STESSA COSA (matto/stallo alla radice):
+            # differenza di formato del layer UCI, non di gioco. accordo_profondita.py normalizzava
+            # gia', questo strumento no, e contava due posizioni come errori nostri.
+            if mv in ("(none)", "0000"):
+                mv = "0000"
             break
     p.kill()
     return mv, prof
@@ -52,6 +57,8 @@ def chiedi(cmd, th, fen, ms):
 accordo, profondita, sbagliate = 0, [], []
 for fen, atteso in truth.items():
     mv, prof = chiedi(CHI, THREADS, fen, MOVETIME)
+    if atteso in ("(none)", "0000"):
+        atteso = "0000"
     if mv == atteso:
         accordo += 1
     else:

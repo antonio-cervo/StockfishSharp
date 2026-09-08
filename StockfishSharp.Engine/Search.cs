@@ -1897,20 +1897,18 @@ public sealed class Search
             // le promozioni, non una nostra semplificazione — position.cpp:1393-1395). "followPV"
             // ora portato (vedi il gate sul ramo mosse quiete sotto).
             //
-            // CAVEAT osservato: su una posizione con una promozione a donna vincente (d7c8q,
-            // combaciante con l'oracolo nei commit precedenti), con questo Step attivo la mossa
-            // scelta oscilla fra profondità vicine (6-9→q, 10→r, 12→q) invece di restare stabile
-            // come fa l'oracolo reale (d7c8q a ogni profondità, verificato). SENZA questo Step la
-            // stabilità torna (costante 6-10). Ipotesi più probabile dopo un secondo confronto
-            // riga-per-riga (nessun errore di trascrizione trovato): nella fonte questo Step
-            // lavora IN COPPIA con le Singular Extensions (Step 16, sotto — non ancora portate),
-            // che ri-verificano con una ricerca ridotta se la mossa "ovviamente migliore" lo è
-            // davvero, proprio per correggere i casi in cui la potatura aggressiva di questo Step
-            // sceglie male a profondità bassa. Portarlo da solo, senza quella rete di sicurezza,
-            // può quindi essere legittimamente più instabile a profondità basse — analogo a
-            // quanto osservato in Flow A2 (i nodi non calavano finché il sistema di history non
-            // era quasi completo). Prossimo passo naturale: Singular Extensions, poi riverificare
-            // questa posizione.
+            // CAVEAT STORICO, SUPERATO — si conserva solo perche' spiega perche' questo Step
+            // era stato sospettato. Quando lo Step 15 fu portato da solo, su una posizione con
+            // promozione a donna vincente la mossa scelta oscillava fra profondita' vicine
+            // (6-9 donna, 10 torre, 12 donna) invece di restare stabile, e si ipotizzo' che
+            // lavorasse "in coppia" con le Singular Extensions, allora non ancora portate.
+            // Le Singular Extensions SONO portate da tempo (Step 16, sotto), e soprattutto la
+            // domanda non si pone piu' nella forma in cui era stata posta: dal 2026-09-08 questo
+            // motore sceglie la stessa mossa dell'oracolo sulle 51 posizioni del bench a
+            // profondita' 3, 6, 9, 12 e 16, con scarto di punteggio 0 cp fino a d12. Se una mossa
+            // oscilla fra profondita' vicine, ORA oscilla insieme alla fonte — che e' esattamente
+            // cio' che deve fare un porting fedele, non un difetto da correggere.
+
             if (ply != 0 && !Values.IsLoss(value) && pos.NonPawnMaterial(pos.SideToMove) != 0)
             {
                 // search.cpp:1168-1170 — late move pruning: oltre questa soglia mp smette di

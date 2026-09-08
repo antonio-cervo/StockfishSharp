@@ -561,13 +561,27 @@ in su compaiono divergenze vere: **e' li' che va concentrato l'audit.**
 
 ### A parita' di TEMPO (quello che conta in partita)
 
-MISURA DA RIFARE: e' precedente a tutte le correzioni del 2026-09-08 sera, quando l'accordo a
-parita' di PROFONDITA' e' passato da 73-83% a 100%. Il numero sotto e' quindi storico.
+RIFATTA il 2026-09-08 a fine giornata, dopo aver corretto DUE difetti del misuratore stesso
+(`tools/quality.py`), entrambi a nostro sfavore e nessuno dei due nel motore:
+1. **il libro non veniva spento** — la stessa trappola gia' documentata per `accordo_profondita.py`,
+   sfuggita in questo strumento: sulla posizione iniziale rispondeva il libro invece della ricerca,
+   e la si contava come errore (90,2% -> 92,2% solo per questo);
+2. **`0000` e `(none)` non erano normalizzati** — sono la stessa cosa (matto/stallo alla radice),
+   una differenza di formato del layer UCI: valevano due errori nostri su due posizioni dove il
+   gioco era identico.
 
 | | accordo | profondita' media |
 |---|---|---|
-| oracolo, 2 s | 49/51 = 96,1% | 32,5 |
-| noi, 2 s | 41-42/51 = 80-82% | 19,3 |
+| oracolo, 2 s | **50/51 = 98,0%** | 32,3 |
+| noi, 2 s | **49/51 = 96,1%** | 19,8 |
+| (storico, inizio giornata) noi, 2 s | 41-42/51 = 80-82% | 19,3 |
+
+**Una sola posizione separa il porting dall'oracolo a parita' di tempo**, pur cercando 12 ply meno
+a fondo. All'inizio della giornata ne separavano otto o nove.
+
+LIMITE DICHIARATO della metrica: la verita' e' congelata all'oracolo a profondita' 20, quindi
+premia chi arriva vicino a quella profondita'. Non favorisce pero' noi in questo confronto —
+l'oracolo a profondita' 32,3 fa comunque meglio.
 
 ### Perche' il divario a tempo e' maggiore di quello a profondita'
 
