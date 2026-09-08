@@ -61,6 +61,45 @@ Tre livelli, in ordine di costo crescente. Nessuno da solo basta — l'hanno dim
 Regola operativa: **ogni riga vagliata va annotata qui sotto**, con l'esito, cosi' le sessioni
 successive non la riesaminino da capo. Un audit che si ripete da zero ogni volta non converge.
 
+## Strumenti di misura (tools/)
+
+- `audit_fedelta.py` — audit istruzione per istruzione fonte/porting (vedi sotto).
+- `bench_cmp.py` — confronto posizione-per-posizione del bench contro l'oracolo (mossa finale e
+  punteggio a profondita' 13).
+- `onset.py` — per una FEN, confronta punteggio, mossa e NUMERO DI NODI a ogni profondita' contro
+  l'oracolo: dice esattamente a quale profondita' comincia la divergenza. Fa una ricerca SEPARATA
+  per profondita', perche' il nostro motore stampa una sola riga `info` a fine ricerca mentre la
+  fonte ne stampa una per iterazione.
+- `divide.py` — "divide" sulla ricerca: per ogni mossa di radice cerca il FIGLIO a profondita' d-1
+  con entrambi i motori e confronta. E' il metodo che ha ristretto la divergenza di punteggio da un
+  albero di milioni di nodi a un caso da 200 (su Kiwipete, 47 figli su 48 combaciavano ESATTAMENTE).
+- `truth_build.py` + `truth.json` — verita' di riferimento CONGELATA per la metrica di qualita'.
+- `quality.py` — qualita' della mossa a tempo fisso contro quella verita'.
+
+### La metrica di qualita' e perche' la verita' e' congelata
+
+`python tools/quality.py 2000 1 "etichetta"` -> percentuale di posizioni (51, dalla lista del bench)
+in cui il motore, in 2 secondi, sceglie la mossa dell'oracolo.
+
+**Vizio corretto il 2026-09-08**: la verita' veniva rigenerata a ogni esecuzione con l'oracolo a
+**8 thread**. Il Lazy SMP non e' deterministico, quindi il riferimento cambiava e i numeri di
+esecuzioni diverse NON erano confrontabili — misurato: il controllo "oracolo a 1 thread" e' passato
+da 86,1% a 88,9% fra due esecuzioni senza che nulla dell'oracolo fosse cambiato, facendo sembrare
+una regressione quello che era solo un bersaglio mobile. Ora la verita' e' l'oracolo a **1 thread e
+profondita' fissa 20** (deterministica) ed e' congelata in `tools/truth.json`: va rigenerata solo se
+si cambia la lista di posizioni.
+
+**Misure di riferimento** (2 s a mossa, 1 thread, stessa verita' congelata, 3 repliche per ramo):
+
+| | accordo |
+|---|---|
+| oracolo, stesso budget (soffitto) | 49/51 = 96,1% |
+| **HEAD, 2026-09-08 sera** | 44 / 43 / 43 su 51 = **84,3-86,3%** |
+| 844c691, prima della sessione del 2026-09-08 | 42 / 42 / 42 su 51 = 82,4% |
+
+Il ramo vecchio e' stabilissimo a 42, il nuovo sta sempre sopra: il lavoro della giornata vale
+circa +1,3 posizioni su 51, piccolo ma consistente in tutte le repliche.
+
 ## Uso dello strumento
 
     python tools/audit_fedelta.py search.cpp
