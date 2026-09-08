@@ -410,6 +410,54 @@ indicizzato da quattro chiavi diverse) **non e' una differenza**, perche' ogni t
 diverso del bundle — le nostre quattro tabelle separate sono funzionalmente equivalenti. La
 differenza sta solo nella dimensione e nella condivisione.
 
+### Vagliato il 2026-09-08 (terzo giro): tt.cpp, movegen.cpp
+
+**`tt.cpp` — DUE discrepanze trovate, entrambe corrette** (commit 444ceb4):
+1. `TranspositionTable::new_search` (tt.cpp:238-242) fa `++generation8;` **e poi**
+   `generation8 &= GENERATION_MASK;`. Noi facevamo solo l'incremento. `genBound8` impacca
+   generazione (5 bit), bound (2 bit) e pv (1 bit) nello stesso byte e `save()` li unisce con un OR:
+   **dalla 32esima ricerca in poi i bit alti della generazione traboccavano nei campi bound e pv**,
+   che venivano poi riletti sbagliati (un UPPER puo' tornare EXACT, cioe' un taglio che non andava
+   fatto). La fonte ha un assert esplicito proprio su questo dentro `save()`.
+   Effetto misurato sul bench: **1.664.300 -> 1.958.546 nodi (+17,7%)**, piu' vicino ai 2.497.913
+   dell'oracolo — i tagli spuri facevano visitare meno nodi del dovuto.
+2. `TranspositionTable::clear` (tt.cpp:189) azzera anche `generation8`; il nostro `Clear()` no,
+   quindi il contatore proseguiva attraverso `ucinewgame` e "Clear Hash".
+
+   *Quando si manifesta*: una `NewSearch` per mossa giocata, quindi **dalla 32esima mossa in poi di
+   ogni partita**. NON si manifesta rigiocando una posizione da un processo nuovo, che riparte da
+   generazione 0. **Ipotesi verificata e SMENTITA**: non spiega il blunder mai riprodotto della
+   partita persa — il replay usava un processo unico con `go` in sequenza, quindi la generazione
+   superava 32 anche li', e il blunder non si e' riprodotto lo stesso. Non riproporla.
+
+   Verificato fedele nello stesso passaggio: `TTEntry::save` (condizione di sovrascrittura,
+   invecchiamento secondario e le sue quattro guardie), `relative_age`, la politica di rimpiazzo
+   `depth8 - 8 * relative_age`, `Read`, il layout dei bit.
+
+**`movegen.cpp`**: i candidati dello strumento sono tutti intrinseche AVX-512/SIMD (non portate per
+scelta dichiarata) o struttura a template. Ma il vaglio ha fatto emergere un **buco di COPERTURA**,
+non di fedelta': il perft chiama sempre e solo `GenType.Legal`, mentre il MovePicker — cioe' tutta
+la ricerca — usa `Captures`, `Quiets` ed `Evasions` separatamente. **Colmato** con
+`StockfishSharp.Tests/GenTypeCoverageTests.cs` (commit 230d6e2), 8 test.
+
+Due errori commessi scrivendo quel test, tutti e due generalizzabili e da non ripetere:
+- **Il ramo difficile non veniva mai percorso**: nessuna posizione di partenza raggiungeva un nodo
+  sotto scacco, quindi una mutazione che svuotava EVASIONS passava indenne. Rimedio: posizioni gia'
+  sotto scacco fra i casi + **guardie di copertura** che falliscono se un ramo non e' stato visitato.
+- **Il confronto era una TAUTOLOGIA**: sotto scacco `GenType.Legal` e' COSTRUITO su `Evasions`
+  (MoveGen.cs:52), quindi la mutazione rompeva allo stesso modo atteso e ottenuto. E nemmeno
+  "NON_EVASIONS filtrate con `pos.Legal`" andava bene, perche' `Legal` e' fedele alla fonte e **non
+  verifica che la mossa risolva lo scacco**. L'unico oracolo indipendente e' la definizione stessa
+  di legalita': esegui la mossa, guarda se il tuo re resta attaccato, disfa.
+
+**Nota minore, non corretta** (layer UCI, Flow A4 non portato): a matto/stallo l'oracolo stampa
+`bestmove (none)`, noi `bestmove 0000`. Entrambi validi per una GUI; annotato per non riscoprirlo.
+
+**Accordo con l'oracolo, misura di riferimento** (`bench 16 1 13`, mossa finale a profondita' 13 su
+51 posizioni, strumento in `scratchpad/bench_cmp.py`): **37/51 mosse uguali, 7/51 punteggi uguali**
+(39/51 e 6/51 prima della correzione della generazione: due posizioni su 51 non dicono nulla in
+nessuna direzione). I punteggi divergono quasi ovunque — e' il punto 2 qui sotto.
+
 ### 3. Checklist dello strumento, da vagliare
 
 `python tools/audit_fedelta.py search.cpp` produce ~81 candidati sul corpo di `search()`. Molti sono
