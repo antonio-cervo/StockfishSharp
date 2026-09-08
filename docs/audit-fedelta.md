@@ -117,6 +117,29 @@ indicato. Elenco cumulativo: aggiungere qui, non rifare.
   `Position.IsDraw` — quest'ultima chiamata su decine di milioni di nodi con `rule50 > 99`).
   Nodi identici, quindi cambio neutro sul comportamento.
 
+### Buco di COPERTURA colmato: le chiavi incrementali (2026-09-08)
+
+Ragionando su *cosa i test esistenti non possono vedere*: il perft e' la verifica principale di
+`Position`/`MoveGen`, ma conta solo nodi — **non tocca nessuna chiave Zobrist**. Una deriva sarebbe
+quindi rimasta invisibile, e non e' innocua:
+
+| chiave | cosa indicizza | conseguenza di una deriva |
+|---|---|---|
+| `Key` | transposition table | entry lette per la posizione sbagliata |
+| `PawnKey` | pawn history, pawn correction history | ordinamento e correzione della valutazione sbagliati |
+| `MinorPieceKey`, `NonPawnKey` | le altre correction history | `to_corrected_static_eval` sbagliata a OGNI nodo |
+| `MaterialKey` | riconoscimento del materiale | |
+
+Nuovo `IncrementalKeysTests`: ricorsione su TUTTE le mosse legali (non a campione) fino a
+profondita' 2-3 su 5 posizioni scelte per coprire arrocco, presa en passant, promozioni e finali di
+pedoni; a ogni nodo confronta le sei chiavi mantenute incrementalmente con quelle ricalcolate da
+zero via `Position.Set(fen)`, e verifica anche il ripristino dopo `UndoMove`. Coperto anche il
+**null move**, che tocca le chiavi e che il perft non genera mai. **Esito: tutte corrette.**
+
+**Il test e' stato validato per mutazione**: togliendo un solo `PawnKey ^= ...` sulla cattura di un
+pedone, 4 casi su 5 falliscono con messaggi precisi. Un test che passa senza saper fallire non prova
+nulla — vedi il caso di `NnueIncrementalTests`, che copriva solo il caso facile.
+
 ### Discrepanze TROVATE E CORRETTE il 2026-09-07
 | dove | cosa | commit |
 |---|---|---|

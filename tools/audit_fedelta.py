@@ -123,6 +123,7 @@ INTERVALLI = {
     "search.cpp": (715, 1660),  # corpo di search(): Step 1-24. E la zona dove la fedelta conta di piu.
     "movepick.cpp": (1, 400),
     "tt.cpp": (30, 300),
+    "position.cpp": (700, 1400),  # do_move / undo_move / do_null_move / set_state
 }
 
 
