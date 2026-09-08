@@ -142,6 +142,28 @@ posizioni di matto/stallo dove l'oracolo non stampa la riga info — artefatto d
 `4k3/3q1r2/1N2r1b1/3ppN2/2nPP3/1B1R2n1/2R1Q3/3K4 w - - 5 1` (1.821 contro 1.050, l'unica dove ne
 usiamo molti di piu').
 
+## RISOLTA (nel MISURATORE): "go depth N" aveva un tetto di 10 secondi
+
+Quarto difetto trovato negli strumenti invece che nel motore, e il piu' insidioso perche' falsava
+l'audit **proprio dove serviva di piu'**.
+
+Nella fonte `go depth N` senza orologio non ha alcun limite di tempo: `use_time_management()`
+(search.h:182) e' falso senza wtime/btime e `check_time` (search.cpp:2122-2140) non ferma nulla
+senza movetime o orologio — la ricerca arriva sempre alla profondita' richiesta, per quanto ci
+metta. Il nostro layer UCI ci metteva sopra un tetto pratico di 10 secondi.
+
+Su `k7/2n1n3/1nbNbn2/2NbRBn1/1nbRQR2/2NBRBN1/3N1N2/7K w - - 0 1` a profondita' 20 le iterazioni
+1-19 combaciavano con l'oracolo **all'ultimo nodo** (2.839.902), poi la ventesima sforava i 10 s e
+veniva INTERROTTA: il confronto registrava 3.384.301 nodi contro 4.118.541 e sembrava una
+divergenza del motore. Il segnale che lo ha smascherato e' nella riga "info" stessa, ora che la
+emettiamo per iterazione: la nostra ultima riga diceva `d=19` mentre l'oracolo diceva `d=20` — e'
+il ramo `usePreviousScore` di `output_pv` (search.cpp:2286), che si attiva solo quando
+`rootMoves[0].score == -VALUE_INFINITE`, cioe' **quando l'iterazione non e' stata completata**.
+
+Tolto il tetto (resta quello pratico di un'ora gia' usato da `go infinite`, per non lasciare una
+ricerca senza fine se il client non manda mai `stop`), la posizione coincide: **4.118.541 nodi in
+entrambi**, stesso punteggio e stessa PV.
+
 ## RISOLTA: il puntatore alla PV del figlio non veniva mai "annullato"
 
 Attaccando la profondita' 16 (`r3r1k1/2p2ppp/p1p1bn2/8/1q2P3/2NPQN2/PPP3PP/R4RK1 b - - 2 15`,

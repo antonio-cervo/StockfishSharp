@@ -750,7 +750,21 @@ void HandleGo(string[] toks)
         }
         else
         {
-            budget = TimeSpan.FromSeconds(10); // "go depth N" senza orologio: budget fisso ragionevole
+            // "go depth N" senza orologio: nella fonte NON ha alcun limite di tempo —
+            // "use_time_management()" (search.h:182) e' falso senza wtime/btime, e check_time
+            // (search.cpp:2122-2140) non ferma nulla senza movetime o orologio: la ricerca arriva
+            // sempre alla profondita' richiesta, per quanto ci metta.
+            //
+            // Fino al 2026-09-08 qui c'era un tetto pratico di 10 secondi. Non era innocuo: falsava
+            // l'audit proprio dove serviva di piu'. Su
+            // "k7/2n1n3/1nbNbn2/2NbRBn1/1nbRQR2/2NBRBN1/3N1N2/7K w - - 0 1" a profondita' 20 le
+            // iterazioni 1-19 combaciavano con l'oracolo all'ultimo nodo (2.839.902), poi la 20esima
+            // sforava i 10 s e veniva INTERROTTA: il confronto registrava 3.384.301 nodi contro
+            // 4.118.541 e sembrava una divergenza del motore, mentre era il misuratore a fermarci.
+            //
+            // Si usa lo stesso tetto pratico di "go infinite" (un'ora): non e' la fonte, ma protegge
+            // da una ricerca che non termina mai se il client non manda mai "stop".
+            budget = TimeSpan.FromHours(1);
         }
     }
 
