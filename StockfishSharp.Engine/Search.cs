@@ -1776,7 +1776,13 @@ public sealed class Search
                     // search.cpp:1389-1390 "Post LMR continuation history updates" — MAI PORTATO
                     // fino al 2026-09-07: la mossa che ha superato alpha in ricerca ridotta viene
                     // premiata sulle continuation history del nodo corrente.
-                    _movePick.ApplyPostLmrBonus(contRefs, inCheck, pos.MovedPiece(m), m.ToSq);
+                    // search.cpp:1374 usa "movedPiece", catturato PRIMA della mossa. Qui siamo
+                    // dopo DoMove, quindi "pos.MovedPiece(m)" leggerebbe PieceOn(m.FromSq), ormai
+                    // VUOTA: restituiva Piece.None e il bonus finiva nel piano NO_PIECE della
+                    // continuation history — proprio quello che va solo LETTO come valore di
+                    // riserva (-586) quando non c'e' una mossa reale, e che la fonte non scrive
+                    // mai. Stessa classe di errore del bug di ComputeStatScore.
+                    _movePick.ApplyPostLmrBonus(contRefs, inCheck, _movedPieceHistory[ply + StackOffset], m.ToSq);
                 }
             }
             else if (!isPvNode || moveCount > 1)
