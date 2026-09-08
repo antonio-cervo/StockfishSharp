@@ -1125,6 +1125,37 @@ public sealed class Search
         // durante la ricorsione — esattamente come rootMoves[pvIdx] nella fonte fra due
         // stable_sort successivi (search.cpp:403).
         bool seekMate = _rootDepth >= 16 && Math.Abs(_rootMoves[_pvIdx].Score) >= 2000;
+        // ORDINE, search.cpp:729-742: il tuffo in quiescenza, il tetto alla profondita' e il
+        // controllo di ripetizione imminente vengono PRIMA di Step 1/2/3. Fino al 2026-09-08 qui
+        // stavano DOPO, e non era innocuo: lo Step 3 (mate distance pruning) restringe alpha/beta,
+        // e passando quei valori ristretti alla quiescenza le si dava una finestra piu' stretta di
+        // quella della fonte (beta 31998 invece di 32001 al primo nodo). Presenza != fedelta':
+        // conta anche il punto in cui una riga sta.
+        if (depth <= 0) return Quiesce(pos, alpha, beta, ply, isPvNode); // search.cpp:731
+
+        // search.cpp:732-733, "Limit the depth if extensions made it too large" — MAI PORTATO fino
+        // al 2026-09-07. Non e' una rifinitura: le estensioni (Step 16 puo' dare +3, piu' i due
+        // "depth++" di singular e hindsight) possono far CRESCERE la profondita' di nodo in nodo
+        // lungo una catena, e senza questo tetto supera 252. A quel punto TTEntry.Save calcola
+        // "Depth8 = (byte)(d - DepthNone)" e va in OVERFLOW DI BYTE: la fonte lo previene proprio
+        // con questo min (e lo presidia con "assert(d - DEPTH_NONE < 256)", tt.cpp:113).
+        //
+        // La TT si riempie allora di profondita' sbagliate, che rientrano nella condizione dello
+        // Step 16 "ttData.depth >= depth - 3" e alimentano ulteriori estensioni: retroazione che si
+        // autosostiene. Con piu' thread le entry corrotte sono molte di piu', ed e' per questo che
+        // il sintomo (bench multi-thread che non termina, ricorsione fino a ply 244) si vedeva solo
+        // da 2 thread in su, mai a thread singolo.
+        depth = Math.Min(depth, Ply.MaxPly - 1);
+
+        // Controllo "ripetizione imminente" — search.cpp:736-742: se esiste una mossa disponibile
+        // che pareggerebbe per ripetizione e quel pareggio batte già alpha, tronca qui invece di
+        // esplorare il sottoalbero per scoprirlo più a fondo.
+        if (ply != 0 && alpha < Values.Draw && pos.UpcomingRepetition(ply))
+        {
+            alpha = ValueDraw();
+            if (alpha >= beta) return alpha;
+        }
+
 
         // search.cpp:781-783 — selDepth conta da 1 (ply conta da 0), aggiornato dal primo nodo PV
         // che raggiunge un nuovo ply massimo in questa iterazione.
@@ -1162,31 +1193,6 @@ public sealed class Search
             // valore di matto.
             alpha = Math.Max(-MateScore + ply, alpha);   // mated_in(ss->ply)
             beta = Math.Min(MateScore - ply - 1, beta);  // mate_in(ss->ply + 1)
-            if (alpha >= beta) return alpha;
-        }
-
-        if (depth <= 0) return Quiesce(pos, alpha, beta, ply, isPvNode); // search.cpp:731
-
-        // search.cpp:732-733, "Limit the depth if extensions made it too large" — MAI PORTATO fino
-        // al 2026-09-07. Non e' una rifinitura: le estensioni (Step 16 puo' dare +3, piu' i due
-        // "depth++" di singular e hindsight) possono far CRESCERE la profondita' di nodo in nodo
-        // lungo una catena, e senza questo tetto supera 252. A quel punto TTEntry.Save calcola
-        // "Depth8 = (byte)(d - DepthNone)" e va in OVERFLOW DI BYTE: la fonte lo previene proprio
-        // con questo min (e lo presidia con "assert(d - DEPTH_NONE < 256)", tt.cpp:113).
-        //
-        // La TT si riempie allora di profondita' sbagliate, che rientrano nella condizione dello
-        // Step 16 "ttData.depth >= depth - 3" e alimentano ulteriori estensioni: retroazione che si
-        // autosostiene. Con piu' thread le entry corrotte sono molte di piu', ed e' per questo che
-        // il sintomo (bench multi-thread che non termina, ricorsione fino a ply 244) si vedeva solo
-        // da 2 thread in su, mai a thread singolo.
-        depth = Math.Min(depth, Ply.MaxPly - 1);
-
-        // Controllo "ripetizione imminente" — search.cpp:736-742: se esiste una mossa disponibile
-        // che pareggerebbe per ripetizione e quel pareggio batte già alpha, tronca qui invece di
-        // esplorare il sottoalbero per scoprirlo più a fondo.
-        if (ply != 0 && alpha < Values.Draw && pos.UpcomingRepetition(ply))
-        {
-            alpha = ValueDraw();
             if (alpha >= beta) return alpha;
         }
 
@@ -1631,6 +1637,24 @@ public sealed class Search
                     // conta), e i figli del null move (che la fonte non conta: do_null_move non tocca il
                     // contatore). Il risultato era un conteggio gonfiato, che rendeva NON confrontabili
                     // tutti i numeri di nodi misurati contro l'oracolo.
+                    // search.cpp:1074 — la fonte usa "do_move(pos, move, st, ss)", cioe' il
+                    // do_move del WORKER, che oltre a muovere REGISTRA LA MOSSA NELLO STACK:
+                    // ss->currentMove, e i puntatori di continuation history scelti da
+                    // [inCheck][capture][pezzo][casa] (search.cpp:655-671).
+                    //
+                    // Fino al 2026-09-08 qui si chiamava il DoMove nudo di Position, senza
+                    // registrare nulla: tutto il sottoalbero del ProbCut girava quindi con il
+                    // contesto RIMASTO DALLA MOSSA PRECEDENTE. Effetto osservato affiancando le
+                    // tracce: in un nodo di quiescenza sotto ProbCut il nostro "prevSq" valeva g3
+                    // dove la fonte aveva e3, e con prevSq sbagliato la RIPRESA su quella casa
+                    // perdeva l'esenzione dalla potatura di futility (search.cpp:1791,
+                    // "move.to_sq() != prevSq") e veniva potata. Un nodo in meno, e da li' due
+                    // alberi diversi.
+                    _movedPieceHistory[ply + StackOffset] = pos.MovedPiece(pcMove);
+                    _currentMoveHistory[ply + StackOffset] = pcMove;
+                    _inCheckHistory[ply + StackOffset] = inCheck;
+                    _captureStageHistory[ply + StackOffset] = pos.CaptureStage(pcMove);
+
                     _nodes++;
                     pos.DoMove(pcMove, pcSt, pos.GivesCheck(pcMove), pcFrame.DirtyThreats, pcFrame.DirtyPiece, pcFrame.DirtyPawnPairs);
 
@@ -1979,7 +2003,8 @@ public sealed class Search
 
             if (Traccia && ply <= 3)
             {
-                Console.Error.WriteLine($"  PLY{ply} d={depth} mc={moveCount} {m.FromSq}{m.ToSq}"
+                Console.Error.WriteLine($"  PLY{ply} d={depth} mc={moveCount} {m.FromSq.ToString().ToLower()}{m.ToSq.ToString().ToLower()}"
+                    + $"{(m.TypeOf == MoveType.Promotion ? char.ToLower(m.PromotionType.ToString()[0]).ToString() : "")}"
                     + $" score={score} alpha={alpha} beta={beta} costo={_nodes - _nodiPrimaDellaMossa}"
                     + $" nodi={_nodes} r={r} newDepth={newDepth} ttHit={(probe.Found ? 1 : 0)}"
                     + $" ttMove={(ttMove == Move.None ? "none" : ttMove.FromSq.ToString().ToLower() + ttMove.ToSq.ToString().ToLower())}");
@@ -2331,6 +2356,11 @@ public sealed class Search
             if (bestValue > alpha) alpha = bestValue;
 
             futilityBase = _staticEvalHistory[ply + StackOffset] + 306;
+
+            if (Traccia && ply <= 5)
+                Console.Error.WriteLine($"  QIN{ply} alpha={alpha} beta={beta} best={bestValue}"
+                    + $" statico={_staticEvalHistory[ply + StackOffset]} fbase={futilityBase}"
+                    + $" ttHit={(probe.Found ? 1 : 0)} ttVal={ttScore}");
         }
 
         // search.cpp:1763-1765 — contHist di un solo livello (ss-1) e casa di arrivo della mossa
@@ -2358,6 +2388,11 @@ public sealed class Search
             bool capture = pos.CaptureStage(m);
 
             moveCount++;
+
+            if (Traccia && ply <= 5)
+                Console.Error.WriteLine($"  QGEN{ply} mc={moveCount} {m.FromSq.ToString().ToLower()}{m.ToSq.ToString().ToLower()}"
+                    + $" cap={(capture ? 1 : 0)} chk={(givesCheck ? 1 : 0)} prevSq={prevSq.ToString().ToLower()}"
+                    + $" alpha={alpha} fbase={futilityBase}");
 
             // Step 6. Potatura — search.cpp:1786-1821.
             if (!Values.IsLoss(bestValue))
@@ -2407,6 +2442,11 @@ public sealed class Search
             _nodes++;
             pos.DoMove(m, st, givesCheck, qFrame.DirtyThreats, qFrame.DirtyPiece, qFrame.DirtyPawnPairs);
             int score = -Quiesce(pos, -beta, -alpha, ply + 1, isPvNode);
+
+            if (Traccia && ply <= 5)
+                Console.Error.WriteLine($"  QS{ply} mc={moveCount} {m.FromSq.ToString().ToLower()}{m.ToSq.ToString().ToLower()}"
+                    + $"{(m.TypeOf == MoveType.Promotion ? char.ToLower(m.PromotionType.ToString()[0]).ToString() : "")}"
+                    + $" score={score} alpha={alpha} beta={beta} nodi={_nodes}");
             pos.UndoMove(m);
             _accumulatorStack.Pop();
 
