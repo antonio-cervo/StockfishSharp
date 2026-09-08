@@ -1271,8 +1271,16 @@ public sealed class Search
                 && (probe.Data.Bound & (ttScore > eval ? Bound.Lower : Bound.Upper)) != Bound.None)
                 eval = ttScore;
 
+            // search.cpp:853 — la profondita' e' DEPTH_UNSEARCHED (-2), NON DepthNone (-3).
+            // I due sentinella non sono intercambiabili, e types.h:235-241 lo dice: DEPTH_NONE
+            // serve al CONTROLLO DI OCCUPAZIONE dell'entry, DEPTH_UNSEARCHED alle entry scritte
+            // senza aver cercato nulla. Salvando con DepthNone il campo depth8 diventa
+            // "d - DepthNone" = 0, cioe' "is_occupied() == false": l'entry c'e' ma ogni sonda
+            // successiva la MANCA. Fino al 2026-09-08 era cosi', e non era innocuo — la
+            // valutazione statica salvata qui non veniva mai riusata, e il bonus di pawn history
+            // protetto da "!ttHit" (search.cpp:983-985) veniva applicato una volta di troppo.
             if (!probe.Found)
-                _tt.Save(probe.WriteIndex, pos.Key, Values.None, ttPv, Bound.None, Ply.DepthNone, Move.None, unadjustedStaticEval);
+                _tt.Save(probe.WriteIndex, pos.Key, Values.None, ttPv, Bound.None, Ply.DepthUnsearched, Move.None, unadjustedStaticEval);
         }
 
         _staticEvalHistory[ply + StackOffset] = staticEval;
@@ -1443,6 +1451,12 @@ public sealed class Search
             // statica e quella di qui aggiorna sempre la sua main history (e, se non era un
             // pedone/promozione e non c'è già un hit di TT qui, anche la sua pawn history).
             Move parentMoveForEvalDiff = _currentMoveHistory[ply + StackOffset - 1];
+            if (Traccia && ply <= 3)
+                Console.Error.WriteLine($"    EVALDIFF ply={ply} d={depth} okMossa={(parentMoveForEvalDiff.IsOk ? 1 : 0)}"
+                    + $" parentInCheck={(_inCheckHistory[ply + StackOffset - 1] ? 1 : 0)}"
+                    + $" priorCapture={(pos.CapturedPiece() != Piece.None ? 1 : 0)}"
+                    + $" ttHit={(probe.Found ? 1 : 0)} prevSq={parentMoveForEvalDiff.ToSq.ToString().ToLower()}"
+                    + $" pezzo={pos.PieceOn(parentMoveForEvalDiff.ToSq)}");
 
             // Terza condizione: "!priorCapture" (search.cpp:979), che nella fonte e'
             // "pos.captured_piece()", cioe' se la mossa precedente ha CATTURATO davvero un pezzo.
