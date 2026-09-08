@@ -94,6 +94,7 @@ public sealed class SearchThreadPool
             var s = new Search(_tt, _searches.Count, _sharedHistories); // threadIdx, search.cpp:173
             s.SetSyzygyOptions(_syzygyOptions.useRule50, _syzygyOptions.probeDepth, _syzygyOptions.probeLimit);
             if (i == 0) s.SuAggiornamentoPv = _suAggiornamentoPv; // solo mainThread, search.cpp:495
+            s.SetMoveOverhead(_moveOverheadMs);
             _searches.Add(s);
         }
     }
@@ -109,6 +110,16 @@ public sealed class SearchThreadPool
         _syzygyOptions = (useRule50, probeDepth, probeLimit);
         foreach (var s in _searches) s.SetSyzygyOptions(useRule50, probeDepth, probeLimit);
     }
+
+    /// <summary><c>options["Move Overhead"]</c> — serve a SyzygyExtendPv, che se ne concede la meta'
+    /// come budget (search.cpp:2232-2238). Sopravvive a SetThreadCount come le opzioni Syzygy.</summary>
+    public void SetMoveOverhead(long ms)
+    {
+        _moveOverheadMs = ms;
+        foreach (var s in _searches) s.SetMoveOverhead(ms);
+    }
+
+    private long _moveOverheadMs = 10;
 
     /// <summary>Inoltra al thread principale (indice 0) — l'unico che consulta mai questi valori
     /// per la gestione tempo adattiva, vedi <see cref="Search.SetPreviousScores"/> — un

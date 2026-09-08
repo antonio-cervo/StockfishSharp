@@ -167,6 +167,7 @@ optionsMap.Add("Skill Level", new Option(20, 0, 20));
 optionsMap.Add("Move Overhead", new Option(10, 0, 5000, o =>
 {
     moveOverhead = (int)o;
+    search.SetMoveOverhead(moveOverhead); // budget di SyzygyExtendPv, search.cpp:2232-2238
     return null;
 }));
 

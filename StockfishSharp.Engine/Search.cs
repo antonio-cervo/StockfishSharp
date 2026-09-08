@@ -275,6 +275,20 @@ public sealed class Search
     // tabelle e aggiorna MaxCardinality, letto indirettamente da RankRootMoves). Default identici
     // a engine.cpp:117-123 ("SyzygyProbeDepth" 1, "Syzygy50MoveRule" true, "SyzygyProbeLimit" 7).
     private bool _syzygyUseRule50 = true;
+
+    /// <summary><c>options["Move Overhead"]</c> — serve a <see cref="SyzygyExtendPv"/>, che si da'
+    /// un budget di meta' di questo valore per estendere la PV con le tablebase (search.cpp:75-80).
+    /// Il resto del motore lo riceve gia' da TimeManagement nel layer UCI.</summary>
+    private long _moveOverheadMs = 10;
+
+    public void SetMoveOverhead(long ms) => _moveOverheadMs = ms;
+
+    /// <summary>La posizione di RADICE della ricerca in corso (<c>worker.rootPos</c>) e se la
+    /// gestione tempo e' attiva (<c>limits.use_time_management()</c>): entrambe servono solo a
+    /// <see cref="SyzygyExtendPv"/>, che gira dentro <c>output_pv</c> e li' nella fonte le ha per
+    /// riferimento.</summary>
+    private Position _rootPos = null!;
+    private bool _usaGestioneTempo;
     private int _syzygyProbeDepth = 1;
     private int _syzygyProbeLimit = 7;
 
@@ -815,6 +829,8 @@ public sealed class Search
         }
 
         _rootColor = pos.SideToMove;
+        _rootPos = pos;
+        _usaGestioneTempo = optimumMs < NoBound; // limits.use_time_management(), search.h:182
 
         // search.cpp:283,305-311 — locali a iterative_deepening, quindi resettate a ogni Search_
         // (a differenza di _bestPreviousScore/_bestPreviousAverageScore/_previousTimeReduction,
@@ -1202,9 +1218,8 @@ public sealed class Search
     /// <summary><c>SearchManager::output_pv</c>, search.cpp:2273-2343, ristretto a MultiPV=1 (il
     /// ciclo "for i &lt; multiPV" ha una sola iterazione, i=0). Ritorna il valore che la fonte
     /// assegna a <c>uciPvSent</c> (search.cpp:498, "pvIdx + 1 == multiPV": sempre vero qui).
-    /// NON portato: <c>syzygy_extend_pv</c> (search.cpp:2303) — estende/corregge la PV con le
-    /// tablebase quando la radice e' in TB e il punteggio e' decisivo; assenza dichiarata, incide
-    /// solo su quanto e' lunga la PV mostrata, mai sulla mossa scelta.</summary>
+    /// <c>syzygy_extend_pv</c> (search.cpp:2303) e' ora portato — vedi <see cref="SyzygyExtendPv"/>.
+    /// </summary>
     private bool EmettiPv(int depth)
     {
         var info = CostruisciInfoPv(depth);
@@ -1233,6 +1248,11 @@ public sealed class Search
         bool isTbScore = _tbConfig.RootInTb && !Values.IsMateOrMated(v);
         if (isTbScore) v = rm.TbScore;
 
+        // search.cpp:2300-2303 — "Potentially correct and extend the PV, and in exceptional cases v."
+        if (Values.IsDecisive(v) && !Values.IsMateOrMated(v) && !usePreviousScore
+            && (!rm.IsInexact || isTbScore))
+            SyzygyExtendPv(_rootPos, rm, ref v, multiPv: 1);
+
         var info = new InfoIterazione
         {
             Depth = d,
@@ -1249,6 +1269,132 @@ public sealed class Search
             info.Bound = rm.InexactLower ? "lowerbound" : rm.InexactUpper ? "upperbound" : "";
 
         return info;
+    }
+
+    /// <summary><c>syzygy_extend_pv</c>, search.cpp:2225-2271 — con la radice in tablebase e un
+    /// punteggio decisivo: VALIDA la PV trovata dalla ricerca finche' ogni mossa resta in cima alla
+    /// classifica per DTZ, la TRONCA dove smette di esserlo, poi la ESTENDE fino al matto giocando
+    /// le mosse a DTZ minimo ("come se l'utente avesse esplorato syzygy-tables.info", dice il
+    /// commento della fonte). In casi eccezionali corregge anche il punteggio a patta.
+    ///
+    /// Era l'ultimo pezzo della fonte dichiarato non portato, e la sua assenza era descritta qui
+    /// come "incide solo su quanto e' lunga la PV mostrata". Non e' vero: modifica
+    /// <c>rootMoves[0].pv</c>, che a inizio iterazione successiva diventa <c>previousPV</c> e da li'
+    /// alimenta <c>followPV</c> — che disattiva IIR e la potatura delle mosse quiete a profondita'
+    /// bassa. In una posizione con tablebase puo' quindi cambiare l'albero dell'iterazione dopo. E
+    /// il bot gioca CON le tablebase configurate.
+    ///
+    /// Il budget di tempo e' meta' di "Move Overhead" (search.cpp:2232-2238): l'estensione gioca
+    /// mosse vere sulla scacchiera e non deve mangiarsi il margine riservato alla latenza.</summary>
+    private void SyzygyExtendPv(Position pos, RootMove rootMove, ref int v, int multiPv)
+    {
+        var cronometro = System.Diagnostics.Stopwatch.StartNew();
+        bool rule50 = _syzygyUseRule50;
+
+        // "limits.npmsec" (modalita' nodestime) non e' portata: nella fonte vale 0 di default e il
+        // suo unico effetto qui e' disattivare il limite, quindi la condizione si riduce a questa.
+        bool TempoScaduto() => _usaGestioneTempo
+            && 2 * multiPv * cronometro.Elapsed.TotalMilliseconds >= _moveOverheadMs;
+
+        if (TempoScaduto()) return;
+
+        // Step 0: si gioca la mossa di radice, senza correzione (serve al MultiPV in TB).
+        var statiPv = new List<StateInfo> { new() };
+        pos.DoMove(rootMove.Pv[0], statiPv[0]);
+        int ply = 1;
+
+        // Step 1: si percorre la PV fino all'ultima posizione in TB con punteggio decisivo corretto.
+        while (ply < rootMove.Pv.Count)
+        {
+            Move pvMove = rootMove.Pv[ply];
+
+            var mosseLegali = MosseLegaliComeRootMoves(pos);
+            Tablebase.RankRootMoves(pos, mosseLegali, _syzygyUseRule50, _syzygyProbeDepth,
+                _syzygyProbeLimit, rankDtz: false, timeAbort: TempoScaduto);
+
+            var rm = mosseLegali.Find(x => x.Matches(pvMove));
+            if (rm == null || mosseLegali[0].TbRank != rm.TbRank) break;
+
+            ply++;
+            var st = new StateInfo();
+            statiPv.Add(st);
+            pos.DoMove(pvMove, st);
+
+            // In regime di tablebase non si ammettono ripetizioni o mosse che pattano lungo la PV.
+            if (_tbConfig.RootInTb && ((rule50 && pos.IsDraw(ply)) || pos.IsRepetition(ply)))
+            {
+                pos.UndoMove(pvMove);
+                statiPv.RemoveAt(statiPv.Count - 1);
+                ply--;
+                break;
+            }
+
+            if (_tbConfig.RootInTb && TempoScaduto()) break;
+        }
+
+        // Si ritaglia la PV alla sola parte validata ("rootMove.pv.resize(ply)").
+        if (rootMove.Pv.Count > ply) rootMove.Pv.RemoveRange(ply, rootMove.Pv.Count - ply);
+
+        // Step 2: si estende la PV fino al matto con le mosse a DTZ minimo.
+        while (!(rule50 && pos.IsDraw(0)))
+        {
+            if (TempoScaduto()) break;
+
+            var mosseLegali = MosseLegaliComeRootMoves(pos);
+            foreach (var rm in mosseLegali)
+            {
+                var tmp = new StateInfo();
+                pos.DoMove(rm.Pv[0], tmp);
+                // Spareggia i DTZ pari merito limitando la mobilita' avversaria, ma senza
+                // concedergli una cattura.
+                var riposte = new List<Move>();
+                MoveGen.Generate(GenType.Legal, pos, riposte);
+                foreach (var mOpp in riposte) rm.TbRank -= pos.Capture(mOpp) ? 100 : 1;
+                pos.UndoMove(rm.Pv[0]);
+            }
+
+            if (mosseLegali.Count == 0) break; // matto trovato
+
+            // std::stable_sort per rango decrescente: spareggia le mosse a DTZ uguale in
+            // rank_root_moves. OrderByDescending di LINQ e' stabile per specifica.
+            mosseLegali = [.. System.Linq.Enumerable.OrderByDescending(mosseLegali, x => x.TbRank)];
+
+            // Chi vince minimizza il DTZ, chi perde lo massimizza: e' quel che fa rankDtz=true.
+            var config = Tablebase.RankRootMoves(pos, mosseLegali, _syzygyUseRule50,
+                _syzygyProbeDepth, _syzygyProbeLimit, rankDtz: true, timeAbort: TempoScaduto);
+
+            // Senza DTZ disponibile il matto potrebbe non arrivare mai: si esce.
+            if (!config.RootInTb || config.Cardinality > 0) break;
+
+            ply++;
+            Move pvMove = mosseLegali[0].Pv[0];
+            rootMove.Pv.Add(pvMove);
+            var st = new StateInfo();
+            statiPv.Add(st);
+            pos.DoMove(pvMove, st);
+        }
+
+        // search.cpp:2258-2265 — trovare una patta qui e' un caso eccezionale (contatore delle 50
+        // mosse non ottimale sulla scacchiera reale, che l'arrotondamento del DTZ non sempre
+        // classifica bene): in quel caso il punteggio annunciato si allinea alla PV trovata.
+        if (pos.IsDraw(0)) v = Values.Draw;
+
+        for (int i = rootMove.Pv.Count; i > 0; i--)
+            pos.UndoMove(rootMove.Pv[i - 1]);
+
+        if (TempoScaduto())
+            Console.Error.WriteLine("info string Syzygy based PV extension requires more time, increase Move Overhead as needed.");
+    }
+
+    /// <summary><c>for (const auto&amp; m : MoveList&lt;LEGAL&gt;(pos)) legalMoves.emplace_back(m);</c>
+    /// — usato due volte da <see cref="SyzygyExtendPv"/>.</summary>
+    private static List<RootMove> MosseLegaliComeRootMoves(Position pos)
+    {
+        var legali = new List<Move>();
+        MoveGen.Generate(GenType.Legal, pos, legali);
+        var lista = new List<RootMove>(legali.Count);
+        foreach (var m in legali) lista.Add(new RootMove(m));
+        return lista;
     }
 
     /// <param name="isPvNode"><c>constexpr bool PvNode = nodeType != NonPV</c>, search.cpp:706 — il
