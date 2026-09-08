@@ -12,8 +12,12 @@ PREREQUISITI
 NOTA sul pilotaggio: stderr va scritto su FILE. Con subprocess.PIPE, leggendo solo stdout, il
 buffer di stderr si riempie e il processo figlio si blocca senza mai emettere "bestmove".
 
-Uso:  python tools/confronta_traccia.py "FEN" PROFONDITA [prefisso]
-      prefisso: quale traccia confrontare — "RADICE" (default), "R mc=", "STEP9"
+Uso:  python tools/confronta_traccia.py "FEN" PROFONDITA [prefisso] [plyMax]
+      prefisso: quale traccia confrontare — "PLY" (mosse), "MH sito" (scritture di main history),
+                "CHIN"/"CH" (correction history), "PATTA", "Q" (quiescenza), "R mc=", "STEP9"
+      plyMax:   fin dove scendono le tracce (default 3). Si alza quando la prima divergenza e' piu'
+                in basso: viene passato a ENTRAMBI i motori (SFS_PLY e SF_PLY), che devono avere lo
+                stesso tetto o le righe non si affiancano.
 """
 import subprocess, os, io, sys, tempfile
 
@@ -25,11 +29,15 @@ ORACLE = [ORACOLO_DIR + r'\stockfish.exe']
 FEN = sys.argv[1] if len(sys.argv) > 1 else "8/3k4/8/8/8/4B3/4KB2/2B5 w - - 0 1"
 DEPTH = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 PREFISSO = sys.argv[3] if len(sys.argv) > 3 else "RADICE"
+PLY = int(sys.argv[4]) if len(sys.argv) > 4 else 3
 
 
 def esegui(cmd, cwd, var, extra):
     env = dict(os.environ)
     env[var] = "1"
+    # Tetto di ply delle tracce, uguale sui due motori (SFS_PLY / SF_PLY): senza, le due tracce
+    # contengono insiemi di righe diversi e l'affiancamento posizionale non ha senso.
+    env["SFS_PLY" if var == "SFS_TRACE" else "SF_PLY"] = str(PLY)
     percorso = os.path.join(tempfile.gettempdir(), "traccia_" + var + ".txt")
     with io.open(percorso, 'w', encoding='utf-8', errors='ignore') as ferr:
         p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=ferr,

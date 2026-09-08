@@ -21,6 +21,10 @@
 # Sono le stesse grandezze che il nostro motore stampa con SFS_TRACE=1: si confrontano voce per
 # voce con tools/confronta_traccia.py.
 #
+# SF_PLY fissa il tetto di ply delle tracce (default 3; quelle di quiescenza usano SF_PLY+2), cosi'
+# si puo' scendere di livello SENZA ricompilare. Il nostro motore ha SFS_PLY, e confronta_traccia.py
+# passa lo stesso valore a entrambi: se i due tetti differiscono le tracce non si affiancano.
+#
 # COME SI USA
 #   cd ProgettiVS && mkdir -p oracolo-build
 #   cp -r stockfish-upstream-reference/src stockfish-upstream-reference/scripts oracolo-build/
@@ -38,7 +42,7 @@
 # stderr si riempie e il processo si BLOCCA senza mai emettere "bestmove".
 #
 --- stockfish-upstream-reference/src/search.cpp	2026-09-05 13:35:36.126498700 +0200
-+++ oracolo-build/src/search.cpp	2026-09-08 21:01:18.229134600 +0200
++++ oracolo-build/src/search.cpp	2026-09-08 21:18:52.055869400 +0200
 @@ -116,6 +116,11 @@
      constexpr int nonPawnWeight = 186;
      auto&         shared        = workerThread.sharedHistory;
@@ -51,7 +55,21 @@
      shared.pawn_correction_entry(pos)[us].pawn << bonus;
      shared.minor_piece_correction_entry(pos)[us].minor << bonus * 150 / 128;
      shared.nonpawn_correction_entry<WHITE>(pos)[us].nonPawnWhite << bonus * nonPawnWeight / 128;
-@@ -787,7 +792,13 @@
+@@ -132,6 +137,13 @@
+ 
+ // Add a small random component to draw evaluations to avoid 3-fold blindness
+ Value value_draw(usize nodes) { return VALUE_DRAW - 1 + Value(nodes & 0x2); }
++
++// Tetto di ply delle tracce di audit, da SF_PLY (default 3): evita di ricompilare l'oracolo ogni
++// volta che serve scendere di un livello.
++int traccia_ply_max() {
++    static const int v = std::getenv("SF_PLY") ? atoi(std::getenv("SF_PLY")) : 3;
++    return v;
++}
+ Value value_to_tt(Value v, int ply);
+ Value value_from_tt(Value v, int ply, int r50c);
+ void  update_continuation_histories(Stack* ss, Piece pc, Square to, int bonus);
+@@ -787,7 +799,13 @@
          // Step 2. Check for aborted search or immediate draw
          if (threads.stop.load(std::memory_order_relaxed) || pos.is_draw(ss->ply)
              || ss->ply >= MAX_PLY)
@@ -65,11 +83,11 @@
  
          // Step 3. Mate distance pruning. Even if we mate at the next move our score
          // would be at best mate_in(ss->ply + 1), but if alpha is already bigger because
-@@ -975,14 +986,32 @@
+@@ -975,14 +993,32 @@
      if (ss->inCheck)
          goto moves_loop;
  
-+    if (ss->ply <= 3 && std::getenv("SF_TRACE"))
++    if (ss->ply <= traccia_ply_max() && std::getenv("SF_TRACE"))
 +        std::cerr << "    EVALDIFF ply=" << ss->ply << " d=" << depth
 +                  << " okMossa=" << ((ss - 1)->currentMove).is_ok()
 +                  << " parentInCheck=" << ((ss - 1)->inCheck ? 1 : 0)
@@ -98,7 +116,7 @@
      }
  
  
-@@ -996,6 +1025,16 @@
+@@ -996,6 +1032,16 @@
      if (!ss->ttPv && depth < (seekMate ? 6 : 19) && eval >= beta && (!ttData.move || ttCapture)
          && !is_loss(beta) && !is_win(eval))
      {
@@ -115,7 +133,7 @@
          Value futilityMult = std::min(45 + depth * 4, 85);
          futilityMult -= 20 * !ss->ttHit;
  
-@@ -1303,6 +1342,7 @@
+@@ -1303,6 +1349,7 @@
          }
  
          u64 nodeCount = rootNode ? u64(nodes) : 0;
@@ -123,7 +141,7 @@
  
          // Step 17. Make the move
          do_move(pos, move, st, givesCheck, ss);
-@@ -1339,6 +1379,18 @@
+@@ -1339,6 +1386,18 @@
          else if (move == ttData.move)
              r -= 2179;
  
@@ -142,20 +160,24 @@
          if (capture)
              ss->statScore = 873 * int(PieceValue[pos.captured_piece()]) / 128
                            + captureHistory[movedPiece][move.to_sq()][type_of(pos.captured_piece())];
-@@ -1434,6 +1486,12 @@
+@@ -1434,6 +1493,16 @@
          if (threads.stop.load(std::memory_order_relaxed))
              return VALUE_ZERO;
  
-+        if (ss->ply <= 3 && std::getenv("SF_TRACE"))
++        if (ss->ply <= traccia_ply_max() && std::getenv("SF_TRACE"))
 +            std::cerr << "  PLY" << ss->ply << " d=" << depth << " mc=" << moveCount << " " << UCIEngine::move(move, false)
 +                      << " score=" << value << " alpha=" << alpha << " beta=" << beta
 +                      << " costo=" << (nodes - nodeCountTraccia) << " nodi=" << nodes << " r=" << r << " newDepth=" << newDepth << " ttHit=" << ss->ttHit << " ttMove=" << (ttData.move ? UCIEngine::move(ttData.move, false) : std::string("none")) << " sts=" << ss->statScore << " corr=" << correctionValue << " pv=" << PvNode << " cut=" << cutNode
-+                      << " mh=" << traccia_mh << " c0=" << traccia_c0 << " c1=" << traccia_c1 << std::endl;
++                      << " mh=" << traccia_mh << " c0=" << traccia_c0 << " c1=" << traccia_c1
++                      << " eval=" << eval << " ttPv=" << (ss->ttPv ? 1 : 0)
++                      << " ttCap=" << (ttCapture ? 1 : 0) << " impr=" << (improving ? 1 : 0)
++                      << " ttD=" << ttData.depth << " ttV=" << ttData.value
++                      << " base=" << reduction(improving, depth, moveCount, beta - alpha) << " ttB=" << int(ttData.bound) << " inCk=" << (ss->inCheck?1:0) << " exc=" << (excludedMove?1:0) << std::endl;
 +
          if (rootNode)
          {
              RootMove& rm = *std::find(rootMoves.begin(), rootMoves.end(), move);
-@@ -1594,10 +1652,17 @@
+@@ -1594,10 +1663,17 @@
          update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq,
                                        scaledBonus * 263 / 16384);
  
@@ -173,7 +195,7 @@
      }
  
      // Bonus for prior capture countermove that caused the fail low
-@@ -1634,6 +1699,10 @@
+@@ -1634,6 +1710,10 @@
          auto bonus =
            std::clamp(int(bestValue - ss->staticEval) * depth * (bestMove ? 12 : 18) / 128,
                       -CORRECTION_HISTORY_LIMIT / 4, CORRECTION_HISTORY_LIMIT / 4);
@@ -184,12 +206,12 @@
          update_correction_history(pos, ss, *this, 1061 * bonus / 1024);
      }
  
-@@ -1757,6 +1826,12 @@
+@@ -1757,6 +1837,12 @@
              alpha = bestValue;
  
          futilityBase = ss->staticEval + 306;
 +
-+        if (ss->ply <= 5 && std::getenv("SF_TRACE"))
++        if (ss->ply <= traccia_ply_max() + 2 && std::getenv("SF_TRACE"))
 +            std::cerr << "  QIN" << ss->ply << " alpha=" << alpha << " beta=" << beta
 +                      << " best=" << bestValue << " statico=" << ss->staticEval
 +                      << " fbase=" << futilityBase << " ttHit=" << (ss->ttHit ? 1 : 0)
@@ -197,11 +219,11 @@
      }
  
      const PieceToHistory* contHist[] = {(ss - 1)->continuationHistory};
-@@ -1783,6 +1858,12 @@
+@@ -1783,6 +1869,12 @@
  
          moveCount++;
  
-+        if (ss->ply <= 5 && std::getenv("SF_TRACE"))
++        if (ss->ply <= traccia_ply_max() + 2 && std::getenv("SF_TRACE"))
 +            std::cerr << "  QGEN" << ss->ply << " mc=" << moveCount << " " << UCIEngine::move(move, false)
 +                      << " cap=" << (capture ? 1 : 0) << " chk=" << (givesCheck ? 1 : 0)
 +                      << " prevSq=" << (prevSq == SQ_NONE ? std::string("none") : UCIEngine::square(prevSq))
@@ -210,12 +232,12 @@
          // Step 6. Pruning
          if (!is_loss(bestValue))
          {
-@@ -1824,6 +1905,12 @@
+@@ -1824,6 +1916,12 @@
          do_move(pos, move, st, givesCheck, ss);
  
          value = -qsearch<nodeType>(pos, ss + 1, -beta, -alpha);
 +
-+        if (ss->ply <= 5 && std::getenv("SF_TRACE"))
++        if (ss->ply <= traccia_ply_max() + 2 && std::getenv("SF_TRACE"))
 +            std::cerr << "  QS" << ss->ply << " mc=" << moveCount << " " << UCIEngine::move(move, false)
 +                      << " score=" << value << " alpha=" << alpha << " beta=" << beta
 +                      << " nodi=" << nodes << std::endl;
@@ -223,7 +245,7 @@
          undo_move(pos, move);
  
          assert(value > -VALUE_INFINITE && value < VALUE_INFINITE);
-@@ -2046,6 +2133,9 @@
+@@ -2046,6 +2144,9 @@
    const Position& pos, Stack* ss, Search::Worker& workerThread, Move move, int bonus) {
  
      Color us = pos.side_to_move();
@@ -233,7 +255,7 @@
      workerThread.mainHistory[us][move.raw()] << bonus;  // Untuned to prevent duplicate effort
  
      if (ss->ply < LOW_PLY_HISTORY_SIZE)
-@@ -2053,6 +2143,8 @@
+@@ -2053,6 +2154,8 @@
  
      update_continuation_histories(ss, pos.moved_piece(move), move.to_sq(), bonus * 750 / 1024);
  

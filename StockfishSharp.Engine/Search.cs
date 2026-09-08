@@ -425,6 +425,14 @@ public sealed class Search
     /// Essendo <c>static readonly</c>, a traccia spenta il JIT elimina del tutto i rami: costo zero.</summary>
     public static readonly bool Traccia = Environment.GetEnvironmentVariable("SFS_TRACE") == "1";
 
+    /// <summary>Tetto di ply delle tracce di audit, da SFS_PLY (default 3). Serve a scendere di
+    /// livello quando la prima divergenza e' piu' in basso, senza ricompilare — l'oracolo ha lo
+    /// stesso comando (SF_PLY), e i due tetti vanno tenuti UGUALI o le tracce non si affiancano
+    /// (tools/confronta_traccia.py lo passa a entrambi). Le tracce di quiescenza usano questo
+    /// valore + 2, come nell'oracolo.</summary>
+    public static readonly int TracciaPlyMax =
+        int.TryParse(Environment.GetEnvironmentVariable("SFS_PLY"), out int plyTraccia) ? plyTraccia : 3;
+
     private readonly MovePicker[] _movePickerPool = BuildMovePickerPool();
 
     private static MovePicker[] BuildMovePickerPool()
@@ -1597,7 +1605,7 @@ public sealed class Search
             // statica e quella di qui aggiorna sempre la sua main history (e, se non era un
             // pedone/promozione e non c'è già un hit di TT qui, anche la sua pawn history).
             Move parentMoveForEvalDiff = _currentMoveHistory[ply + StackOffset - 1];
-            if (Traccia && ply <= 3)
+            if (Traccia && ply <= TracciaPlyMax)
                 Console.Error.WriteLine($"    EVALDIFF ply={ply} d={depth} okMossa={(parentMoveForEvalDiff.IsOk ? 1 : 0)}"
                     + $" parentInCheck={(_inCheckHistory[ply + StackOffset - 1] ? 1 : 0)}"
                     + $" priorCapture={(pos.CapturedPiece() != Piece.None ? 1 : 0)}"
@@ -1840,7 +1848,6 @@ public sealed class Search
         mp.Init(pos, _movePick, ttMove, depth, ply, contRefs,
             _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
 
-        int origAlpha = alpha;
         int value = tbBestValueFloor ?? -Infinity; // Step 1 della fonte, search.cpp:769: bestValue = -VALUE_INFINITE (salvo il floor dello Step 7)
         Move? bestMove = null;
         int moveCount = 0; // search.cpp:1116
@@ -2171,7 +2178,7 @@ public sealed class Search
             pos.UndoMove(m);
             _accumulatorStack.Pop();
 
-            if (Traccia && ply <= 3)
+            if (Traccia && ply <= TracciaPlyMax)
             {
                 Console.Error.WriteLine($"  PLY{ply} d={depth} mc={moveCount} {m.FromSq.ToString().ToLower()}{m.ToSq.ToString().ToLower()}"
                     + $"{(m.TypeOf == MoveType.Promotion ? char.ToLower(m.PromotionType.ToString()[0]).ToString() : "")}"
@@ -2179,7 +2186,11 @@ public sealed class Search
                     + $" nodi={_nodes} r={r} newDepth={newDepth} ttHit={(probe.Found ? 1 : 0)}"
                     + $" ttMove={(ttMove == Move.None ? "none" : ttMove.FromSq.ToString().ToLower() + ttMove.ToSq.ToString().ToLower())}"
                     + $" sts={_statScoreHistory[ply + StackOffset]} corr={correctionValue} pv={(isPvNode ? 1 : 0)} cut={(cutNode ? 1 : 0)}"
-                    + $" mh={tracciaMh} c0={tracciaC0} c1={tracciaC1}");
+                    + $" mh={tracciaMh} c0={tracciaC0} c1={tracciaC1}"
+                    + $" eval={eval} ttPv={(ttPv ? 1 : 0)} ttCap={(ttCapture ? 1 : 0)}"
+                    + $" impr={(improving ? 1 : 0)} ttD={probe.Data.Depth} ttV={ttScore}"
+                    + $" base={Reduction(improving, depth, moveCount, beta - alpha)}"
+                    + $" ttB={(int)probe.Data.Bound} inCk={(inCheck ? 1 : 0)} exc={(excludedMove != default ? 1 : 0)}");
             }
 
 
@@ -2408,7 +2419,28 @@ public sealed class Search
         // finché MultiPV non è portato).
         if (excludedMove == default && !(ply == 0 && _pvIdx != 0))
         {
-            var flag = value <= origAlpha ? Bound.Upper : value >= beta ? Bound.Lower : Bound.Exact;
+            // search.cpp:1622-1624, trascritto alla lettera:
+            //   bestValue >= beta ? BOUND_LOWER : PvNode && bestMove ? BOUND_EXACT : BOUND_UPPER
+            // Fino al 2026-09-08 qui c'era una formula NOSTRA basata su un "origAlpha" salvato a
+            // inizio ciclo mosse: "value <= origAlpha ? Upper : value >= beta ? Lower : Exact".
+            // Nei nodi non-PV le due coincidono (beta == alpha+1 non lascia spazio a Exact), ma
+            // nei nodi PV no: la fonte NON guarda l'alpha iniziale, guarda se esiste una bestMove.
+            // Le due divergono, per esempio, quando il nodo non ha nessuna mossa legale (matto o
+            // stallo): li' bestMove e' assente e la fonte scrive UPPER, mentre noi scrivevamo
+            // EXACT se il punteggio superava origAlpha. E divergono ogni volta che alpha e' stato
+            // alzato PRIMA del ciclo (ripetizione imminente, pavimento da tablebase, mate distance
+            // pruning) rispetto al momento in cui salvavamo origAlpha.
+            //
+            // Non e' cosmetico: il bound e' una MASCHERA DI BIT letta da chiunque ritrovi questa
+            // posizione (Step 4 e la sostituzione "ttValue can be used as a better position
+            // evaluation", search.cpp:842-845). Trovato su
+            // "4r1k1/r1q2ppp/ppp2n2/4P3/5Rb1/1N1BQ3/PPP3PP/R5K1 w - - 1 17" a profondita' 9: allo
+            // stesso nodo la entry aveva ttB=1 (Upper) da noi e ttB=3 (Exact) nella fonte, con
+            // valore e profondita' identici — e per questo la fonte sostituiva eval=364 mentre noi
+            // restavamo alla valutazione statica (-8), sbagliando la riduzione LMR di 379.
+            var flag = value >= beta ? Bound.Lower
+                     : isPvNode && bestMove != null ? Bound.Exact
+                     : Bound.Upper;
             // search.cpp:1626 — "moveCount != 0 ? depth : std::min(MAX_PLY - 1, depth + 6)": un
             // nodo senza NESSUNA mossa legale (matto/stallo) e' un fatto definitivo, non una
             // stima a profondita' "depth", quindi si memorizza con profondita' maggiorata perche'
@@ -2539,7 +2571,7 @@ public sealed class Search
 
             futilityBase = _staticEvalHistory[ply + StackOffset] + 306;
 
-            if (Traccia && ply <= 5)
+            if (Traccia && ply <= TracciaPlyMax + 2)
                 Console.Error.WriteLine($"  QIN{ply} alpha={alpha} beta={beta} best={bestValue}"
                     + $" statico={_staticEvalHistory[ply + StackOffset]} fbase={futilityBase}"
                     + $" ttHit={(probe.Found ? 1 : 0)} ttVal={ttScore}");
@@ -2571,7 +2603,7 @@ public sealed class Search
 
             moveCount++;
 
-            if (Traccia && ply <= 5)
+            if (Traccia && ply <= TracciaPlyMax + 2)
                 Console.Error.WriteLine($"  QGEN{ply} mc={moveCount} {m.FromSq.ToString().ToLower()}{m.ToSq.ToString().ToLower()}"
                     + $" cap={(capture ? 1 : 0)} chk={(givesCheck ? 1 : 0)} prevSq={prevSq.ToString().ToLower()}"
                     + $" alpha={alpha} fbase={futilityBase}");
@@ -2625,7 +2657,7 @@ public sealed class Search
             pos.DoMove(m, st, givesCheck, qFrame.DirtyThreats, qFrame.DirtyPiece, qFrame.DirtyPawnPairs);
             int score = -Quiesce(pos, -beta, -alpha, ply + 1, isPvNode);
 
-            if (Traccia && ply <= 5)
+            if (Traccia && ply <= TracciaPlyMax + 2)
                 Console.Error.WriteLine($"  QS{ply} mc={moveCount} {m.FromSq.ToString().ToLower()}{m.ToSq.ToString().ToLower()}"
                     + $"{(m.TypeOf == MoveType.Promotion ? char.ToLower(m.PromotionType.ToString()[0]).ToString() : "")}"
                     + $" score={score} alpha={alpha} beta={beta} nodi={_nodes}");

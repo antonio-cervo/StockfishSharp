@@ -142,6 +142,35 @@ posizioni di matto/stallo dove l'oracolo non stampa la riga info — artefatto d
 `4k3/3q1r2/1N2r1b1/3ppN2/2nPP3/1B1R2n1/2R1Q3/3K4 w - - 5 1` (1.821 contro 1.050, l'unica dove ne
 usiamo molti di piu').
 
+## RISOLTA: il BOUND scritto in TT usava una formula nostra
+
+`4r1k1/r1q2ppp/ppp2n2/4P3/5Rb1/1N1BQ3/PPP3PP/R5K1 w - - 1 17`, 5.667 nodi contro 5.798 a
+profondita' 9 (e 5.837 contro 8.545 a 10). Iterazioni 1-8 identiche.
+
+Fonte (search.cpp:1622-1624):
+
+```cpp
+bestValue >= beta    ? BOUND_LOWER
+: PvNode && bestMove ? BOUND_EXACT
+                     : BOUND_UPPER
+```
+
+Nostro, fino al 2026-09-08: `value <= origAlpha ? Upper : value >= beta ? Lower : Exact`, con
+`origAlpha` salvato all'inizio del ciclo mosse. Nei nodi NON-PV le due coincidono (con
+`beta == alpha + 1` non resta spazio per Exact), nei nodi PV **no**: la fonte non guarda l'alpha
+iniziale, guarda se esiste una `bestMove`. Divergono quando il nodo non ha nessuna mossa legale
+(matto o stallo: nessuna bestMove, la fonte scrive UPPER) e ogni volta che alpha e' stato alzato
+prima del ciclo — ripetizione imminente, pavimento da tablebase, mate distance pruning — rispetto a
+dove salvavamo `origAlpha`.
+
+Non e' cosmetico: il bound e' una **maschera di bit** letta da chiunque ritrovi la posizione, sia
+per il taglio di Step 4 sia per la sostituzione *"ttValue can be used as a better position
+evaluation"* (search.cpp:842-845). Allo stesso nodo la entry aveva `ttB=1` (Upper) da noi e `ttB=3`
+(Exact) nella fonte, **con valore e profondita' identici**: la fonte sostituiva quindi `eval=364`
+mentre noi restavamo alla valutazione statica `-8`, e la riduzione LMR usciva sbagliata di 379.
+
+Dopo la correzione la posizione coincide a profondita' 9 e 10 (5.798 e 8.545 nodi, stessa PV).
+
 ## RISOLTA: il filtro di legalita' scorreva la lista ALL'INDIETRO
 
 E' la causa del lead "3 nodi di quiescenza" rimasto aperto per piu' sessioni
