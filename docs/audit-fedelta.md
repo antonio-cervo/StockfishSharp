@@ -61,6 +61,53 @@ Tre livelli, in ordine di costo crescente. Nessuno da solo basta — l'hanno dim
 Regola operativa: **ogni riga vagliata va annotata qui sotto**, con l'esito, cosi' le sessioni
 successive non la riesaminino da capo. Un audit che si ripete da zero ogni volta non converge.
 
+## Grado di fedelta' DI GIOCO (misure del 2026-09-08 sera)
+
+Non e' la fedelta' del codice: e' quanto il motore SCEGLIE le stesse mosse dell'oracolo. Vanno
+separati due fattori, altrimenti si confonde "pensa diversamente" con "e' piu' lento".
+
+### A parita' di PROFONDITA' (fedelta' depurata dalla velocita')
+
+`python tools/accordo_profondita.py 1 3 6 9 12` — 54 posizioni, 1 thread:
+
+| profondita' | stessa mossa | scarto di punteggio (mediana / peggiore) |
+|---|---|---|
+| 1 | 49/54 = 90,7% | **0 cp / 0 cp** |
+| 3 | 43/54 = 79,6% | 0 cp / 35 cp |
+| 6 | 41/54 = 75,9% | 6 cp / 168 cp |
+| 9 | 37/54 = 68,5% | 25 cp / 108 cp |
+| 12 | 40/54 = 74,1% | 23 cp / 236 cp |
+
+Lettura: **alla foglia siamo identici** — a profondita' 1 lo scarto di punteggio e' zero su tutte e
+54 le posizioni, il che convalida insieme valutazione NNUE e quiescenza. Da li' in su l'accordo
+scende e si assesta sul 70-75%: e' la ricerca a divergere, non la valutazione.
+
+Le 5 posizioni che a profondita' 1 danno mossa diversa hanno punteggio IDENTICO: sono pareggi di
+punteggio rotti in modo diverso alla radice. **Lead piccolo e pulito, piu' promettente dei 3 nodi di
+quiescenza.**
+
+### A parita' di TEMPO (quello che conta in partita)
+
+`python tools/quality.py 2000 1` — 51 posizioni, 2 s, verita' congelata:
+
+| | accordo | profondita' media raggiunta |
+|---|---|---|
+| oracolo, stesso budget | 49/51 = 96,1% | 32,5 |
+| noi | 41-42/51 = 80-82% | 19,3 |
+
+### Perche' il divario a tempo e' piu' grande di quello a profondita'
+
+**Non e' il fattore di ramificazione.** Misurato su 3 posizioni a profondita' 10-16: nei mediogiochi
+usiamo un numero di nodi COMPARABILE o INFERIORE all'oracolo (rapporto 0,46-0,66 a d13-d16), e sul
+bench a profondita' 13 stiamo a 2,24 M contro 2,50 M.
+
+E' la VELOCITA' GREZZA: 398.000 nodi/s contro 1.600.000, cioe' **4,0x**. E' il divario C# contro C++
+con intrinseche AVX2 sulla rete, non un difetto di fedelta'.
+
+**Anomalia trovata proprio con questa misura**: nel finale `8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11`
+il rapporto di nodi esplode a **12-13x** a profondita' 11-13 (68.620 contro 5.624), per poi
+rientrare a 1,1x da d14. Non e' spiegato: candidato prioritario per la prossima sessione.
+
 ## Strumenti di misura (tools/)
 
 - `audit_fedelta.py` — audit istruzione per istruzione fonte/porting (vedi sotto).
