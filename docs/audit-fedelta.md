@@ -333,6 +333,7 @@ helper troppo profondi" (falso: sono a 13-17), poi "e' la profondita' che scappa
 **Nota a margine trovata durante l'indagine**: `Position.IsDraw` alloca un `new List<Move>()` a ogni
 chiamata con `rule50 > 99` e re sotto scacco. Su questo percorso e' caldissimo (84 milioni di nodi
 con r50 > 99 in una singola esecuzione). Non e' la causa del blocco, ma va convertito a buffer.
+**FATTO**: `Position._drawScratch` (e `_pseudoLegalScratch` per il gemello in `PseudoLegal`).
 
 ### 2. Divergenza di punteggio a profondita' medie
 
@@ -342,6 +343,25 @@ piu' in fondo (posizione "tattica" da d2 a d9, esatta fino a d5). Reproducer piu
 `r1bbk1nr/pp3p1p/2n5/1N4p1/2Np1B2/8/PPP2PPP/2KR1B1R w kq - 0 13`, che diverge gia' a **profondita'
 2** pur essendo esatto a profondita' 1: a quella profondita' l'albero e' abbastanza piccolo da
 confrontarlo nodo per nodo.
+
+### 2-bis. Efficienza parallela — misura di riferimento (2026-09-08)
+
+Ripresa DOPO il taglio delle allocazioni (127,3 -> 4,4 byte/nodo), con controllo sull'oracolo nelle
+stesse identiche condizioni (`bench 128 <thread> 13`, stessa macchina, 8 core fisici + HT):
+
+| thread | nostro nodi/s | speedup | oracolo nodi/s | speedup |
+|---|---|---|---|---|
+| 1 | 340.450 | 1,00x | 1.600.816 | 1,00x |
+| 2 | 613.419 | 1,80x | 3.326.779 | 2,08x |
+| 4 | 1.135.672 | 3,34x | 6.023.549 | 3,76x |
+| 8 | 1.825.504 | **5,36x** | 10.946.919 | **6,84x** |
+
+Il divario di SCALABILITA' si e' ridotto ma non chiuso: 4,92x -> 5,36x contro i 6,84x dell'oracolo
+(dal 73% al 78% della sua scalabilita'). Quindi la pressione sul GC **contribuiva** ma non era la
+causa principale: resta da cercare altrove (contesa sulla TT, `Interlocked`, false sharing).
+
+Il divario di VELOCITA' ASSOLUTA e' un'altra cosa e non e' un difetto di fedelta': 4,7x a 1 thread,
+atteso fra C# e C++ con intrinseche AVX2 sulla NNUE.
 
 ### 3. Checklist dello strumento, da vagliare
 
