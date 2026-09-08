@@ -68,6 +68,9 @@ long moveOverhead = 10; // timeman.cpp:67, options["Move Overhead"] — ora lett
 
 void UpdateSyzygyOptions() => search.SetSyzygyOptions(syzygy50MoveRule, syzygyProbeDepth, syzygyProbeLimit);
 UpdateSyzygyOptions();
+// Usato SOLO da "bench ... movetime": lì la fonte passa comunque un limite di profondità formale
+// (benchmark.cpp costruisce "go movetime N", e il ciclo si ferma sul tempo). NON è più il tetto di
+// "go" con orologio reale — vedi la nota in HandleGo, dove la regola è quella della fonte.
 int maxDepth = 30;
 
 // Infrastruttura opzioni generica (ucioption.h/ucioption.cpp, porting fedele in OptionsMap.cs) —
@@ -769,14 +772,21 @@ void HandleGo(string[] toks)
         }
     }
 
-    // search.cpp:333 — l'unico vero limite del ciclo di iterative deepening è MAX_PLY (qui
-    // Ply.MaxPly), non un "maxDepth" arbitrario: mentre si sta pondering con orologio reale usiamo
-    // lo stesso tetto pratico della fonte, invece del maxDepth=30 usuale, così una sessione di
-    // pondering lunga può davvero approfittarne per scavare più a fondo invece di fermarsi presto
-    // a una profondità arbitraria (il fallback WaitWhilePondering sopra copre comunque il caso in
-    // cui anche Ply.MaxPly venga raggiunto, o "go ponder depth N" lo richieda esplicitamente).
-    int effectiveMaxDepth = ponderGo && isPondering != null ? Ply.MaxPly - 1 : maxDepth;
-    int depth = depthArg.HasValue ? (int)Math.Min(depthArg.Value, effectiveMaxDepth) : effectiveMaxDepth;
+    // search.cpp:332-334 — "while (rootDepth + 1 < MAX_PLY && !threads.stop && !(limits.depth &&
+    // mainThread && rootDepth >= limits.depth))": un limite di profondità esiste SOLO se la GUI ha
+    // mandato "go depth N". Altrimenti il ciclo va fino a MAX_PLY e a fermarlo è unicamente la
+    // gestione del tempo.
+    //
+    // Fino al 2026-09-09 qui c'era un tetto fisso a 30 applicato SEMPRE, anche con orologio reale.
+    // Misurato su 10 finali con 5 minuti + 3 s: mordeva in 8 casi su 10, e ci faceva usare 4,4 s
+    // medi contro i 18,5 s dell'oracolo — cioè lasciavamo inutilizzati tre quarti del budget
+    // proprio nei finali, dove la profondità utile è molto più alta che nel mediogioco. La mossa
+    // scelta restava la stessa su tutte e 10, quindi non era una perdita di forza MISURATA su
+    // quell'insieme; era però una differenza reale dalla fonte, e su finali più difficili di questi
+    // la profondità che non spendiamo è forza che non usiamo.
+    int depth = depthArg.HasValue
+        ? (int)Math.Min(depthArg.Value, Ply.MaxPly - 1)
+        : Ply.MaxPly - 1;
 
     var pos = position; // stesso oggetto Position: il client UCI non deve mandare "position"/"go"
                         // finché non riceve "bestmove" o manda "stop" prima (regola del protocollo).
