@@ -1248,8 +1248,17 @@ public sealed class Search
             unadjustedStaticEval = probe.Found && Values.IsValid(probe.Data.Eval) ? probe.Data.Eval : Evaluate.StaticEval(pos, _accumulatorStack, Optimism(pos.SideToMove));
             staticEval = eval = ToCorrectedStaticEval(unadjustedStaticEval, correctionValue);
 
+            // search.cpp:842-845 — "ttValue can be used as a better position evaluation".
+            // ATTENZIONE al confronto: la fonte usa una MASCHERA DI BIT, non un'uguaglianza.
+            // Bound.Exact vale 3 = Lower|Upper, quindi con "&" un'entry esatta soddisfa ENTRAMBI
+            // i casi, mentre con "==" non ne soddisfa NESSUNO. Fino al 2026-09-08 qui c'era "==":
+            // alla radice l'entry scritta dall'iterazione precedente e' sempre esatta, quindi la
+            // sostituzione non avveniva MAI li' — "eval" restava la valutazione statica invece del
+            // valore di ricerca. Effetto a valle: il termine "3 * clamp(alpha - eval, -64, 96)"
+            // della riduzione LMR era sbagliato di centinaia di unita', cambiando la profondita'
+            // a cui ogni mossa di radice veniva cercata.
             if (Values.IsValid(ttScore)
-                && (probe.Data.Bound == (ttScore > eval ? Bound.Lower : Bound.Upper)))
+                && (probe.Data.Bound & (ttScore > eval ? Bound.Lower : Bound.Upper)) != Bound.None)
                 eval = ttScore;
 
             if (!probe.Found)
@@ -1918,6 +1927,7 @@ public sealed class Search
 
             pos.UndoMove(m);
             _accumulatorStack.Pop();
+
 
             // Bookkeeping delle rootMoves, search.cpp:1437-1506 — SOLO alla radice, PRIMA
             // dell'aggiornamento generico di bestValue/alpha (Step 22 sotto, search.cpp:1508-1541):
