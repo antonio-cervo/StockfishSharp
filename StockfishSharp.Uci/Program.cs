@@ -144,6 +144,18 @@ optionsMap.Add("Clear Hash", new Option(_ =>
 // suo valore (engine.cpp non la legge mai in Engine::go/set_ponderhit).
 optionsMap.Add("Ponder", new Option(false));
 
+// "OwnBook": non esiste nella fonte (Stockfish non ha un libro integrato) ed e' l'interruttore del
+// nostro Flow D1. Serve soprattutto a MISURARE: con il libro attivo il motore risponde senza
+// cercare, e ogni confronto mossa-per-mossa con l'oracolo su posizioni coperte dal libro misura il
+// libro invece della ricerca. Errore commesso davvero il 2026-09-08: la posizione iniziale
+// risultava un "disaccordo" con l'oracolo a ogni profondita', ed era solo il libro.
+bool useBook = true;
+optionsMap.Add("OwnBook", new Option(true, o =>
+{
+    useBook = (bool)o;
+    return null;
+}));
+
 // MultiPV: la ricerca resta a _pvIdx sempre 0 (RootMove/RootMoves nota, "manca ancora") —
 // impostare un valore >1 è accettato ma non produce PV multiple.
 optionsMap.Add("MultiPV", new Option(1, 1, 256));
@@ -621,7 +633,7 @@ void HandleGo(string[] toks)
     // ricerca vera — stessa logica di ACMyChess.Uci/Program.cs. Gira comunque in background (come
     // il ramo di ricerca vera sotto): se stiamo pondering deve poter aspettare "ponderhit"/"stop"
     // senza bloccare il ciclo comandi che li riceve.
-    if (position.GamePly < BookMaxPlies)
+    if (useBook && position.GamePly < BookMaxPlies)
     {
         Move? bookMove = book?.TryGetMove(position);
         if (bookMove.HasValue)
