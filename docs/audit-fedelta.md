@@ -31,6 +31,33 @@ Tre livelli, in ordine di costo crescente. Nessuno da solo basta — l'hanno dim
    dopo, e leggeva quindi una `depth` non ancora aggiustata dall'hindsight. Lo strumento segnala i
    candidati "in disordine"; vanno confrontati a mano con la sequenza della fonte.
 
+4. **SEMANTICA TEMPORALE** — *quando* un valore viene letto rispetto alle mutazioni di stato. E' la
+   classe che l'audit testuale NON puo' vedere: la riga esiste e combacia con la fonte, sbaglia solo
+   il momento. Ha prodotto due bug su due tentativi:
+   - `ComputeStatScore` leggeva pezzo catturato, pezzo mosso e colore DOPO `DoMove` (statScore
+     gonfiato 7 volte, riduzione LMR negativa, bench multi-thread bloccato);
+   - il bonus post-LMR passava `pos.MovedPiece(m)` dopo la mossa, ottenendo `Piece.None` e scrivendo
+     nel piano `NO_PIECE` della continuation history — quello che va solo LETTO come valore di
+     riserva.
+
+   **Come si applica**: marcare ogni riga come PRE o POST rispetto a `DoMove`/`DoNullMove`, poi
+   verificare che ogni chiamata POST riceva i valori pre-mossa come PARAMETRI (nella fonte sono
+   `movedPiece`, `us`, `pos.captured_piece()`, catturati agli Step 1 e 14). Fatto su `Search.cs`:
+   restano solo due chiamate POST, entrambe ora corrette. **Da rifare su ogni file che muta stato.**
+
+5. **ASSUNZIONI DICHIARATE NEI COMMENTI** — ogni "sempre / mai / per costruzione / semplificazione /
+   non serve" e' una deviazione auto-dichiarata, quindi un candidato. E i commenti INVECCHIANO: due
+   ne ho trovati che affermavano il falso perche' il codice era cambiato dopo.
+
+   Ha prodotto il bug delle guardie del voto: un commento sosteneva che `IsInexact` fosse "sempre
+   falso per costruzione". Vero per il thread principale, **falso per gli helper**, cancellati a
+   meta' iterazione — cioe' esattamente il caso che il commento della FONTE descrive ("Aborted (d1)
+   searches may lead to inexact win (or loss) scores").
+
+   **Come si applica**: `grep` delle formule assolute nei commenti, poi verifica di ciascuna contro
+   il codice ATTUALE. Sono 55 in tutto il repo; vagliate finora quelle di `SearchThreadPool.cs`,
+   `RootMove.cs` e la testata di `Search.cs`.
+
 Regola operativa: **ogni riga vagliata va annotata qui sotto**, con l'esito, cosi' le sessioni
 successive non la riesaminino da capo. Un audit che si ripete da zero ogni volta non converge.
 

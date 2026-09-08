@@ -29,7 +29,16 @@
 // rootMoves[0].pv[0]/.score/.pv/.selDepth (la nostra ricerca completa sempre l'ultima iterazione a
 // finestra piena, quindi "IsInexact" è sempre falso per costruzione — non serve rappresentarlo).
 // La formula di voto stessa (punteggio - minimo + 14, preferenza al mate più corto/lungo quando
-// decisivo) è portata fedele.
+// decisivo) è portata fedele, incluse le due guardie sul flag "decisivo" (score != -VALUE_INFINITE
+// e !is_inexact, thread.cpp:378-384) e lo spareggio sulla lunghezza della PV.
+//
+// NOTA STORICA, da non ripetere: fino al 2026-09-08 questa nota affermava che "IsInexact è sempre
+// falso per costruzione perché la nostra ricerca completa sempre l'ultima iterazione a finestra
+// piena". È vero per il thread PRINCIPALE e FALSO per gli helper, che vengono cancellati a metà
+// iterazione — cioè esattamente il caso che il commento della fonte descrive ("Aborted (d1)
+// searches may lead to inexact win (or loss) scores"). Quell'assunzione scritta in un commento ha
+// nascosto il bug per settimane: un helper interrotto poteva vincere il voto incondizionatamente e
+// far giocare la sua mossa.
 
 using StockfishSharp.Engine.Tablebases;
 
@@ -247,7 +256,9 @@ public sealed class SearchThreadPool
             }
             else if (candDecisive
                      || (!Values.IsLoss(cand.ScoreCp)
-                         && (candVotes > bestVotes || (candVotes == bestVotes && cand.Depth > best.Depth))))
+                         && (candVotes > bestVotes
+                             // thread.cpp:392 spareggia sulla LUNGHEZZA DELLA PV, non sulla profondita'.
+                             || (candVotes == bestVotes && cand.Pv.Count > best.Pv.Count))))
             {
                 best = cand;
             }

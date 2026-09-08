@@ -8,9 +8,9 @@
 //
 // Semplificazioni deliberate, dichiarate esplicitamente (nessuna MultiPV/Skill/Lazy SMP portata
 // ancora — vedi Search.cs):
-// - TbRank/TbScore restano sempre 0: Tablebases::rank_root_moves (tbprobe.cpp), che ordina/
-//   restringe le mosse radice via tablebase, non è ancora portato. La sonda "in-tree" (Step 7,
-//   dentro Negamax) è indipendente e già fedele.
+// - TbRank/TbScore: AGGIORNATO 2026-09-06 — Tablebases::rank_root_moves E' portato e opera su
+//   queste RootMove (legge/scrive Pv[0]/TbRank/TbScore), insieme al filtro radice per gruppo di
+//   tbRank (pvFirst/pvLast). La nota precedente diceva "restano sempre 0": non e' piu' vero.
 // - InexactLower/InexactUpper/PreviousScoreExact/UciScore sono già portati fedelmente (servono
 //   anche a MultiPV=1 nel caso "ricerca interrotta a metà della prima PV", search.cpp:443-489) ma
 //   quel ramo (pvIdx>0 durante uno stop) non può mai attivarsi finché multiPV resta fissato a 1.

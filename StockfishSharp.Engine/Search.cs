@@ -41,8 +41,9 @@
 // eseguendo invece della somma su tutti i thread del pool divisa per il loro numero — con thread
 // indipendenti che condividono la stessa posizione, il valore di un singolo thread è già un buon
 // proxy della media (nessuna sincronizzazione cross-thread aggiunta per un guadagno di fedeltà
-// marginale). Non portato: ponder/stopOnPonderhit (il protocollo ponder non è gestito da
-// Program.cs) — il ramo "ferma la ricerca" è quindi sempre quello percorso.
+// marginale). AGGIORNATO 2026-09-07: ponder/stopOnPonderhit SONO portati (Program.cs gestisce
+// "go ponder"/"ponderhit"), quindi il ramo "aspetta il ponderhit" e' realmente percorribile — la
+// nota precedente diceva il contrario.
 // Flow A2 (docs/porting-master-plan.md) iniziato in MovePick.cs: ButterflyHistory (main history)
 // con la formula "a gravità" fedele e i bonus/malus di update_all_stats (solo il ramo mosse
 // quiete). Da qui, corretta anche una semantica pre-esistente di bestMove: si aggiorna SOLO
