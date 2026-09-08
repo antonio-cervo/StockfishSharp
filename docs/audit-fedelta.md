@@ -388,8 +388,22 @@ a dimensione fissa non scalata**. Conseguenze, tutte nella direzione "piu' debol
 3. `_continuationHistory` da sola e' ~8,4 MB per thread (67 MB a 8 thread) contro gli 8,4 MB totali
    della fonte: anche peggio per la cache.
 
-E' il candidato numero uno per il divario di scalabilita' del punto 2-bis (5,36x contro 6,84x) e
-per la differenza di forza a molti thread.
+**PORTATO** lo stesso giorno (commit 66a8c4d, `StockfishSharp.Engine/SharedHistories.cs`).
+Verifiche:
+- **1 thread: nodi IDENTICI** (1.664.300) prima e dopo — con un thread solo il moltiplicatore e' 1
+  e non c'e' nessuno con cui condividere, quindi qualunque differenza avrebbe significato che il
+  refactoring aveva cambiato altro.
+- **8 thread**, `bench 128 8 13`, **4 repliche per ramo** (il Lazy SMP non e' deterministico: una
+  misura sola non direbbe nulla):
+
+  | | nodi per arrivare a profondita' 13 | media |
+  |---|---|---|
+  | prima | 13.879.099 / 12.871.077 / 13.449.691 / 14.060.639 | 13.565.127 |
+  | dopo | 11.205.718 / 12.256.870 / 12.669.593 / 12.860.211 | 12.248.098 |
+
+  **-9,7%**, con i due insiemi che non si sovrappongono (Mann-Whitney p ~ 0,014). Nodi/secondo
+  invariati: il guadagno e' in efficienza della ricerca, non in velocita' grezza — quindi **non**
+  sposta il numero di scalabilita' del punto 2-bis, che e' un rapporto fra nodi/secondo.
 
 Nota di verifica, per non riaprirla: la `CorrectionBundle` unificata della fonte (un solo array
 indicizzato da quattro chiavi diverse) **non e' una differenza**, perche' ogni tipo legge un campo
