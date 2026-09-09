@@ -36,6 +36,7 @@ sotto il minuto e mezzo, quindi due minuti di silenzio non sono lentezza, sono u
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -45,6 +46,9 @@ LOG = os.environ.get("WATCHDOG_LOG",
                      os.path.join(BASE, "lichess_bot_auto_logs", "lichess-bot.log"))
 USCITA = os.path.join(BASE, "watchdog")
 SILENZIO = int(sys.argv[1]) if len(sys.argv) > 1 else 120
+FULL_MAX = 2            # quanti dump COMPLETI al massimo per avvio (738 MB l'uno)
+FULL_GB_MINIMI = 20     # sotto questo spazio libero il Full si salta e restano i Mini
+full_presi = 0
 
 RIGA = re.compile(r"<UciProtocol \(pid=(\d+)\)>: (<<|>>) (.*)$")
 
@@ -81,18 +85,29 @@ def stack(pid):
         return "dotnet-stack fallito: %r" % (e,)
 
 
-def dump(pid, percorso):
-    """Dump completo del processo (~750 MB, raccolto in meno di un secondo). Vale il disco: e' la
-    sola cosa che permette di guardare DOPO anche lo stato degli oggetti, non solo gli stack.
-    Si analizza con:  dotnet-dump analyze <file>   poi  pstacks / clrstack -all / clrthreads."""
+def gb_liberi():
+    try:
+        return shutil.disk_usage(USCITA).free / 1e9
+    except Exception:
+        return 0.0
+
+
+def dump(pid, percorso, tipo):
+    """Dump del processo. Si analizza con:  dotnet-dump analyze <file>  poi pstacks / clrstack -all.
+
+    MISURATO su una ricerca vera (2026-09-09): Mini 2,1 MB in 0,2 s e contiene GIA' tutti gli stack
+    gestiti (la ricorsione di Negamax fino a NnueEvaluate); Full 738 MB in 0,6 s, e in piu' ha lo
+    stato degli oggetti — che per questo bug e' la domanda vera (quanto valeva _softDeadlineMs?
+    la ricerca era ancora dentro un nodo?). Da qui la politica di CatturaDump: il Mini sempre, il
+    Full solo le prime volte e solo con disco abbondante."""
     try:
         r = subprocess.run(["dotnet-dump", "collect", "-p", str(pid), "-o", percorso,
-                            "--type", "Full"], capture_output=True, text=True, timeout=600)
+                            "--type", tipo], capture_output=True, text=True, timeout=600)
         if os.path.exists(percorso):
-            return "dump completo: %s (%.0f MB)" % (percorso, os.path.getsize(percorso) / 1e6)
-        return "dump NON creato: %s" % (r.stdout + r.stderr).strip()[-300:]
+            return "dump %s: %s (%.1f MB)" % (tipo, percorso, os.path.getsize(percorso) / 1e6)
+        return "dump %s NON creato: %s" % (tipo, (r.stdout + r.stderr).strip()[-300:])
     except Exception as e:
-        return "dotnet-dump fallito: %r" % (e,)
+        return "dotnet-dump %s fallito: %r" % (tipo, e)
 
 
 def cattura(pid, contesto, f, nome_base):
@@ -105,9 +120,23 @@ def cattura(pid, contesto, f, nome_base):
         f.write(r + "\n")
     f.write("\n")
 
-    esito = dump(pid, nome_base + ".dmp")
+    # Il Mini costa 2 MB: si prende SEMPRE, quante volte serva.
+    esito = dump(pid, nome_base + ".mini.dmp", "Mini")
     log(esito)
     f.write(esito + "\n")
+
+    # Il Full costa 738 MB: solo le prime FULL_MAX volte, e solo se restano almeno FULL_GB_MINIMI
+    # di disco. Un watchdog che riempie il disco farebbe piu' danni del bug che deve diagnosticare.
+    global full_presi
+    if full_presi >= FULL_MAX:
+        motivo = "Full saltato: gia' presi %d (bastano i Mini per gli stack)" % full_presi
+    elif gb_liberi() < FULL_GB_MINIMI:
+        motivo = "Full saltato: solo %.0f GB liberi (soglia %d GB)" % (gb_liberi(), FULL_GB_MINIMI)
+    else:
+        motivo = dump(pid, nome_base + ".full.dmp", "Full")
+        full_presi += 1
+    log(motivo)
+    f.write(motivo + "\n")
     f.flush()
 
     for i in range(3):
@@ -146,6 +175,7 @@ def main():
     t_go = 0.0
     contesto = []               # ultime righe scambiate, per il rapporto
     gia_catturato = False       # una sola cattura per ricerca
+    base_cattura = None         # cattura in attesa di verdetto: piantamento vero o solo lentezza?
 
     while True:
         riga = f.readline()
@@ -174,6 +204,7 @@ def main():
                                   % (muto_da, time.time() - t_go))
                         cattura(pid, contesto[-12:], out, base)
                     gia_catturato = True
+                    base_cattura = base
                     log("cattura completata: %s" % nome)
             time.sleep(2)
             pos = f.tell()
@@ -195,7 +226,32 @@ def main():
                 t_go = t_ultima_uscita = time.time()
         else:
             t_ultima_uscita = time.time()
+
+            # Il motore ha ripreso a parlare DOPO una cattura: non era un piantamento, solo una
+            # ricerca lenta. I dump non servono piu' e il Full pesa 665 MB — si cancellano subito.
+            # Resta il rapporto .txt (pochi KB, con gli stack di dotnet-stack gia' dentro): documenta
+            # la lentezza senza costare disco. Se la ricerca arriva fino al bestmove si riarma anche
+            # la cattura, cosi' un piantamento vero piu' avanti nella stessa partita viene preso.
+            if base_cattura:
+                liberati = 0.0
+                for suffisso in (".mini.dmp", ".full.dmp"):
+                    p_dmp = base_cattura + suffisso
+                    if os.path.exists(p_dmp):
+                        liberati += os.path.getsize(p_dmp) / 1e6
+                        try:
+                            os.remove(p_dmp)
+                        except OSError as e:
+                            log("non riesco a cancellare %s: %s" % (p_dmp, e))
+                with open(base_cattura + ".txt", "a", encoding="utf-8") as ann:
+                    ann.write("\n=== RIPRESA: il motore ha ricominciato a parlare alle %s "
+                              "(%.0f s dopo la 'go'). NON era un piantamento: dump cancellati, "
+                              "%.0f MB liberati. ===\n"
+                              % (time.strftime("%H:%M:%S"), time.time() - t_go, liberati))
+                log("ricerca ripresa: non era un piantamento, %.0f MB di dump cancellati" % liberati)
+                base_cattura = None
+
             if testo.startswith("bestmove"):
+                gia_catturato = False
                 # Una riga per ricerca conclusa: e' il BATTITO del watchdog. Serve a due cose —
                 # dimostrare che sta davvero seguendo lo scambio col motore (un watchdog che non
                 # riconosce le righe sarebbe muto esattamente come uno che non scatta mai), e
