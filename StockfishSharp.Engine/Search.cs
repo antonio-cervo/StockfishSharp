@@ -1259,7 +1259,16 @@ public sealed class Search
             SelDepth = rm.SelDepth,
             ScoreCp = v,
             Nodes = _nodes,
-            TbHits = _tbHits,
+            // search.cpp:2282 — "threads.tb_hits() + (worker.tbConfig.rootInTB ? rootMoves.size() : 0)".
+            // Con la radice IN TABLEBASE la fonte somma le mosse di radice al contatore: li' la
+            // classifica per DTZ ha gia' deciso la mossa e "Cardinality" viene azzerato, quindi
+            // dentro l'albero non si interroga piu' nulla e senza questo termine la riga direbbe
+            // sempre "tbhits 0" proprio nelle posizioni dove le tablebase hanno deciso tutto.
+            // Trovato il 2026-09-09 confrontando un finale reale della partita J70IuLIK: a 5, 4 e 3
+            // pezzi l'oracolo diceva 5, 7 e 3 tbhits e noi 0 — e 5, 7, 3 sono esattamente i numeri
+            // di mosse legali di quelle tre posizioni. Contatore, non comportamento: la mossa e il
+            // punteggio erano gia' identici.
+            TbHits = _tbHits + (_tbConfig.RootInTb ? _rootMoves.Count : 0),
             Pv = [.. usePreviousScore ? rm.PreviousPv : rm.Pv],
         };
 
