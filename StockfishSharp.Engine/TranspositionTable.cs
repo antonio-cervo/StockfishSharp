@@ -173,6 +173,19 @@ public sealed class TranspositionTable
 
     /// <summary>Cerca la posizione nella tabella — <c>TranspositionTable::probe</c>,
     /// tt.cpp:270-290.</summary>
+    /// <summary><c>prefetch(tt.first_entry(...))</c>, search.cpp:645 — chiede alla memoria il
+    /// cluster di questa chiave PRIMA che serva. La transposition table e' grande e si accede in
+    /// modo casuale, quindi una Probe che manca la cache costa centinaia di cicli: la fonte la
+    /// anticipa al momento in cui sa quale posizione stara' per raggiungere, cioe' prima ancora di
+    /// giocare la mossa. E' un suggerimento hardware, non altera nulla.</summary>
+    public unsafe void Prefetch(ulong key)
+    {
+        if (!System.Runtime.Intrinsics.X86.Sse.IsSupported || _clusterCount == 0) return;
+        int baseIdx = FirstEntryIndex(key);
+        System.Runtime.Intrinsics.X86.Sse.Prefetch0(
+            System.Runtime.CompilerServices.Unsafe.AsPointer(ref EntryAt(baseIdx)));
+    }
+
     public TTProbeResult Probe(ulong key)
     {
         int baseIdx = FirstEntryIndex(key);

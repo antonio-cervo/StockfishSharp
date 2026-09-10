@@ -659,7 +659,16 @@ public sealed class Search
     // [pezzo/casa della mossa ss-1, valutata al nodo corrente]. Le celle mai scritte condividono
     // il sentinella [Piece.None,A1,...] esattamente come la fonte condivide un'unica entry
     // &continuationCorrectionHistory[NO_PIECE][0] per tutti i ply -7..-1 prima della radice.
-    private readonly short[,,,] _continuationCorrHistory = new short[PieceSlots.Nb, Squares.Nb, PieceSlots.Nb, Squares.Nb];
+    // ARRAY PIATTO, per la regola misurata sugli array multidimensionali: a 3 dimensioni l'accesso
+    // costa 1,47x quello piatto, a 6 arriva a 1,88x (a 2 invece non conviene, 0,97x). Questa e' a
+    // QUATTRO, e si legge a ogni nodo dentro CorrectionValue.
+    private readonly short[] _continuationCorrHistory =
+        new short[PieceSlots.Nb * Squares.Nb * PieceSlots.Nb * Squares.Nb];
+
+    /// <summary>Indice piatto della continuation correction history, nell'ordine originale
+    /// [pezzo mosso al ply precedente][sua casa di arrivo][pezzo di questa mossa][casa di arrivo].</summary>
+    private static int IndiceCorr(Piece pezzoPrec, Square casaPrec, Piece pc, Square to)
+        => ((((((byte)pezzoPrec * Squares.Nb) + (byte)casaPrec) * PieceSlots.Nb) + (byte)pc) * Squares.Nb) + (byte)to;
 
     public void Resize(int hashMb) => _tt.Resize(hashMb);
 
@@ -682,12 +691,35 @@ public sealed class Search
             for (int s1 = 0; s1 < Squares.Nb; s1++)
                 for (int p2 = 0; p2 < PieceSlots.Nb; p2++)
                     for (int s2 = 0; s2 < Squares.Nb; s2++)
-                        _continuationCorrHistory[p1, s1, p2, s2] = 5;
+                        _continuationCorrHistory[IndiceCorr((Piece)p1, (Square)s1, (Piece)p2, (Square)s2)] = 5;
     }
 
     /// <summary><c>correction_value</c>, search.cpp:85-101 — combina le correction history
     /// hash-indicizzate (pedoni/pezzi minori/non-pedoni bianco/nero) con la continuation
     /// correction history a due livelli (ss-2, ss-4), pesate come nella fonte.</summary>
+    /// <summary><c>prefetch(&amp;(*(ss-1)-&gt;continuationCorrectionHistory)[pc][to])</c> e la gemella
+    /// su <c>(ss-3)</c>, search.cpp:654-655 — le DUE voci di correction history che il nodo FIGLIO
+    /// leggera' in <see cref="CorrectionValue"/>, chieste alla memoria prima di giocare la mossa.
+    ///
+    /// Che siano proprio quelle si vede da CorrectionValue: al ply+1 legge i frame (ss-2) e (ss-4)
+    /// rispetto a se', cioe' (ss-1) e (ss-3) rispetto a qui, indicizzati con il pezzo e la casa
+    /// della mossa che stiamo per fare. La fonte dichiara che l'approssimazione non modella
+    /// arrocco e promozione: per quelle mosse rare il prefetch finisce su una linea inutile.</summary>
+    private unsafe void PrefetchCorrHistory(Position pos, int ply, Move m)
+    {
+        if (!System.Runtime.Intrinsics.X86.Sse.IsSupported) return;
+
+        Piece pc = pos.MovedPiece(m);
+        Square to = m.ToSq;
+        int idx1 = ply + StackOffset - 1;
+        int idx3 = ply + StackOffset - 3;
+
+        System.Runtime.Intrinsics.X86.Sse.Prefetch0(System.Runtime.CompilerServices.Unsafe.AsPointer(
+            ref _continuationCorrHistory[IndiceCorr(_movedPieceHistory[idx1], _currentMoveHistory[idx1].ToSq, pc, to)]));
+        System.Runtime.Intrinsics.X86.Sse.Prefetch0(System.Runtime.CompilerServices.Unsafe.AsPointer(
+            ref _continuationCorrHistory[IndiceCorr(_movedPieceHistory[idx3], _currentMoveHistory[idx3].ToSq, pc, to)]));
+    }
+
     private int CorrectionValue(Position pos, int ply)
     {
         Color us = pos.SideToMove;
@@ -705,8 +737,8 @@ public sealed class Search
             Piece pcAtTo = pos.PieceOn(to);
             int idx2 = ply + StackOffset - 2;
             int idx4 = ply + StackOffset - 4;
-            int e2 = _continuationCorrHistory[(byte)_movedPieceHistory[idx2], (byte)_currentMoveHistory[idx2].ToSq, (byte)pcAtTo, (byte)to];
-            int e4 = _continuationCorrHistory[(byte)_movedPieceHistory[idx4], (byte)_currentMoveHistory[idx4].ToSq, (byte)pcAtTo, (byte)to];
+            int e2 = _continuationCorrHistory[IndiceCorr(_movedPieceHistory[idx2], _currentMoveHistory[idx2].ToSq, pcAtTo, to)];
+            int e4 = _continuationCorrHistory[IndiceCorr(_movedPieceHistory[idx4], _currentMoveHistory[idx4].ToSq, pcAtTo, to)];
             cntcv = 8761 * (e2 + e4);
         }
         else
@@ -746,8 +778,8 @@ public sealed class Search
             Piece pc = pos.PieceOn(to);
             int idx2 = ply + StackOffset - 2;
             int idx4 = ply + StackOffset - 4;
-            UpdateCorrHistoryEntry(ref _continuationCorrHistory[(byte)_movedPieceHistory[idx2], (byte)_currentMoveHistory[idx2].ToSq, (byte)pc, (byte)to], bonus * 130 / 128);
-            UpdateCorrHistoryEntry(ref _continuationCorrHistory[(byte)_movedPieceHistory[idx4], (byte)_currentMoveHistory[idx4].ToSq, (byte)pc, (byte)to], bonus * 70 / 128);
+            UpdateCorrHistoryEntry(ref _continuationCorrHistory[IndiceCorr(_movedPieceHistory[idx2], _currentMoveHistory[idx2].ToSq, pc, to)], bonus * 130 / 128);
+            UpdateCorrHistoryEntry(ref _continuationCorrHistory[IndiceCorr(_movedPieceHistory[idx4], _currentMoveHistory[idx4].ToSq, pc, to)], bonus * 70 / 128);
         }
     }
 
@@ -2351,6 +2383,14 @@ public sealed class Search
             _captureStageHistory[ply + StackOffset] = captureStage;
 
             _nodes++;
+            // "prefetch(tt.first_entry(pos.prefetch_key(move)))", search.cpp:645 — si chiede alla
+            // memoria la voce di transposition table della posizione che si sta per raggiungere,
+            // PRIMA di giocare la mossa. Fra questo momento e la Probe del nodo figlio passano
+            // l'intero DoMove e l'aggiornamento dell'accumulatore NNUE: centinaia di cicli, in cui
+            // il dato fa in tempo ad arrivare. La TT e' grande e si accede in modo casuale, quindi
+            // una Probe che manca la cache e' fra le attese piu' care del motore.
+            _tt.Prefetch(pos.PrefetchKey(m));
+            PrefetchCorrHistory(pos, ply, m);
             pos.DoMove(m, st, givesCheck, frame.DirtyThreats, frame.DirtyPiece, frame.DirtyPawnPairs);
 
             // Step 18 (continua dopo aver fatto la mossa), search.cpp:1316-1359.
@@ -2966,6 +3006,14 @@ public sealed class Search
             // contatore). Il risultato era un conteggio gonfiato, che rendeva NON confrontabili
             // tutti i numeri di nodi misurati contro l'oracolo.
             _nodes++;
+            // "prefetch(tt.first_entry(pos.prefetch_key(move)))", search.cpp:645 — si chiede alla
+            // memoria la voce di transposition table della posizione che si sta per raggiungere,
+            // PRIMA di giocare la mossa. Fra questo momento e la Probe del nodo figlio passano
+            // l'intero DoMove e l'aggiornamento dell'accumulatore NNUE: centinaia di cicli, in cui
+            // il dato fa in tempo ad arrivare. La TT e' grande e si accede in modo casuale, quindi
+            // una Probe che manca la cache e' fra le attese piu' care del motore.
+            _tt.Prefetch(pos.PrefetchKey(m));
+            PrefetchCorrHistory(pos, ply, m);
             pos.DoMove(m, st, givesCheck, qFrame.DirtyThreats, qFrame.DirtyPiece, qFrame.DirtyPawnPairs);
             int score = -Quiesce(pos, -beta, -alpha, ply + 1, isPvNode);
 

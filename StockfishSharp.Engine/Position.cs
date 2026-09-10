@@ -455,6 +455,28 @@ public sealed class Position
     /// incrementale in DoMove): li' serve l'identita' della posizione, non la sua valutabilita'.</summary>
     public ulong Key => AdjustKey50(_st.Key, afterMove: false);
 
+    /// <summary><c>Position::prefetch_key</c>, position.cpp:1293-1306 — la chiave che la posizione
+    /// AVRA' dopo la mossa, calcolata in fretta per il solo prefetch della transposition table.
+    ///
+    /// E' APPROSSIMATA di proposito, e la fonte lo dichiara (search.cpp:641-644): non modella
+    /// arrocco, en passant e promozione. Per quelle mosse rare il prefetch finisce su una linea di
+    /// cache che non serve — nessun danno, e' solo un suggerimento. Il guadagno sta nel caso comune.</summary>
+    public ulong PrefetchKey(Move m)
+    {
+        Square from = m.FromSq;
+        Square to = m.ToSq;
+        Piece pc = PieceOn(from);
+        Piece captured = PieceOn(to);
+        ulong k = _st.Key ^ Zobrist.Side;
+
+        k ^= Zobrist.Psq[(byte)captured, (byte)to] ^ Zobrist.Psq[(byte)pc, (byte)to] ^ Zobrist.Psq[(byte)pc, (byte)from];
+
+        if (captured != Piece.None || Types.TypeOf(pc) == PieceType.Pawn)
+            return k;
+
+        return AdjustKey50(k, afterMove: true);
+    }
+
     /// <summary><c>Position::adjust_key50&lt;AfterMove&gt;</c>, position.h:321-324. Sotto la soglia
     /// la chiave e' intatta; sopra, viene perturbata da un valore che cambia ogni 8 mezze mosse del
     /// contatore, cosi' che fasce diverse di rule50 non collidano fra loro.</summary>
