@@ -468,9 +468,8 @@ public sealed class Search
     // costruire il proprio MovePicker, quindi i due non si sovrappongono mai sullo stesso ply) —
     // evita che ogni nodo della ricerca allochi ~1.5KB sull'heap (vedi nota in testa a
     // MovePicker.cs), a differenza della fonte dove "moves[MAX_MOVES]" vive sullo stack C++.
-    private readonly Move[][] _mpMoveBufs = BuildPerPlyMoveBufs();
-    private readonly int[][] _mpValueBufs = BuildPerPlyValueBufs();
-    private readonly List<Move>[] _mpGenBufs = BuildPerPlyGenBufs();
+    private readonly ExtMove[][] _mpListaBufs = BuildPerPlyMoveBufs();
+        private readonly List<Move>[] _mpGenBufs = BuildPerPlyGenBufs();
 
     // Buffer FISSI per ply, allocati una volta sola alla creazione di questa Search — nella fonte
     // sono tutti oggetti sullo stack della funzione ("StateInfo st;", "ValueList<Move,32>
@@ -548,17 +547,10 @@ public sealed class Search
         return bufs;
     }
 
-    private static Move[][] BuildPerPlyMoveBufs()
+    private static ExtMove[][] BuildPerPlyMoveBufs()
     {
-        var bufs = new Move[Ply.MaxPly + 1][];
-        for (int i = 0; i < bufs.Length; i++) bufs[i] = new Move[Ply.MaxMoves];
-        return bufs;
-    }
-
-    private static int[][] BuildPerPlyValueBufs()
-    {
-        var bufs = new int[Ply.MaxPly + 1][];
-        for (int i = 0; i < bufs.Length; i++) bufs[i] = new int[Ply.MaxMoves];
+        var bufs = new ExtMove[Ply.MaxPly + 1][];
+        for (int i = 0; i < bufs.Length; i++) bufs[i] = new ExtMove[Ply.MaxMoves];
         return bufs;
     }
 
@@ -2101,7 +2093,7 @@ public sealed class Search
                 // quello inizi.
                 var probCutMp = _movePickerPool[(ply * 3) + 2];
                 probCutMp.InitProbCut(pos, _movePick, ttMove, probCutBeta - staticEval,
-                    _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
+                    _mpListaBufs[ply], _mpGenBufs[ply]);
 
                 Move pcMove;
                 while ((pcMove = probCutMp.NextMove()) != Move.None)
@@ -2175,7 +2167,7 @@ public sealed class Search
         FillContinuationRefs(ply, contRefs);
         var mp = _movePickerPool[(ply * 3) + (excludedMove == default ? 0 : 1)];
         mp.Init(pos, _movePick, ttMove, depth, ply, contRefs,
-            _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
+            _mpListaBufs[ply], _mpGenBufs[ply]);
 
         int value = tbBestValueFloor ?? -Infinity; // Step 1 della fonte, search.cpp:769: bestValue = -VALUE_INFINITE (salvo il floor dello Step 7)
         Move? bestMove = null;
@@ -2947,7 +2939,7 @@ public sealed class Search
 
         var mp = _movePickerPool[ply * 3];
         mp.Init(pos, _movePick, ttMove, Ply.DepthQs, ply, contRefs,
-            _mpMoveBufs[ply], _mpValueBufs[ply], _mpGenBufs[ply]);
+            _mpListaBufs[ply], _mpGenBufs[ply]);
 
         // Step 5. Ciclo su tutte le mosse pseudo-legali.
         Move m;

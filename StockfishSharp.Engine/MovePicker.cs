@@ -48,7 +48,10 @@ public sealed class MovePicker
     // ProbCut — misurato: 258 byte allocati per nodo, quasi tutti questi.
     private Position _pos = null!;
     private MovePick _hist = null!;
-    private readonly ContinuationRef[] _contRefs = new ContinuationRef[6];
+    // La fonte tiene "const PieceToHistory** continuationHistory", cioe' un PUNTATORE all'array
+    // locale del chiamante (search.cpp:1235-1240), non una copia. Qui era un Array.Copy di sei
+    // elementi a ogni nodo: e' il chiamante a possedere un array per ply, che vive quanto il nodo.
+    private ContinuationRef[] _contRefs = null!;
     private Move _ttMove;
     private int _depth;
     private int _ply;
@@ -57,12 +60,10 @@ public sealed class MovePicker
     private Stage _stage;
     private bool _skipQuiets;
 
-    // ExtMove moves[MAX_MOVES] della fonte diventa qui due array paralleli (mossa/valore) indicati
-    // per indice invece che per puntatore — stessa aritmetica di cur/endCur/endBadCaptures/
-    // endCaptures/endGenerated, solo come interi invece che puntatori. Passati dal chiamante (vedi
-    // nota sopra), non allocati qui.
-    private Move[] _moves = null!;
-    private int[] _values = null!;
+    // ExtMove moves[MAX_MOVES] della fonte, indicato per indice invece che per puntatore — stessa
+    // aritmetica di cur/endCur/endBadCaptures/endCaptures/endGenerated, solo come interi invece che
+    // puntatori. Passato dal chiamante (vedi nota sopra), non allocato qui.
+    private ExtMove[] _lista = null!;
     private List<Move> _genBuffer = null!;
     private int _cur, _endCur, _endBadCaptures, _endCaptures, _endGenerated;
 
@@ -71,7 +72,7 @@ public sealed class MovePicker
     /// cref="Ply.MaxMoves"/>) e <paramref name="genBuffer"/> sono buffer riusati dal chiamante per
     /// livello di profondità — vedi nota in testa al file.</summary>
     public void Init(Position pos, MovePick hist, Move ttMove, int depth, int ply, ContinuationRef[] contRefs,
-        Move[] movesBuf, int[] valuesBuf, List<Move> genBuffer)
+        ExtMove[] listaBuf, List<Move> genBuffer)
     {
         _skipQuiets = false;
         _cur = _endCur = _endBadCaptures = _endCaptures = _endGenerated = 0;
@@ -81,9 +82,8 @@ public sealed class MovePicker
         _ttMove = ttMove;
         _depth = depth;
         _ply = ply;
-        Array.Copy(contRefs, _contRefs, 6);
-        _moves = movesBuf;
-        _values = valuesBuf;
+        _contRefs = contRefs;
+        _lista = listaBuf;
         _genBuffer = genBuffer;
 
         bool ttOk = ttMove != Move.None && pos.PseudoLegal(ttMove);
@@ -95,7 +95,7 @@ public sealed class MovePicker
     /// <summary>Costruttore per ProbCut — movepick.cpp:181-189: genera solo catture con SEE almeno
     /// pari alla soglia data.</summary>
     public void InitProbCut(Position pos, MovePick hist, Move ttMove, int threshold,
-        Move[] movesBuf, int[] valuesBuf, List<Move> genBuffer)
+        ExtMove[] listaBuf, List<Move> genBuffer)
     {
         _skipQuiets = false;
         _cur = _endCur = _endBadCaptures = _endCaptures = _endGenerated = 0;
@@ -105,8 +105,7 @@ public sealed class MovePicker
         _hist = hist;
         _ttMove = ttMove;
         _threshold = threshold;
-        _moves = movesBuf;
-        _values = valuesBuf;
+        _lista = listaBuf;
         _genBuffer = genBuffer;
 
         bool ttOk = ttMove != Move.None && pos.CaptureStage(ttMove) && pos.PseudoLegal(ttMove);
@@ -223,7 +222,7 @@ public sealed class MovePicker
     {
         while (_cur < _endCur)
         {
-            Move candidate = _moves[_cur];
+            Move candidate = _lista[_cur].Move;
             bool ok = candidate != _ttMove && filter.Ok(this);
             _cur++;
             if (ok) return candidate;
@@ -246,12 +245,11 @@ public sealed class MovePicker
     {
         public bool Ok(MovePicker mp)
         {
-            if (mp._pos.SeeGe(mp._moves[mp._cur], -mp._values[mp._cur] / 18))
+            if (mp._pos.SeeGe(mp._lista[mp._cur].Move, -mp._lista[mp._cur].Value / 18))
                 return true;
 
             int idx = mp._endBadCaptures;
-            (mp._moves[idx], mp._moves[mp._cur]) = (mp._moves[mp._cur], mp._moves[idx]);
-            (mp._values[idx], mp._values[mp._cur]) = (mp._values[mp._cur], mp._values[idx]);
+            (mp._lista[idx], mp._lista[mp._cur]) = (mp._lista[mp._cur], mp._lista[idx]);
             mp._endBadCaptures++;
             return false;
         }
@@ -259,12 +257,12 @@ public sealed class MovePicker
 
     private readonly struct FiltroQuietaBuona : IFiltroMossa
     {
-        public bool Ok(MovePicker mp) => mp._values[mp._cur] > GoodQuietThreshold;
+        public bool Ok(MovePicker mp) => mp._lista[mp._cur].Value > GoodQuietThreshold;
     }
 
     private readonly struct FiltroQuietaScarsa : IFiltroMossa
     {
-        public bool Ok(MovePicker mp) => mp._values[mp._cur] <= GoodQuietThreshold;
+        public bool Ok(MovePicker mp) => mp._lista[mp._cur].Value <= GoodQuietThreshold;
     }
 
     private readonly struct FiltroTutte : IFiltroMossa
@@ -274,35 +272,32 @@ public sealed class MovePicker
 
     private readonly struct FiltroProbCut : IFiltroMossa
     {
-        public bool Ok(MovePicker mp) => mp._pos.SeeGe(mp._moves[mp._cur], mp._threshold);
+        public bool Ok(MovePicker mp) => mp._pos.SeeGe(mp._lista[mp._cur].Move, mp._threshold);
     }
 
     /// <summary>partial_insertion_sort, movepick.cpp:111-143 (solo ramo scalare) — ordina in modo
     /// decrescente le mosse con valore &gt;= limit, lasciando le altre in ordine non specificato.</summary>
     private void PartialInsertionSort(int begin, int end, int limit)
     {
+        var lista = _lista;
         int sortedEnd = begin;
         for (int p = begin + 1; p < end; p++)
         {
-            if (_values[p] >= limit)
+            if (lista[p].Value >= limit)
             {
-                Move tmpM = _moves[p];
-                int tmpV = _values[p];
+                ExtMove tmp = lista[p];
 
                 sortedEnd++;
-                _moves[p] = _moves[sortedEnd];
-                _values[p] = _values[sortedEnd];
+                lista[p] = lista[sortedEnd];
 
                 int q = sortedEnd;
-                while (q != begin && _values[q - 1] < tmpV)
+                while (q != begin && lista[q - 1].Value < tmp.Value)
                 {
-                    _moves[q] = _moves[q - 1];
-                    _values[q] = _values[q - 1];
+                    lista[q] = lista[q - 1];
                     q--;
                 }
 
-                _moves[q] = tmpM;
-                _values[q] = tmpV;
+                lista[q] = tmp;
             }
         }
     }
@@ -315,6 +310,7 @@ public sealed class MovePicker
         _genBuffer.Clear();
         MoveGen.Generate(GenType.Captures, _pos, _genBuffer);
 
+        var lista = _lista;
         int it = _cur;
         foreach (var m in _genBuffer)
         {
@@ -322,8 +318,8 @@ public sealed class MovePicker
             Piece pc = _pos.MovedPiece(m);
             Piece capturedPiece = _pos.PieceOn(to);
 
-            _moves[it] = m;
-            _values[it] = _hist.GetCaptureHistory(pc, to, Types.TypeOf(capturedPiece))
+            lista[it].Move = m;
+            lista[it].Value = _hist.GetCaptureHistory(pc, to, Types.TypeOf(capturedPiece))
                         + (7 * Values.PieceValue[(byte)capturedPiece]);
             it++;
         }
@@ -355,6 +351,7 @@ public sealed class MovePicker
         _genBuffer.Clear();
         MoveGen.Generate(GenType.Quiets, _pos, _genBuffer);
 
+        var lista = _lista;
         int it = _cur;
         foreach (var m in _genBuffer)
         {
@@ -381,8 +378,8 @@ public sealed class MovePicker
             if (_ply < LowPlyHistorySize)
                 value += 8 * _hist.GetLowPlyHistoryValue(_ply, m) / (1 + _ply);
 
-            _moves[it] = m;
-            _values[it] = value;
+            lista[it].Move = m;
+            lista[it].Value = value;
             it++;
         }
 
@@ -396,6 +393,7 @@ public sealed class MovePicker
         _genBuffer.Clear();
         MoveGen.Generate(GenType.Evasions, _pos, _genBuffer);
 
+        var lista = _lista;
         int it = _cur;
         foreach (var m in _genBuffer)
         {
@@ -408,8 +406,8 @@ public sealed class MovePicker
             else
                 value = _hist.GetMainHistoryRaw(us, m) + _hist.GetContinuationHistory(_contRefs[0], pc, to);
 
-            _moves[it] = m;
-            _values[it] = value;
+            lista[it].Move = m;
+            lista[it].Value = value;
             it++;
         }
 
