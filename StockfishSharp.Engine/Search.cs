@@ -1048,7 +1048,7 @@ public sealed class Search
                 // sostituisce il risultato: tiene il matto piu' corto gia' trovato.
                 //
                 // Fino al 2026-09-08 questo blocco era dichiarato "non serve qui" con la
-                // motivazione che un'iterazione interrotta lancia un'eccezione e non arriva mai
+                // motivazione che un'iterazione interrotta lanciava un'eccezione e non arrivava mai
                 // fin qui. La motivazione e' corretta ma copre solo META' del blocco della fonte
                 // (il ramo "abortedLossSearch"): forgottenMate e' indipendente da threads.stop, e
                 // senza di esso il motore puo' annunciare un matto e poi, a un'iterazione piu'
@@ -1128,7 +1128,10 @@ public sealed class Search
                 // NOTA STORICA, terza della serie (vedi anche SearchThreadPool.cs): fino al
                 // 2026-09-08 qui c'era scritto che "forgottenMate e l'aggancio a un matto di
                 // un'iterazione interrotta a meta' (search.cpp:505-547) non servono qui", perche'
-                // un'iterazione interrotta lancia un'eccezione e non arriva mai a questo punto.
+                // un'iterazione interrotta lanciava un'eccezione e non arrivava mai a questo punto.
+                // Dal 2026-09-10 quel meccanismo NON ESISTE PIU' (ci si ferma su un flag,
+                // vedi SegnaleStop.cs): un'iterazione interrotta arriva eccome fin qui, ed e'
+                // proprio quella la ragione per cui i rami sopra ora sono portati tutti.
                 // La motivazione e' vera ma copre solo il ramo "abortedLossSearch": forgottenMate
                 // e' indipendente da threads.stop e riguarda iterazioni COMPLETATE. Ora e' portato,
                 // sopra. Terza volta in due giorni che un'assunzione dichiarata in un commento

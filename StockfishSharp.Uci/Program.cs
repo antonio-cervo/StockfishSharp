@@ -747,6 +747,21 @@ void HandleGo(string[] toks)
                 goStopwatch = Stopwatch.StartNew();
                 isPondering = () => pondering.Value;
             }
+            else if (timeManagement.MaximumTime == Search.NoBound)
+            {
+                // Orologio del lato che deve muovere a ZERO. La fonte in quel caso non fa gestione
+                // del tempo: TimeManagement::init esce subito con optimum = maximum = NoBound
+                // (timeman.cpp:62-66) e use_time_management() e' falso, quindi check_time non ferma
+                // nulla e la ricerca prosegue finche' la GUI non manda "stop". VERIFICATO
+                // sull'oracolo: "go wtime 0 btime 0" cerca all'infinito e il processo resta vivo.
+                //
+                // Qui invece NoBound finiva dritto in TimeSpan.FromMilliseconds e il motore MORIVA
+                // con ArgumentOutOfRangeException ("TimeSpan overflowed"), portandosi via la
+                // partita. Trovato dal banco degli invarianti a orologio (tools/invarianti_orologio.py)
+                // al primo giro: e' esattamente il tipo di guasto che l'audit a profondita' fissa
+                // non puo' vedere.
+                budget = TimeSpan.FromHours(1); // stesso tetto pratico di "go infinite"/"go depth N"
+            }
             else
             {
                 budget = TimeSpan.FromMilliseconds(timeManagement.MaximumTime);
