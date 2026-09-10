@@ -2137,8 +2137,13 @@ public sealed class Search
                     _inCheckHistory[ply + StackOffset] = inCheck;
                     _captureStageHistory[ply + StackOffset] = pos.CaptureStage(pcMove);
 
+                    // I prefetch di Worker::do_move (search.cpp:645, 654-655): questo sito passava
+                    // per pos.DoMove diretto e se li era persi tutti e tre.
+                    _tt.Prefetch(pos.PrefetchKey(pcMove));
+                    PrefetchCorrHistory(pos, ply, pcMove);
+
                     _nodes++;
-                    pos.DoMove(pcMove, pcSt, pos.GivesCheck(pcMove), pcFrame.DirtyThreats, pcFrame.DirtyPiece, pcFrame.DirtyPawnPairs);
+                    pos.DoMove(pcMove, pcSt, pos.GivesCheck(pcMove), pcFrame.DirtyThreats, pcFrame.DirtyPiece, pcFrame.DirtyPawnPairs, _tt, _shared);
 
                     int pcValue = -Quiesce(pos, -probCutBeta, -probCutBeta + 1, ply + 1, isPvNode: false); // search.cpp:1077
 
@@ -2391,7 +2396,7 @@ public sealed class Search
             // una Probe che manca la cache e' fra le attese piu' care del motore.
             _tt.Prefetch(pos.PrefetchKey(m));
             PrefetchCorrHistory(pos, ply, m);
-            pos.DoMove(m, st, givesCheck, frame.DirtyThreats, frame.DirtyPiece, frame.DirtyPawnPairs);
+            pos.DoMove(m, st, givesCheck, frame.DirtyThreats, frame.DirtyPiece, frame.DirtyPawnPairs, _tt, _shared);
 
             // Step 18 (continua dopo aver fatto la mossa), search.cpp:1316-1359.
             if (ttPv)
@@ -3014,7 +3019,7 @@ public sealed class Search
             // una Probe che manca la cache e' fra le attese piu' care del motore.
             _tt.Prefetch(pos.PrefetchKey(m));
             PrefetchCorrHistory(pos, ply, m);
-            pos.DoMove(m, st, givesCheck, qFrame.DirtyThreats, qFrame.DirtyPiece, qFrame.DirtyPawnPairs);
+            pos.DoMove(m, st, givesCheck, qFrame.DirtyThreats, qFrame.DirtyPiece, qFrame.DirtyPawnPairs, _tt, _shared);
             int score = -Quiesce(pos, -beta, -alpha, ply + 1, isPvNode);
 
             if (Traccia && ply <= TracciaPlyMax + 2)

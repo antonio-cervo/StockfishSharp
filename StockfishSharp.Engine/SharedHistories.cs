@@ -75,6 +75,35 @@ public sealed class SharedHistories
     public readonly short[,] NonPawnWhiteCorrHistory;
     public readonly short[,] NonPawnBlackCorrHistory;
 
+    /// <summary>I cinque prefetch che la fonte fa DENTRO <c>do_move</c> (position.cpp:1014-1018),
+    /// appena le chiavi della nuova posizione sono definitive e PRIMA di spostare il pezzo: sono le
+    /// history che il nodo FIGLIO leggera' per prime, e da qui al loro uso passano tutto il resto di
+    /// DoMove e l'aggiornamento dell'accumulatore NNUE — centinaia di cicli, abbastanza perche' la
+    /// linea di cache arrivi.
+    ///
+    /// Perche' proprio queste cinque e non tutte le history: sono le uniche indicizzate da una
+    /// CHIAVE, cioe' ad accesso pseudo-casuale su tabelle grandi (a un thread la pawn history da
+    /// sola e' 16 MB, le quattro correction history 256 KB l'una). E' lo stesso profilo del prefetch
+    /// della transposition table, che e' valso +3,8%: qui il costo e' la LATENZA di memoria, non il
+    /// numero di istruzioni. Le history per thread — main, capture, continuation — restano fuori
+    /// anche nella fonte, perche' si rileggono di continuo e stanno gia' in cache.</summary>
+    public unsafe void PrefetchPerFiglio(Position pos, Piece pc, Square to)
+    {
+        if (!System.Runtime.Intrinsics.X86.Sse.IsSupported) return;
+
+        Prefetch(ref PawnHistory[IndicePawn(pos.PawnKey & (ulong)PawnHistSizeMinus1, pc, to)]);
+
+        Prefetch(ref PawnCorrHistory[pos.PawnKey & (ulong)CorrSizeMinus1, 0]);
+        Prefetch(ref MinorCorrHistory[pos.MinorPieceKey & (ulong)CorrSizeMinus1, 0]);
+        Prefetch(ref NonPawnWhiteCorrHistory[pos.NonPawnKey(Color.White) & (ulong)CorrSizeMinus1, 0]);
+        Prefetch(ref NonPawnBlackCorrHistory[pos.NonPawnKey(Color.Black) & (ulong)CorrSizeMinus1, 0]);
+    }
+
+    /// <summary><c>prefetch()</c>, misc.h:130-140 — tira una linea di cache in L1 senza leggerla.</summary>
+    private static unsafe void Prefetch(ref short voce)
+        => System.Runtime.Intrinsics.X86.Sse.Prefetch0(
+            System.Runtime.CompilerServices.Unsafe.AsPointer(ref voce));
+
     /// <summary><c>SharedHistories(usize threadCount)</c>, history.h:205-214 — il chiamante passa
     /// gia' <c>next_power_of_two(count)</c> (thread.cpp:214); qui l'arrotondamento e' fatto dentro
     /// per non poter essere dimenticato, ed e' l'assert della fonte reso costruzione.</summary>

@@ -955,8 +955,9 @@ public sealed class Position
     // --- Fare e disfare mosse — position.cpp:812-1143, 1311-1339 ---
 
     /// <summary>Esegue una mossa (assunta legale) salvando lo stato necessario a disfarla —
-    /// <c>Position::do_move</c>, position.cpp:817-1081 (senza gli agganci NNUE/TT/history, vedi
-    /// nota in cima al file).</summary>
+    /// <c>Position::do_move</c>, position.cpp:817-1081. Gli agganci TT e history (i sei prefetch,
+    /// position.cpp:1007-1019) ci sono dal 2026-09-10; resta fuori solo quello NNUE, vedi nota
+    /// in cima al file.</summary>
     public void DoMove(Move m, StateInfo newSt) => DoMove(m, newSt, GivesCheck(m));
 
     /// <summary><paramref name="dirtyThreats"/> (facoltativo, null di default) raccoglie i
@@ -967,7 +968,8 @@ public sealed class Position
     /// le feature HalfKA e Pp3Wide rispettivamente. Nessun costo per i chiamanti esistenti (che
     /// non li passano): restano il comportamento originale.</summary>
     public void DoMove(Move m, StateInfo newSt, bool givesCheck, List<DirtyThreat>? dirtyThreats = null,
-        DirtyPiece? dirtyPiece = null, DirtyPawnPairs? dirtyPawnPairs = null)
+        DirtyPiece? dirtyPiece = null, DirtyPawnPairs? dirtyPawnPairs = null,
+        TranspositionTable? tt = null, SharedHistories? history = null)
     {
         ulong k = _st.Key ^ Zobrist.Side;
 
@@ -1108,7 +1110,18 @@ public sealed class Position
                 _st.MinorPieceKey ^= Zobrist.Psq[(byte)pc, (byte)from] ^ Zobrist.Psq[(byte)pc, (byte)to];
         }
 
+        // position.cpp:1007-1008 — prefetch della transposition table con la chiave ESATTA della
+        // posizione che stiamo per raggiungere. NON e' un doppione di quello che fa il chiamante
+        // prima di entrare qui (search.cpp:645): quello parte prima ma usa PrefetchKey, una chiave
+        // APPROSSIMATA che non modella arrocco, en passant e promozione; questo e' esatto, quindi
+        // per quelle mosse rare e' l'unico dei due che finisce sulla linea giusta.
+        tt?.Prefetch(AdjustKey50(k, afterMove: false));
+
         _st.Key = k;
+
+        // position.cpp:1012-1019 — le cinque history indicizzate da una chiave, che il figlio
+        // leggera' per prime. Vedi SharedHistories.PrefetchPerFiglio.
+        history?.PrefetchPerFiglio(this, pc, to);
 
         if (m.TypeOf != MoveType.Castling)
         {
