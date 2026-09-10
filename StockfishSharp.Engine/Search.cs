@@ -360,6 +360,25 @@ public sealed class Search
     /// allenatore che dice "puoi pensarci di più, ma non oltre il doppio del previsto".</summary>
     private const double MaxBudgetOverOptimum = 2.0;
 
+    // RIMESSA IN DISCUSSIONE E CONFERMATA — 2026-09-10, dopo il passaggio all'arresto su flag.
+    // L'ipotesi era che, fermandoci ora col meccanismo della fonte, i tetti pratici (questo,
+    // IterationCostSafetyMultiplier e la scadenza morbida) non servissero piu'. MISURATO con un
+    // build in cui tutti e tre erano disattivati e la scadenza morbida portata al vero
+    // tm.maximum():
+    //
+    //                        attuale                variante "fedele"
+    //   finali 5min+3s   d61,5  15,3 s  10/10     d63,3  20,4 s  9/10
+    //   peggior mossa (frazione dell'orologio residuo, partita simulata):
+    //     300s+3s          16,3 / 9,9 / 12,3%        28,1%
+    //      60s+0           ~6%                       23,5%
+    //      10s+0            4,9%                     17,2%
+    //
+    // Cioe': +33% di tempo per mossa e rischio sull'orologio piu' che raddoppiato, in cambio di
+    // 1,5 ply e ZERO accordo in piu' con l'oracolo. Questi tetti non sono una scorciatoia: sono il
+    // compenso del divario di VELOCITA' (~5x), che fa impazzire i moltiplicatori della formula
+    // perche' la nostra ricerca cambia idea molto piu' spesso della sua. Si tolgono quando si
+    // chiude quel divario, non prima.
+
     /// <summary>Scadenza oltre la quale la ricerca si interrompe ANCHE a meta' di un'iterazione
     /// (0 = disattivata). Aggiornata a ogni confine di iterazione con il budget corrente; letta dal
     /// controllo periodico in <see cref="Negamax"/>. Pratica, non di fonte — vedi il commento li'.

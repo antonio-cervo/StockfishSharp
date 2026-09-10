@@ -37,8 +37,16 @@
 // il punto di aggiornamento in update_quiet_histories (search.cpp:2056-2057) e la lettura da
 // MovePicker.ScoreQuiets (movepick.cpp:232, tramite sharedHistory->pawn_entry nella fonte). Il
 // bonus al "countermove" quieto su fail-low puro (search.cpp:1578-1601) è portato
-// (ApplyCountermoveQuietBonus); il bonus di ordinamento da differenza di valutazione statica
-// (search.cpp:978-986) no, perché la tecnica a cui appartiene non lo è.
+// (ApplyCountermoveQuietBonus). ANCHE il bonus di ordinamento da differenza di valutazione statica
+// (search.cpp:978-986) e' portato: Search.cs:1918, con ENTRAMBE le scritture della fonte —
+// ApplyEvalDiffMainBonus sulla main history e ApplyEvalDiffPawnBonus sulla pawn entry.
+//
+// Fino al 2026-09-10 qui c'era scritto che quel bonus NON era portato "perche' la tecnica a cui
+// appartiene non lo e'". Falso su entrambi i punti: e' codice sempre eseguito (fuori scacco, con
+// la mossa precedente valida e senza cattura), non appartiene a nessuna tecnica opzionale, ed e'
+// nel motore da tempo. Se fosse davvero mancato, la parita' di nodi con l'oracolo non potrebbe
+// reggere: quel blocco scrive nelle history e cambia l'ordinamento delle mosse quiete. Ed e'
+// proprio la parita' esatta fino a d24 che ha fatto sospettare il commento, non il contrario.
 //
 // NON portato: CorrectionHistory è in Search.cs (fatta).
 
