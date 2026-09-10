@@ -18,6 +18,40 @@ public class SearchTests
         return pos;
     }
 
+    /// <summary>Una ricerca INTERROTTA a meta' deve restituire la posizione com'era: alla RADICE.
+    ///
+    /// Regressione del piantamento del bot delle notti 2026-09-08/09 e 2026-09-09/10. La ricerca si
+    /// ferma lanciando OperationCanceledException da dentro la ricorsione (il controllo ogni 2048
+    /// visite): l'eccezione srotola lo stack C#, ma le UndoMove in sospeso NON sono in un finally,
+    /// quindi la posizione resta profonda N mosse nell'albero. Search_ inghiotte l'eccezione e
+    /// prosegue, e da li' in poi lavora su una posizione che non e' piu' quella di radice.
+    ///
+    /// Il conto lo presenta ExtractPonderFromTt, che gioca pv[0] — legale alla radice, non li':
+    /// IndexOutOfRangeException dentro DoMove, dentro il Task.Run della ricerca. In .NET
+    /// un'eccezione non osservata di un Task non fa crashare il processo: il motore resta vivo,
+    /// non stampa mai "bestmove", e la partita si perde per tempo. Diagnosi dal dump del processo
+    /// piantato ancora vivo (pid 8784, 0 secondi di CPU in 15 secondi reali = bloccato, non in
+    /// ciclo; l'heap conteneva l'IndexOutOfRangeException e il TaskExceptionHolder che la teneva).
+    ///
+    /// La fonte non ha questo problema perche' NON usa eccezioni: si ferma su un flag e la
+    /// ricorsione rientra normalmente, chiamando tutte le undo_move.</summary>
+    [Fact]
+    public void RicercaInterrottaLasciaLaPosizioneAllaRadice()
+    {
+        var pos = MakePosition("r3r1k1/2p2ppp/p1p1bn2/8/1q2P3/2NPQN2/PPP3PP/R4RK1 b - - 2 15");
+        ulong chiaveRadice = pos.Key;
+
+        var search = new Search();
+        search.Resize(16);
+        search.NewGame();
+
+        // Profondita' alta e budget cortissimo: la scadenza scatta DENTRO un'iterazione, non fra una
+        // e l'altra — che e' esattamente il caso che si verifica in partita.
+        search.Search_(pos, maxDepth: 40, TimeSpan.FromMilliseconds(300));
+
+        Assert.Equal(chiaveRadice, pos.Key);
+    }
+
     [Fact]
     public void FindsMateInOne()
     {

@@ -56,6 +56,12 @@ public sealed class SearchThreadPool
     private readonly TranspositionTable _tt = new();
     private readonly List<Search> _searches = [];
     private SharedHistories _sharedHistories = new(1);
+
+    /// <summary><c>ThreadPool::stop</c> (thread.h) — UNO SOLO per tutti i worker, ed e' il punto:
+    /// il thread principale lo alza e gli helper se ne accorgono nei loro nodi. Prima gli helper si
+    /// fermavano solo sul CancellationToken, che pero' viene guardato da check_time — che nella
+    /// fonte (e ora anche qui) gira SOLO sul thread principale.</summary>
+    private SegnaleStop _segnaleStop = new();
     private (bool useRule50, int probeDepth, int probeLimit) _syzygyOptions = (true, 1, 7);
 
     public int ThreadCount => _searches.Count;
@@ -92,6 +98,7 @@ public sealed class SearchThreadPool
         for (int i = 0; i < n; i++)
         {
             var s = new Search(_tt, _searches.Count, _sharedHistories); // threadIdx, search.cpp:173
+            s.SetSegnaleStop(_segnaleStop); // threads.stop e' condiviso: uno per il pool, non uno per worker
             s.SetSyzygyOptions(_syzygyOptions.useRule50, _syzygyOptions.probeDepth, _syzygyOptions.probeLimit);
             if (i == 0) s.SuAggiornamentoPv = _suAggiornamentoPv; // solo mainThread, search.cpp:495
             s.SetMoveOverhead(_moveOverheadMs);
@@ -168,6 +175,11 @@ public sealed class SearchThreadPool
     {
         if (_searches.Count == 0) SetThreadCount(1);
 
+        // thread.cpp, start_thinking: "threads.stop = false" UNA VOLTA SOLA prima di avviare i
+        // worker. Da qui in poi i Search non lo azzerano piu' da soli (SetSegnaleStop), cosi' un
+        // worker che parte tardi non puo' cancellare uno stop gia' chiesto.
+        _segnaleStop.Azzera();
+
         if (_searches.Count == 1)
             return _searches[0].Search_(rootPos, maxDepth, timeLimit, ct, optimumMs: optimumMs,
                 isPondering: isPondering, maximumMsOverride: maximumMsOverride);
@@ -236,7 +248,8 @@ public sealed class SearchThreadPool
                     results[idx] = _searches[idx].Search_(positions[idx], maxDepth, timeLimit, stopCt, callNewSearch: false, optimumMs: optimumMs,
                         crossThreadBestMoveChanges: SumAndResetBestMoveChangesAcrossPool, threadCountForInstability: _searches.Count,
                         isPondering: isPondering, maximumMsOverride: maximumMsOverride);
-                    stopCts.Cancel();
+                    _segnaleStop.Alza(); // il principale ha finito: gli helper si fermano sul FLAG...
+                    stopCts.Cancel();     // ...e il token resta per chi aspetta fuori
                 }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             }
             else
