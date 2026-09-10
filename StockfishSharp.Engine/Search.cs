@@ -697,19 +697,29 @@ public sealed class Search
     /// rispetto a se', cioe' (ss-1) e (ss-3) rispetto a qui, indicizzati con il pezzo e la casa
     /// della mossa che stiamo per fare. La fonte dichiara che l'approssimazione non modella
     /// arrocco e promozione: per quelle mosse rare il prefetch finisce su una linea inutile.</summary>
-    private unsafe void PrefetchCorrHistory(Position pos, int ply, Move m)
+    /// <summary>Le due basi che servono a <see cref="PrefetchCorrHistory"/>, cioe' l'inizio delle
+    /// sottotabelle <c>[pc][to]</c> ai ply -1 e -3. Dipendono solo dal NODO, non dalla mossa: si
+    /// calcolano una volta prima del ciclo sulle mosse. Sono l'equivalente esatto dei due puntatori
+    /// <c>(ss-1)-&gt;continuationCorrectionHistory</c> e <c>(ss-3)-&gt;...</c> che la fonte tiene nel
+    /// frame, scritti una volta sola quando quei nodi sono stati aperti (search.cpp:669-670).</summary>
+    private void BasiCorrHistory(int ply, out int base1, out int base3)
+    {
+        int idx1 = ply + StackOffset - 1;
+        int idx3 = ply + StackOffset - 3;
+        base1 = IndiceCorr(_movedPieceHistory[idx1], _currentMoveHistory[idx1].ToSq, Piece.None, Square.A1);
+        base3 = IndiceCorr(_movedPieceHistory[idx3], _currentMoveHistory[idx3].ToSq, Piece.None, Square.A1);
+    }
+
+    private unsafe void PrefetchCorrHistory(Position pos, int base1, int base3, Move m)
     {
         if (!System.Runtime.Intrinsics.X86.Sse.IsSupported) return;
 
-        Piece pc = pos.MovedPiece(m);
-        Square to = m.ToSq;
-        int idx1 = ply + StackOffset - 1;
-        int idx3 = ply + StackOffset - 3;
+        int scarto = ((byte)pos.MovedPiece(m) * Squares.Nb) + (byte)m.ToSq;
 
         System.Runtime.Intrinsics.X86.Sse.Prefetch0(System.Runtime.CompilerServices.Unsafe.AsPointer(
-            ref _continuationCorrHistory[IndiceCorr(_movedPieceHistory[idx1], _currentMoveHistory[idx1].ToSq, pc, to)]));
+            ref _continuationCorrHistory[base1 + scarto]));
         System.Runtime.Intrinsics.X86.Sse.Prefetch0(System.Runtime.CompilerServices.Unsafe.AsPointer(
-            ref _continuationCorrHistory[IndiceCorr(_movedPieceHistory[idx3], _currentMoveHistory[idx3].ToSq, pc, to)]));
+            ref _continuationCorrHistory[base3 + scarto]));
     }
 
     private int CorrectionValue(Position pos, int ply)
@@ -1546,6 +1556,7 @@ public sealed class Search
     /// l'oracolo spendeva 27 nodi sulla seconda mossa di radice e noi 22.</param>
     private int Negamax(Position pos, int depth, int ply, int alpha, int beta, bool cutNode, bool isPvNode, Move excludedMove = default)
     {
+        int corrBase1 = 0, corrBase3 = 0;
         // search.cpp:778-779, "Check for the available remaining time": la fonte la chiama a OGNI
         // nodo e solo dal thread principale — e' check_time a diradare (una volta ogni 512 nodi).
         // La soglia resta la nostra scadenza morbida, vedi CheckTime: quel che cambia qui e' il
@@ -2074,6 +2085,9 @@ public sealed class Search
             if (!followPv && !allNode && depth >= 6 && ttMove == Move.None)
                 depth--;
 
+            // Le basi di correction history servono sia a ProbCut sia al ciclo principale.
+            BasiCorrHistory(ply, out corrBase1, out corrBase3);
+
             // Step 12. ProbCut — search.cpp:1054-1096: se una cattura (o promozione) "abbastanza
             // buona" (SEE sopra la soglia probCutBeta-staticEval) regge una verifica di
             // quiescenza e, se serve, una ricerca ridotta, il nodo genitore può essere potato: la
@@ -2132,7 +2146,7 @@ public sealed class Search
                     // I prefetch di Worker::do_move (search.cpp:645, 654-655): questo sito passava
                     // per pos.DoMove diretto e se li era persi tutti e tre.
                     _tt.Prefetch(pos.PrefetchKey(pcMove));
-                    PrefetchCorrHistory(pos, ply, pcMove);
+                    PrefetchCorrHistory(pos, corrBase1, corrBase3, pcMove);
 
                     _nodes++;
                     pos.DoMove(pcMove, pcSt, pos.GivesCheck(pcMove), pcFrame.DirtyThreats, pcFrame.DirtyPiece, pcFrame.DirtyPawnPairs, _tt, _shared);
@@ -2165,6 +2179,11 @@ public sealed class Search
 
         var contRefs = _contRefsBufs[ply];
         FillContinuationRefs(ply, contRefs);
+        // Anche qui, e non solo prima di ProbCut: quel blocco e' condizionato, e senza questa riga
+        // il ciclo principale userebbe basi a zero — i prefetch finirebbero tutti sulla stessa
+        // riga sbagliata. Non cambierebbe un solo nodo (un prefetch non puo'), quindi e' proprio
+        // il tipo di svista che nessuna verifica di correttezza troverebbe.
+        BasiCorrHistory(ply, out corrBase1, out corrBase3);
         var mp = _movePickerPool[(ply * 3) + (excludedMove == default ? 0 : 1)];
         mp.Init(pos, _movePick, ttMove, depth, ply, contRefs,
             _mpListaBufs[ply], _mpGenBufs[ply]);
@@ -2387,7 +2406,7 @@ public sealed class Search
             // il dato fa in tempo ad arrivare. La TT e' grande e si accede in modo casuale, quindi
             // una Probe che manca la cache e' fra le attese piu' care del motore.
             _tt.Prefetch(pos.PrefetchKey(m));
-            PrefetchCorrHistory(pos, ply, m);
+            PrefetchCorrHistory(pos, corrBase1, corrBase3, m);
             pos.DoMove(m, st, givesCheck, frame.DirtyThreats, frame.DirtyPiece, frame.DirtyPawnPairs, _tt, _shared);
 
             // Step 18 (continua dopo aver fatto la mossa), search.cpp:1316-1359.
@@ -2937,6 +2956,7 @@ public sealed class Search
         Move prevMove = _currentMoveHistory[ply + StackOffset - 1];
         Square prevSq = prevMove != Move.None ? prevMove.ToSq : Square.None;
 
+        BasiCorrHistory(ply, out int corrBase1, out int corrBase3);
         var mp = _movePickerPool[ply * 3];
         mp.Init(pos, _movePick, ttMove, Ply.DepthQs, ply, contRefs,
             _mpListaBufs[ply], _mpGenBufs[ply]);
@@ -3010,7 +3030,7 @@ public sealed class Search
             // il dato fa in tempo ad arrivare. La TT e' grande e si accede in modo casuale, quindi
             // una Probe che manca la cache e' fra le attese piu' care del motore.
             _tt.Prefetch(pos.PrefetchKey(m));
-            PrefetchCorrHistory(pos, ply, m);
+            PrefetchCorrHistory(pos, corrBase1, corrBase3, m);
             pos.DoMove(m, st, givesCheck, qFrame.DirtyThreats, qFrame.DirtyPiece, qFrame.DirtyPawnPairs, _tt, _shared);
             int score = -Quiesce(pos, -beta, -alpha, ply + 1, isPvNode);
 
