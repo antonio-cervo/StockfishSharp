@@ -29,6 +29,17 @@ public sealed class AccumulatorStack
     private readonly NnueAccumulator[] _stack;
     private int _size = 1;
 
+    /// <summary><c>AccumulatorCaches</c> del thread (nnue_accumulator.h:56): una per AccumulatorStack,
+    /// come nella fonte e' una per Worker. Persiste FRA le ricerche — e' proprio quello a renderla
+    /// utile — e viene svuotata solo quando cambia la rete.</summary>
+    private readonly CacheRefresh _cache = new();
+
+    /// <summary>La rete con cui la cache e' stata riempita. Nella fonte lo svuotamento e' esplicito
+    /// in <c>Worker::clear</c>; qui la cache si invalida DA SOLA quando la rete cambia, cosi' non
+    /// puo' restare stantia per una dimenticanza del chiamante. Confronto per riferimento: le
+    /// voci dipendono dai pesi, non dal loro contenuto logico.</summary>
+    private NnueNetwork? _reteDellaCache;
+
     public AccumulatorStack()
     {
         _stack = new NnueAccumulator[MaxSize];
@@ -84,7 +95,13 @@ public sealed class AccumulatorStack
             ForwardUpdateIncremental(perspective, pos, net, lastUsable);
         else
         {
-            _stack[_size - 1].RefreshPerspective(net, pos, perspective);
+            if (!ReferenceEquals(_reteDellaCache, net))
+            {
+                _cache.Svuota(net);
+                _reteDellaCache = net;
+            }
+
+            _stack[_size - 1].RefreshPerspectiveConCache(net, pos, perspective, _cache);
             _stack[_size - 1].Computed[p] = true;
         }
     }

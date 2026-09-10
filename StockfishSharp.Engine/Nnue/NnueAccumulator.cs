@@ -45,6 +45,7 @@ public sealed class NnueAccumulator
     private readonly List<int> _addedThreat = new(256);
     private readonly List<int> _refreshPsq = new(64);
     private readonly List<int> _refreshThreats = new(512);
+    private readonly List<int> _refreshRimosse = new(64); // "removed" di update_accumulator_refresh_cache
     public readonly DirtyPiece DirtyPiece = new();
     public readonly List<DirtyThreat> DirtyThreats = new();
     public readonly DirtyPawnPairs DirtyPawnPairs = new();
@@ -103,6 +104,83 @@ public sealed class NnueAccumulator
         }
 
         // (niente riassegnazione: acc/psqt SONO gia' Accumulation[p]/PsqtAccumulation[p])
+    }
+
+    /// <summary><c>update_accumulator_refresh_cache</c>, nnue_accumulator.cpp:880-948 — il refresh
+    /// che passa dalle "Finny Tables" (<see cref="CacheRefresh"/>) invece di ripartire dai bias.
+    ///
+    /// Fa esattamente cio' che fa la fonte, nello stesso ordine: calcola la differenza fra i pezzi
+    /// memorizzati nella voce e quelli sulla scacchiera, applica quella differenza ALLA VOCE (che
+    /// resta cosi' aggiornata per il prossimo refresh su questa casa del re), e solo dopo copia la
+    /// voce nell'accumulatore sommandoci sopra minacce e coppie — che non sono in cache perche'
+    /// non dipendono solo dalla disposizione dei pezzi.
+    ///
+    /// Il guadagno sta tutto nella prima parte: un refresh da zero somma ~32 righe da 1024 int16,
+    /// questo ne tocca quante sono le case cambiate rispetto all'ultima volta che si e' passati di
+    /// qui con il re su quella casa — in partita quasi sempre pochissime.</summary>
+    public void RefreshPerspectiveConCache(NnueNetwork net, Position pos, Color perspective, CacheRefresh cache)
+    {
+        int p = (byte)perspective;
+        Square ksq = pos.SquareOf(PieceType.King, perspective);
+        var voce = cache[ksq, perspective];
+
+        // "get_changed_pieces" + la separazione in removedBB/addedBB (nnue_accumulator.cpp:890-908).
+        // La fonte usa i bitboard per iterare solo sulle case cambiate; qui si scorrono le 64 case
+        // confrontando pezzo memorizzato e pezzo attuale, che e' la stessa cosa con un confronto in
+        // piu' per casa — trascurabile rispetto alle righe di peso che si risparmiano.
+        var rimosse = _refreshRimosse; rimosse.Clear();
+        var aggiunte = _refreshPsq; aggiunte.Clear();
+        for (int i = 0; i < Squares.Nb; i++)
+        {
+            Piece memorizzato = voce.Pezzi[i];
+            Piece attuale = pos.PieceOn((Square)i);
+            if (memorizzato == attuale) continue;
+
+            if (memorizzato != Piece.None)
+                rimosse.Add(HalfKAv2Hm.MakeIndex(perspective, (Square)i, memorizzato, ksq));
+            if (attuale != Piece.None)
+                aggiunte.Add(HalfKAv2Hm.MakeIndex(perspective, (Square)i, attuale, ksq));
+
+            voce.Pezzi[i] = attuale; // "entry.pieces = pos.piece_array()"
+        }
+
+        voce.PezziBB = pos.Pieces(); // "entry.pieceBB = pos.pieces()"
+
+        // La voce si aggiorna PRIMA di essere copiata: e' il "store_tile(j, &entry.accumulation[0])"
+        // della fonte, che avviene prima di sommarci sopra le minacce.
+        short[] accCache = voce.Accumulation;
+        int[] psqtCache = voce.PsqtAccumulation;
+
+        foreach (int f in rimosse)
+        {
+            SubtractWeightRowI16(accCache, net.Weights, f * L1);
+            int pBase = f * PsqtBuckets;
+            for (int b = 0; b < PsqtBuckets; b++) psqtCache[b] -= net.PsqtWeights[pBase + b];
+        }
+
+        foreach (int f in aggiunte)
+        {
+            AddWeightRowI16(accCache, net.Weights, f * L1);
+            int pBase = f * PsqtBuckets;
+            for (int b = 0; b < PsqtBuckets; b++) psqtCache[b] += net.PsqtWeights[pBase + b];
+        }
+
+        short[] acc = Accumulation[p];
+        int[] psqt = PsqtAccumulation[p];
+        accCache.AsSpan(0, L1).CopyTo(acc);
+        psqtCache.AsSpan(0, PsqtBuckets).CopyTo(psqt);
+
+        // Minacce e coppie: ricalcolate e sommate sopra, MAI messe in cache (la fonte fa lo stesso,
+        // nnue_accumulator.cpp:913-916 e 930-934).
+        var minacce = _refreshThreats; minacce.Clear();
+        FullThreats.AppendActiveIndices(perspective, pos, minacce);
+        Pp3Wide.AppendActiveIndices(perspective, pos, minacce);
+        foreach (int f in minacce)
+        {
+            AddWeightRowI8(acc, net.ThreatAndPpWeights, f * L1);
+            int pBase = f * PsqtBuckets;
+            for (int b = 0; b < PsqtBuckets; b++) psqt[b] += net.ThreatAndPpPsqtWeights[pBase + b];
+        }
     }
 
     /// <summary>N9 — applica a QUESTA prospettiva (già inizializzata a copia del frame precedente
