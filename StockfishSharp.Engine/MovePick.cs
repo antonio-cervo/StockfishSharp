@@ -78,7 +78,7 @@ public sealed class MovePick
     // ContinuationHistory, history.h:137-143 — ContinuationHistoryBlock::table[2][2] della fonte.
     // NON e' piu' nostra: vive in SharedHistories, condivisa da tutti i thread (search.h:356).
     private SharedHistories _shared = null!;
-    private short[,,,,,] _continuationHistory = null!;
+    private short[] _continuationHistory = null!;
 
     /// <summary>Aggancia le tabelle condivise fra i thread — <c>Worker::Worker</c>, search.cpp:171-172
     /// (<c>sharedHistory(...)</c> e <c>continuationHistory(sharedHistory.continuationHistory())</c>).</summary>
@@ -392,7 +392,7 @@ public sealed class MovePick
     /// mosse. <c>default(ContinuationRef)</c> ha gia' esattamente i campi di quella casella
     /// (InCheck=false, CaptureStage=false, Piece=None, To=A1), quindi basta indicizzare sempre.</summary>
     private int ContinuationScore(ContinuationRef r, Piece pc, Square to) =>
-        _continuationHistory[r.InCheck ? 1 : 0, r.CaptureStage ? 1 : 0, (byte)r.Piece, (byte)r.To, (byte)pc, (byte)to];
+        _continuationHistory[SharedHistories.IndiceContinuation(r.InCheck, r.CaptureStage, r.Piece, r.To, pc, to)];
 
     /// <summary><c>update_quiet_histories</c>, search.cpp:2045-2056 — main history, low-ply
     /// history (solo ply&lt;5) e continuation history (vedi nota in testa al file per pawn
@@ -428,7 +428,8 @@ public sealed class MovePick
             var r = contRefs[i - 1];
             if (!r.IsOk) continue;
 
-            ref short entry = ref _continuationHistory[r.InCheck ? 1 : 0, r.CaptureStage ? 1 : 0, (byte)r.Piece, (byte)r.To, (byte)pc, (byte)to];
+            ref short entry = ref _continuationHistory[
+                SharedHistories.IndiceContinuation(r.InCheck, r.CaptureStage, r.Piece, r.To, pc, to)];
             if (entry > 0) positiveCount++;
 
             int multiplier = CmhcMultipliers[positiveCount];

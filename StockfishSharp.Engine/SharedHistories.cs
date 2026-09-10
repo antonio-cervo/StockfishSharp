@@ -42,8 +42,22 @@ public sealed class SharedHistories
     /// <summary>ContinuationHistoryBlock::table[2][2], history.h:198-200 — indicizzata [scacco del
     /// nodo genitore][la sua mossa era una cattura][pezzo mosso lì][casa di arrivo][pezzo di questa
     /// mossa][casa di arrivo]. NON scala col numero di thread: nella fonte e' un blocco singolo.</summary>
-    public readonly short[,,,,,] ContinuationHistory =
-        new short[2, 2, PieceSlots.Nb, Squares.Nb, PieceSlots.Nb, Squares.Nb];
+    /// <remarks>ARRAY PIATTO. In .NET un array multidimensionale non e' un vettore: ogni accesso
+    /// paga un calcolo con controllo di limite PER DIMENSIONE, e qui le dimensioni sono SEI. Questa
+    /// tabella e' letta cinque o sei volte per ogni mossa valutata, a ogni nodo: e' il punto piu'
+    /// caldo del motore fuori dalla NNUE. L'indice si calcola con <see cref="IndiceContinuation"/>,
+    /// nello stesso ordine di prima — [scacco del genitore][sua cattura][pezzo mosso li'][casa di
+    /// arrivo][pezzo di questa mossa][casa di arrivo].</remarks>
+    public readonly short[] ContinuationHistory =
+        new short[2 * 2 * PieceSlots.Nb * Squares.Nb * PieceSlots.Nb * Squares.Nb];
+
+    /// <summary>Indice piatto della continuation history, nell'ordine delle dimensioni originali.</summary>
+    public static int IndiceContinuation(bool inCheck, bool captureStage, Piece pezzoPrec, Square casaPrec, Piece pc, Square to)
+        => ((((((inCheck ? 1 : 0) * 2) + (captureStage ? 1 : 0)) * PieceSlots.Nb
+              + (byte)pezzoPrec) * Squares.Nb
+              + (byte)casaPrec) * PieceSlots.Nb
+              + (byte)pc) * Squares.Nb
+              + (byte)to;
 
     /// <summary>PawnHistory, history.h:146 — DynStats, quindi PAWN_HISTORY_BASE_SIZE per thread.</summary>
     public readonly short[,,] PawnHistory;
