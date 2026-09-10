@@ -22,8 +22,15 @@ Uso:  python tools/confronta_traccia.py "FEN" PROFONDITA [prefisso] [plyMax]
 import subprocess, os, io, sys, tempfile
 
 ROOT = r'D:\Antcer\Documenti\ProgettiVS\StockfishSharp'
+# Il muxer .NET da usare. Finche' l'SDK 11 non e' installato a livello di sistema, il
+# 'dotnet' del PATH e' il 10 e NON puo' eseguire un binario net11.0: si preferisce quindi
+# l'installazione utente, ricadendo su quella di sistema appena c'e'.
+import os as _os
+_MUX = _os.path.expanduser(r'~\.dotnet11\dotnet.exe')
+DOTNET = _MUX if _os.path.exists(_MUX) else 'dotnet'
+
 ORACOLO_DIR = r'D:\Antcer\Documenti\ProgettiVS\oracolo-build\src'
-OURS = ['dotnet', ROOT + r'\StockfishSharp.Uci\bin\Release\net10.0\StockfishSharpUci.dll']
+OURS = [DOTNET, ROOT + r'\StockfishSharp.Uci\bin\Release\net11.0\StockfishSharpUci.dll']
 ORACLE = [ORACOLO_DIR + r'\stockfish.exe']
 
 FEN = sys.argv[1] if len(sys.argv) > 1 else "8/3k4/8/8/8/4B3/4KB2/2B5 w - - 0 1"

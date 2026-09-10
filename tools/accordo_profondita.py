@@ -22,7 +22,14 @@ Uso:  python tools/accordo_profondita.py 1 3 6 9 12
 import subprocess, re, io, sys
 
 ROOT = r'D:\Antcer\Documenti\ProgettiVS\StockfishSharp'
-OURS = ['dotnet', ROOT + r'\StockfishSharp.Uci\bin\Release\net10.0\StockfishSharpUci.dll']
+# Il muxer .NET da usare. Finche' l'SDK 11 non e' installato a livello di sistema, il
+# 'dotnet' del PATH e' il 10 e NON puo' eseguire un binario net11.0: si preferisce quindi
+# l'installazione utente, ricadendo su quella di sistema appena c'e'.
+import os as _os
+_MUX = _os.path.expanduser(r'~\.dotnet11\dotnet.exe')
+DOTNET = _MUX if _os.path.exists(_MUX) else 'dotnet'
+
+OURS = [DOTNET, ROOT + r'\StockfishSharp.Uci\bin\Release\net11.0\StockfishSharpUci.dll']
 ORACLE = [ROOT + r'\stockfish-reference-binary\stockfish\stockfish-windows-x86-64-universal.exe']
 
 src = io.open(ROOT + r'\StockfishSharp.Uci\Program.cs', encoding='utf-8').read()

@@ -17,8 +17,15 @@ Uso:  python tools/tablebase.py 10 16
 import subprocess, re, sys, os
 
 ROOT = r'D:\Antcer\Documenti\ProgettiVS\StockfishSharp'
+# Il muxer .NET da usare. Finche' l'SDK 11 non e' installato a livello di sistema, il
+# 'dotnet' del PATH e' il 10 e NON puo' eseguire un binario net11.0: si preferisce quindi
+# l'installazione utente, ricadendo su quella di sistema appena c'e'.
+import os as _os
+_MUX = _os.path.expanduser(r'~\.dotnet11\dotnet.exe')
+DOTNET = _MUX if _os.path.exists(_MUX) else 'dotnet'
+
 SYZYGY = r'D:/Antcer/Documenti/ProgettiVS/ACMyChess/Syzygy'
-OURS = ['dotnet', ROOT + r'\StockfishSharp.Uci\bin\Release\net10.0\StockfishSharpUci.dll']
+OURS = [DOTNET, ROOT + r'\StockfishSharp.Uci\bin\Release\net11.0\StockfishSharpUci.dll']
 ORACLE = [ROOT + r'\stockfish-reference-binary\stockfish\stockfish-windows-x86-64-universal.exe']
 
 # Finali entro i 5 pezzi (il set disponibile in locale e' 3-4-5), scelti con punteggi DECISIVI:
