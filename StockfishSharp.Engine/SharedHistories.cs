@@ -60,7 +60,13 @@ public sealed class SharedHistories
               + (byte)to;
 
     /// <summary>PawnHistory, history.h:146 — DynStats, quindi PAWN_HISTORY_BASE_SIZE per thread.</summary>
-    public readonly short[,,] PawnHistory;
+    public readonly short[] PawnHistory;
+
+    /// <summary>Indice piatto della pawn history, nell'ordine originale [chiave dei pedoni]
+    /// [pezzo][casa di arrivo]. Appiattita per lo stesso motivo della continuation history: a tre
+    /// dimensioni l'accesso costa 1,47x quello su array piatto.</summary>
+    public static int IndicePawn(ulong chiave, Piece pc, Square to)
+        => (int)((((chiave * PieceSlots.Nb) + (byte)pc) * Squares.Nb) + (byte)to);
 
     /// <summary>UnifiedCorrectionHistory, history.h:189-191 — DynStats, CORRHIST_BASE_SIZE per
     /// thread. Qui divisa nei quattro campi del CorrectionBundle (vedi la nota in testa).</summary>
@@ -81,7 +87,7 @@ public sealed class SharedHistories
         PawnHistSizeMinus1 = pawnSize - 1;
         CorrSizeMinus1 = corrSize - 1;
 
-        PawnHistory = new short[pawnSize, PieceSlots.Nb, Squares.Nb];
+        PawnHistory = new short[pawnSize * PieceSlots.Nb * Squares.Nb];
         PawnCorrHistory = new short[corrSize, Colors.Nb];
         MinorCorrHistory = new short[corrSize, Colors.Nb];
         NonPawnWhiteCorrHistory = new short[corrSize, Colors.Nb];

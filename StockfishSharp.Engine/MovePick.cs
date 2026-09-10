@@ -94,7 +94,15 @@ public sealed class MovePick
 
     // CapturePieceToHistory, history.h:135 — Stats<i16,10692,PIECE_NB,SQUARE_NB,PIECE_TYPE_NB>,
     // indicizzata [pezzo che cattura][casa di arrivo][tipo del pezzo catturato].
-    private readonly short[,,] _captureHistory = new short[PieceSlots.Nb, Squares.Nb, PieceTypes.Nb];
+    // ARRAY PIATTO: a tre dimensioni l'accesso multidimensionale costa 1,47x quello piatto
+    // (misurato), e questa tabella si legge per ogni cattura valutata. A DUE dimensioni invece non
+    // converrebbe (0,97x): le tabelle rimaste multidimensionali sono tutte a due.
+    private readonly short[] _captureHistory = new short[PieceSlots.Nb * Squares.Nb * PieceTypes.Nb];
+
+    /// <summary>Indice piatto della capture history, nell'ordine originale [pezzo mosso][casa di
+    /// arrivo][tipo del pezzo catturato].</summary>
+    private static int IndiceCapture(Piece pezzo, Square to, PieceType catturato)
+        => ((((byte)pezzo * Squares.Nb) + (byte)to) * PieceTypes.Nb) + (byte)catturato;
 
     // LowPlyHistory, history.h:130-132 — Stats<i16,7183,LOW_PLY_HISTORY_SIZE,UINT_16_HISTORY_SIZE>,
     // indicizzata [ply][move.raw()]; azzerata per ogni ricerca, non per ogni partita (vedi nota in
@@ -131,7 +139,7 @@ public sealed class MovePick
         for (int p = 0; p < PieceSlots.Nb; p++)
             for (int s = 0; s < Squares.Nb; s++)
                 for (int t = 0; t < PieceTypes.Nb; t++)
-                    _captureHistory[p, s, t] = -742; // Worker::clear(), search.cpp:692
+                    _captureHistory[IndiceCapture((Piece)p, (Square)s, (PieceType)t)] = -742; // Worker::clear(), search.cpp:692
 
         _ttMoveHistory = 0; // Worker::clear(), search.cpp:706
 
@@ -214,7 +222,7 @@ public sealed class MovePick
             // search.cpp:1995-1998 — bonus alla cattura migliore.
             Piece movedPiece = pos.MovedPiece(bestMove);
             PieceType capturedPiece = Types.TypeOf(pos.PieceOn(bestMove.ToSq));
-            UpdateHistory(ref _captureHistory[(byte)movedPiece, (byte)bestMove.ToSq, (byte)capturedPiece], bonus * 1427 / 1024, CaptureHistoryLimit);
+            UpdateHistory(ref _captureHistory[IndiceCapture(movedPiece, bestMove.ToSq, capturedPiece)], bonus * 1427 / 1024, CaptureHistoryLimit);
         }
 
         // search.cpp:2000-2003 "Extra penalty for a quiet early move that was not a TT move in
@@ -231,7 +239,7 @@ public sealed class MovePick
         {
             Piece movedPiece = pos.MovedPiece(m);
             PieceType capturedPiece = Types.TypeOf(pos.PieceOn(m.ToSq));
-            UpdateHistory(ref _captureHistory[(byte)movedPiece, (byte)m.ToSq, (byte)capturedPiece], -malus * 1489 / 1024, CaptureHistoryLimit);
+            UpdateHistory(ref _captureHistory[IndiceCapture(movedPiece, m.ToSq, capturedPiece)], -malus * 1489 / 1024, CaptureHistoryLimit);
         }
 
         // search.cpp:1574-1575 — bonus/malus a TTMoveHistory quando la bestMove combacia o no con
@@ -271,13 +279,13 @@ public sealed class MovePick
         UpdateHistory(ref _mainHistory[(byte)opponent, parentMove.Raw], scaledBonus * 215 / 32768, MainHistoryLimit);
 
         if (Types.TypeOf(prevPiece) != PieceType.Pawn && parentMove.TypeOf != MoveType.Promotion)
-            UpdateHistory(ref _shared.PawnHistory[pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, (byte)prevPiece, (byte)prevSq], scaledBonus * 324 / 8192, PawnHistoryLimit);
+            UpdateHistory(ref _shared.PawnHistory[SharedHistories.IndicePawn(pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, prevPiece, prevSq)], scaledBonus * 324 / 8192, PawnHistoryLimit);
     }
 
     /// <summary>Ramo "bonus per il countermove di cattura che ha causato il fail-low puro",
     /// search.cpp:1603-1609.</summary>
     public void ApplyCountermoveCaptureBonus(Piece prevPiece, Square prevSq, PieceType capturedType) =>
-        UpdateHistory(ref _captureHistory[(byte)prevPiece, (byte)prevSq, (byte)capturedType], 892, CaptureHistoryLimit);
+        UpdateHistory(ref _captureHistory[IndiceCapture(prevPiece, prevSq, capturedType)], 892, CaptureHistoryLimit);
 
     /// <summary>"Use static evaluation difference to improve quiet move ordering",
     /// search.cpp:978-986 — a differenza di <see cref="UpdateStats"/> non dipende dall'esito della
@@ -294,7 +302,7 @@ public sealed class MovePick
     /// perché nella fonte ha guardie aggiuntive (nessun hit di TT, pezzo del genitore non un
     /// pedone, mossa del genitore non una promozione).</summary>
     public void ApplyEvalDiffPawnBonus(Position pos, Piece prevPiece, Square prevSq, int bonus) =>
-        UpdateHistory(ref _shared.PawnHistory[pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, (byte)prevPiece, (byte)prevSq], bonus, PawnHistoryLimit);
+        UpdateHistory(ref _shared.PawnHistory[SharedHistories.IndicePawn(pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, prevPiece, prevSq)], bonus, PawnHistoryLimit);
 
     /// <summary><c>ss-&gt;statScore</c>, search.cpp:1342-1349 — usato da Reduction() in Search.cs
     /// per rifinire la riduzione LMR in base a quanto la history "approva" la mossa. Per le
@@ -343,7 +351,7 @@ public sealed class MovePick
         {
             Piece captured = pos.CapturedPiece();
             return (873 * Values.PieceValue[(byte)captured] / 128)
-                + _captureHistory[(byte)movedPiece, (byte)m.ToSq, (byte)Types.TypeOf(captured)];
+                + _captureHistory[IndiceCapture(movedPiece, m.ToSq, Types.TypeOf(captured))];
         }
 
         Piece pc = movedPiece;
@@ -362,19 +370,19 @@ public sealed class MovePick
         Square to = m.ToSq;
         int cont0 = ContinuationScore(contRefs[0], pc, to);
         int cont1 = ContinuationScore(contRefs[1], pc, to);
-        int pawnScore = _shared.PawnHistory[pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, (byte)pc, (byte)to];
+        int pawnScore = _shared.PawnHistory[SharedHistories.IndicePawn(pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, pc, to)];
         return cont0 + cont1 + pawnScore;
     }
 
     public int GetMainHistoryRaw(Color us, Move m) => _mainHistory[(byte)us, m.Raw];
 
     public int GetCaptureHistory(Piece movedPiece, Square to, PieceType captured) =>
-        _captureHistory[(byte)movedPiece, (byte)to, (byte)captured];
+        _captureHistory[IndiceCapture(movedPiece, to, captured)];
 
     public int GetLowPlyHistoryValue(int ply, Move m) => _lowPlyHistory[ply, m.Raw];
 
     public int GetPawnHistoryValue(Position pos, Piece pc, Square to) =>
-        _shared.PawnHistory[pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, (byte)pc, (byte)to];
+        _shared.PawnHistory[SharedHistories.IndicePawn(pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, pc, to)];
 
     /// <summary>Lettura pubblica di un livello di continuation history (0=ss-1..5=ss-6) — usata
     /// da <see cref="MovePicker"/> per lo score delle mosse quiete (movepick.cpp:233-237).</summary>
@@ -410,7 +418,7 @@ public sealed class MovePick
         UpdateContinuationHistories(contRefs, currentInCheck, pc, move.ToSq, bonus * 750 / 1024);
 
         // search.cpp:2056-2057 — scala diversamente un bonus (raro, "bonus > -4") da un malus.
-        UpdateHistory(ref _shared.PawnHistory[pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, (byte)pc, (byte)move.ToSq],
+        UpdateHistory(ref _shared.PawnHistory[SharedHistories.IndicePawn(pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, pc, move.ToSq)],
             bonus * (bonus > -4 ? 1104 : 459) / 1024, PawnHistoryLimit);
     }
 
