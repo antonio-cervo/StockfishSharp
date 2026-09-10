@@ -71,7 +71,12 @@ public sealed class NnueAccumulator
     /// La misura che ha reso evidente il problema: update_accumulator_hybrid e
     /// backward_update_incremental, portate fedelmente il 2026-09-10, risultavano PIU' LENTE
     /// proprio perche' aggiungevano altre passate — vedi la nota in testa ad AccumulatorStack.cs.</summary>
-    private static void ApplicaFuso(short[] acc, NnueNetwork net,
+    // MISURATO il 2026-09-10: la stessa passata scritta a 256 bit (Vector256, due registri per
+    // tile da 32 short) e' PIU' LENTA — otto coppie appaiate, una sola a favore, media -1,3%.
+    // Contro l'intuizione, perche' su Zen 4 l'AVX-512 e' "double-pumped" (eseguito internamente in
+    // due passate da 256 bit) e ci si poteva aspettare un pareggio o un vantaggio dei registri
+    // stretti. Non e': i 512 bit restano. Domanda chiusa, non da riaprire senza hardware diverso.
+    private static void ApplicaFuso(short[] acc, short[] sorgente, NnueNetwork net,
                                     List<int> psqTogliere, List<int> psqSommare,
                                     List<int> thrTogliere, List<int> thrSommare)
     {
@@ -89,8 +94,13 @@ public sealed class NnueAccumulator
         // caricano 64 byte alla volta e si allargano in due meta'.
         for (int j = 0; j < L1; j += 64)
         {
-            var lo = Vector512.LoadUnsafe(ref acc[j]);
-            var hi = Vector512.LoadUnsafe(ref acc[j + 32]);
+            // Si LEGGE dalla sorgente e si SCRIVE nella destinazione nella stessa passata: e' cio'
+            // che fa "apply_combined" della fonte, che riceve "computed" e "target_state" separati.
+            // Prima il chiamante copiava l'intero accumulatore (2 KB per prospettiva, a ogni nodo
+            // valutato) e poi lo modificava sul posto: quella copia era il ~3% del tempo di ricerca,
+            // visibile nel profilo come SpanHelpers.Memmove.
+            var lo = Vector512.LoadUnsafe(ref sorgente[j]);
+            var hi = Vector512.LoadUnsafe(ref sorgente[j + 32]);
 
             foreach (int f in psqT)
             {
@@ -296,11 +306,18 @@ public sealed class NnueAccumulator
     /// per i PSQT. Nessuna controparte diretta nella fonte (lì è inline dentro
     /// <c>update_accumulator_incremental</c>, nnue_accumulator.cpp:533-579) — qui separata per
     /// riusare gli <c>AppendChangedIndices</c> già scritti per ciascuna feature.</summary>
-    public void ApplyIncrementalDelta(NnueNetwork net, Color perspective, Square ksq)
+    /// <param name="sorgente">l'accumulatore del frame PRECEDENTE: si legge da li' e si scrive in
+    /// questo, senza copia intermedia (la fonte fa lo stesso, apply_combined riceve "computed" e
+    /// "target_state" distinti).</param>
+    public void ApplyIncrementalDelta(NnueNetwork net, Color perspective, Square ksq, NnueAccumulator sorgente)
     {
         int p = (byte)perspective;
         short[] acc = Accumulation[p];
         int[] psqt = PsqtAccumulation[p];
+        short[] accSorgente = sorgente.Accumulation[p];
+
+        // I PSQT sono otto interi: la copia qui e' irrilevante e tenerla separata e' piu' chiaro.
+        sorgente.PsqtAccumulation[p].AsSpan(0, PsqtBuckets).CopyTo(psqt);
 
         // Buffer FISSI riusati, non quattro liste nuove a ogni chiamata: nella fonte sono array a
         // capacita' fissa dichiarati sullo stack ("IndexList removed[2], added[2]",
@@ -321,9 +338,10 @@ public sealed class NnueAccumulator
         // L'accumulatore: UNA passata sola con tutto dentro (vedi ApplicaFuso). Il ripiego
         // scalare resta per l'hardware senza AVX-512.
         if (UsingAvx512)
-            ApplicaFuso(acc, net, removedPsq, addedPsq, removedThreat, addedThreat);
+            ApplicaFuso(acc, accSorgente, net, removedPsq, addedPsq, removedThreat, addedThreat);
         else
         {
+            accSorgente.AsSpan(0, L1).CopyTo(acc); // il ripiego scalare lavora sul posto
             foreach (int f in removedPsq) SubtractWeightRowI16(acc, net.Weights, f * L1);
             foreach (int f in addedPsq) AddWeightRowI16(acc, net.Weights, f * L1);
             foreach (int f in removedThreat) SubtractWeightRowI8(acc, net.ThreatAndPpWeights, f * L1);

@@ -152,12 +152,11 @@ public sealed class AccumulatorStack
             var prev = _stack[next - 1];
             var cur = _stack[next];
 
-            // Copia SUL POSTO negli array preallocati del frame corrente: il Clone() precedente
-            // allocava 2 KB per prospettiva a OGNI aggiornamento incrementale, cioe' a ogni nodo.
-            prev.Accumulation[p].AsSpan().CopyTo(cur.Accumulation[p]);
-            prev.PsqtAccumulation[p].AsSpan().CopyTo(cur.PsqtAccumulation[p]);
-
-            cur.ApplyIncrementalDelta(net, perspective, ksq);
+            // Niente copia: ApplyIncrementalDelta legge dal frame precedente e scrive in questo
+            // nella STESSA passata, come "apply_combined" della fonte. La copia che c'era qui
+            // (2 KB per prospettiva a ogni nodo valutato) era il ~3% del tempo di ricerca, visibile
+            // nel profilo come SpanHelpers.Memmove.
+            cur.ApplyIncrementalDelta(net, perspective, ksq, prev);
             cur.Computed[p] = true;
         }
     }
