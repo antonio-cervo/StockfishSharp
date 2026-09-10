@@ -315,7 +315,7 @@ public sealed class NnueAccumulator
 
         var removedThreat = _removedThreat; removedThreat.Clear();
         var addedThreat = _addedThreat; addedThreat.Clear();
-        FullThreats.AppendChangedIndices(perspective, ksq, DirtyThreats, removedThreat, addedThreat);
+        FullThreats.AppendChangedIndices(perspective, ksq, DirtyThreats, removedThreat, addedThreat, net.ThreatAndPpWeights);
         Pp3Wide.AppendChangedIndices(perspective, ksq, DirtyPawnPairs, removedThreat, addedThreat);
 
         // L'accumulatore: UNA passata sola con tutto dentro (vedi ApplicaFuso). Il ripiego

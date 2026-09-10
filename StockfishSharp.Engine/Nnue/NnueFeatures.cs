@@ -156,7 +156,13 @@ public static class FullThreats
 
     // offsets[piece][from] = quante case raggiungibili ci sono state PRIMA di "from" per quel
     // pezzo — full_threats.cpp:116-150 (init_threat_offsets), qui a runtime invece che constexpr.
-    private static readonly int[,] Offsets = new int[16, 64];
+    // ARRAY PIATTI, non multidimensionali. In .NET un int[,] non e' un vettore: ogni accesso
+    // passa da un calcolo con controllo di limite per DIMENSIONE e il JIT lo ottimizza molto
+    // peggio di un array a una dimensione. Qui pesava: MakeIndex fa tre di questi accessi ed e'
+    // sul percorso caldo (la costruzione delle liste era il 23% dell'aggiornamento incrementale
+    // dell'accumulatore, ~16 ns per singolo indice). Stessa famiglia del T[,] che su Mono aveva
+    // gia' causato guai in un altro progetto di casa.
+    private static readonly int[] Offsets = new int[16 * 64];
 
     // cumulativePieceOffset[piece] = totale case raggiungibili da quel pezzo su tutta la
     // scacchiera; cumulativeOffset[piece] = dove inizia il blocco di quel pezzo nello spazio a
@@ -166,10 +172,10 @@ public static class FullThreats
 
     // index_lut2[piece][from][to] = indice compresso (popcount) di "to" fra le case raggiungibili
     // da "from" per quel pezzo — full_threats.cpp:46-114.
-    private static readonly int[,,] IndexLut2 = new int[16, 64, 64];
+    private static readonly int[] IndexLut2 = new int[16 * 64 * 64];
 
     // index_lut1[attaccante][attaccato][from<to] — full_threats.cpp:156-181.
-    private static readonly int[,,] IndexLut1 = new int[16, 16, 2];
+    private static readonly int[] IndexLut1 = new int[16 * 16 * 2];
 
     // full_threats.cpp:41-44 (AllPieces) — SOLO i 12 pezzi reali. Iterare grezzamente su 0..15
     // (come in un primo tentativo) incontra anche i due valori "buco" del pacchettamento
@@ -194,7 +200,7 @@ public static class FullThreats
             int pieceCum = 0;
             for (var from = Square.A1; from <= Square.H8; from++)
             {
-                Offsets[pieceIdx, (byte)from] = pieceCum;
+                Offsets[(pieceIdx * 64) + (byte)from] = pieceCum;
 
                 ulong attacks;
                 if (pt == PieceType.Pawn)
@@ -215,7 +221,7 @@ public static class FullThreats
                 {
                     if ((bb & Bitboards.SquareBB(to)) != 0)
                     {
-                        IndexLut2[pieceIdx, (byte)from, (byte)to] = idx;
+                        IndexLut2[(((pieceIdx * 64) + (byte)from) * 64) + (byte)to] = idx;
                         idx++;
                     }
                 }
@@ -247,8 +253,8 @@ public static class FullThreats
                     + (((int)attackedColor * (NumValidTargets[attackerIdx] / 2)) + map) * CumulativePieceOffset[attackerIdx];
 
                 bool excluded = map < 0;
-                IndexLut1[attackerIdx, attackedIdx, 0] = excluded ? Dimensions : feature;
-                IndexLut1[attackerIdx, attackedIdx, 1] = excluded || semiExcluded ? Dimensions : feature;
+                IndexLut1[(((attackerIdx * 16) + attackedIdx) * 2) + 0] = excluded ? Dimensions : feature;
+                IndexLut1[(((attackerIdx * 16) + attackedIdx) * 2) + 1] = excluded || semiExcluded ? Dimensions : feature;
             }
         }
     }
@@ -264,9 +270,10 @@ public static class FullThreats
         int attackerOriented = (byte)attacker ^ swap;
         int attackedOriented = (byte)attacked ^ swap;
 
-        return IndexLut1[attackerOriented, attackedOriented, fromOriented < toOriented ? 1 : 0]
-             + Offsets[attackerOriented, fromOriented]
-             + IndexLut2[attackerOriented, fromOriented, toOriented];
+        int attaccanteFrom = (attackerOriented * 64) + fromOriented;
+        return IndexLut1[(((attackerOriented * 16) + attackedOriented) * 2) + (fromOriented < toOriented ? 1 : 0)]
+             + Offsets[attaccanteFrom]
+             + IndexLut2[(attaccanteFrom * 64) + toOriented];
     }
 
     /// <summary><c>append_active_indices</c>, full_threats.cpp:209-257.</summary>
@@ -324,15 +331,36 @@ public static class FullThreats
     /// <summary><c>append_changed_indices</c>, full_threats.cpp:261-285 — itera direttamente la
     /// lista di <see cref="DirtyThreat"/> raccolta da <c>Position.UpdatePieceThreats</c> durante la
     /// mossa: ciascuno diventa un indice aggiunto o rimosso a seconda del suo flag <c>Add</c>.</summary>
-    public static void AppendChangedIndices(Color perspective, Square ksq, List<DirtyThreat> dirtyThreats, List<int> removed, List<int> added)
+    /// <param name="pesiDaPrefetchare">i pesi minacce/coppie, per il PREFETCH. La fonte fa
+    /// esattamente questo (full_threats.cpp:280-282, con i parametri "prefetchBase"/"prefetchStride"
+    /// commentati "used solely for prefetching"): appena calcolato l'indice, chiede alla memoria la
+    /// riga di pesi che servira' DOPO, nella passata sull'accumulatore. Fra i due momenti passano
+    /// centinaia di cicli, quindi il dato fa in tempo ad arrivare in cache.
+    ///
+    /// Perche' qui conta: la passata legge una riga da 2 KB per feature, a offset sparsi, ed e' il
+    /// ~70% dell'aggiornamento incrementale — cioe' e' limitata dalla LATENZA di memoria, che e'
+    /// esattamente cio' che il prefetch nasconde. Passare null lo disattiva.</param>
+    public static void AppendChangedIndices(Color perspective, Square ksq, List<DirtyThreat> dirtyThreats, List<int> removed, List<int> added, sbyte[]? pesiDaPrefetchare = null)
     {
         foreach (var dirty in dirtyThreats)
         {
             int index = MakeIndex(perspective, dirty.Pc, dirty.PcSq, dirty.ThreatenedSq, dirty.ThreatenedPc, ksq);
             if (index >= Dimensions) continue; // combinazione esclusa dalla feature — vedi AppendActiveIndices
 
+            Prefetch(pesiDaPrefetchare, index);
             (dirty.Add ? added : removed).Add(index);
         }
+    }
+
+    /// <summary>Chiede alla memoria la riga di pesi dell'indice appena calcolato. E' un SUGGERIMENTO
+    /// hardware: se l'indirizzo fosse nel frattempo cambiato (il GC puo' spostare l'array) non
+    /// succede nulla, l'istruzione di prefetch non genera errori per definizione.</summary>
+    internal static unsafe void Prefetch(sbyte[]? pesi, int index)
+    {
+        if (pesi is null || !System.Runtime.Intrinsics.X86.Sse.IsSupported) return;
+        System.Runtime.Intrinsics.X86.Sse.Prefetch0(
+            System.Runtime.CompilerServices.Unsafe.AsPointer(
+                ref pesi[(nint)index * NnueArchitecture.L1]));
     }
 }
 
