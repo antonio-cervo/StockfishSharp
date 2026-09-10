@@ -204,8 +204,36 @@ public static class NnueLayers
             var w0 = Vector512.LoadUnsafe(ref wRef, wBase);
             var w1 = Vector512.LoadUnsafe(ref wRef, wBase + 64);
 
-            acc0 += Avx512BW.MultiplyAddAdjacent(Avx512BW.MultiplyAddAdjacent(inVec, w0), ones);
-            acc1 += Avx512BW.MultiplyAddAdjacent(Avx512BW.MultiplyAddAdjacent(inVec, w1), ones);
+            // La fonte ha due varianti dello stesso prodotto scalare: con VNNI e' UNA istruzione
+            // (vpdpbusd, "vec_add_dpbusd_32" con USE_VNNI definito), senza VNNI sono DUE
+            // (m512_add_dpbusd_epi32, simd.h: madd(maddubs(a,b), ones)). Qui ci sono entrambe, e la
+            // scelta la fa il JIT: "AvxVnni.V512.IsSupported" e' una costante a tempo di
+            // compilazione, quindi il ramo morto sparisce e non c'e' nessun controllo nel ciclo.
+            //
+            // La variante VNNI e' raggiungibile solo da .NET 11 in su, e NON si chiama Avx512Vnni
+            // (che non esiste in nessuna versione): e' AvxVnni.V512, un tipo ANNIDATO. Su .NET 10
+            // era tutto falso e si passava sempre di sotto.
+            //
+            // MISURATA il 2026-09-10 su questo Ryzen 7 8745HS: NESSUN guadagno. Sedici coppie
+            // appaiate, sette a favore — una monetina (media -0,2% e -1,2% nelle due tornate).
+            // La spiegazione plausibile e' che su Zen 4 l'AVX-512 sia "double-pumped" (eseguito in
+            // due passate interne da 256 bit), quindi risparmiare un'istruzione su due non cambia
+            // il tempo; e che questo ciclo sia comunque limitato dalla lettura dei pesi.
+            //
+            // Il ramo resta lo stesso perche' e' quello della FONTE (che sceglie fra le due
+            // varianti in base all'hardware) e perche' non costa niente: il JIT elimina il ramo
+            // morto. Su una CPU Intel con datapath reale a 512 bit potrebbe invece rendere.
+            // Non e' un risultato da rincorrere di nuovo: e' gia' stato misurato.
+            if (AvxVnni.V512.IsSupported)
+            {
+                acc0 = AvxVnni.V512.MultiplyWideningAndAdd(acc0, inVec, w0);
+                acc1 = AvxVnni.V512.MultiplyWideningAndAdd(acc1, inVec, w1);
+            }
+            else
+            {
+                acc0 += Avx512BW.MultiplyAddAdjacent(Avx512BW.MultiplyAddAdjacent(inVec, w0), ones);
+                acc1 += Avx512BW.MultiplyAddAdjacent(Avx512BW.MultiplyAddAdjacent(inVec, w1), ones);
+            }
         }
 
         ref int outRef = ref MemoryMarshal.GetReference(output);
