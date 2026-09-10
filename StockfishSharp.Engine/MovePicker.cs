@@ -354,6 +354,8 @@ public sealed class MovePicker
         // Le basi delle tabelle NON dipendono dalla mossa: si risolvono una volta sola, come i
         // puntatori che la fonte ha gia' pronti (continuationHistory[i], pawn_entry(pos)).
         int basePawn = _hist.BasePawnHistory(_pos);
+        var rigaMain = _hist.RigaMainHistory(us);
+        var rigaLowPly = _ply < LowPlyHistorySize ? _hist.RigaLowPlyHistory(_ply) : default;
         int base0 = _contRefs[0].Base, base1 = _contRefs[1].Base, base2 = _contRefs[2].Base;
         int base3 = _contRefs[3].Base, base5 = _contRefs[5].Base;
 
@@ -367,7 +369,7 @@ public sealed class MovePicker
             PieceType pt = Types.TypeOf(pc);
             int scarto = ((byte)pc * Squares.Nb) + (byte)to;   // lo stesso [pc][to] per tutte e sei
 
-            int value = 2 * _hist.GetMainHistoryRaw(us, m);
+            int value = 2 * rigaMain[m.Raw];
             value += 2 * _hist.PawnHistoryDaBaseScarto(basePawn + scarto);
             value += _hist.ContinuationDaBaseScarto(base0 + scarto);
             value += _hist.ContinuationDaBaseScarto(base1 + scarto);
@@ -383,7 +385,7 @@ public sealed class MovePicker
             value += Values.PieceValue[(byte)pt] * v;
 
             if (_ply < LowPlyHistorySize)
-                value += 8 * _hist.GetLowPlyHistoryValue(_ply, m) / (1 + _ply);
+                value += 8 * rigaLowPly[m.Raw] / (1 + _ply);
 
             lista[it].Move = m;
             lista[it].Value = value;

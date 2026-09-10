@@ -2184,6 +2184,7 @@ public sealed class Search
         // riga sbagliata. Non cambierebbe un solo nodo (un prefetch non puo'), quindi e' proprio
         // il tipo di svista che nessuna verifica di correttezza troverebbe.
         BasiCorrHistory(ply, out corrBase1, out corrBase3);
+        int basePawnHist = _movePick.BasePawnHistory(pos);
         var mp = _movePickerPool[(ply * 3) + (excludedMove == default ? 0 : 1)];
         mp.Init(pos, _movePick, ttMove, depth, ply, contRefs,
             _mpListaBufs[ply], _mpGenBufs[ply]);
@@ -2295,7 +2296,7 @@ public sealed class Search
                 else if (!followPv || !isPvNode)
                 {
                     int dIndex = Math.Min(depth, LmrDivisor.Length) - 1;
-                    int history = _movePick.ComputeQuietPruningHistory(pos, m, contRefs);
+                    int history = _movePick.ComputeQuietPruningHistory(pos, m, contRefs, basePawnHist);
 
                     if (history < -4136 * depth) continue;
 

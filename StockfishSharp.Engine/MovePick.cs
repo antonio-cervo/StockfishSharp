@@ -82,7 +82,11 @@ public sealed class MovePick
 
     // ButterflyHistory, history.h:128 — Stats<i16,7183,COLOR_NB,UINT_16_HISTORY_SIZE>, indicizzata
     // [colore][move.raw()] esattamente come la fonte.
-    private readonly short[,] _mainHistory = new short[Colors.Nb, 65536];
+    /// <summary>Numero di mosse indirizzabili da un Move grezzo (16 bit) — la seconda dimensione
+    /// di main history e low-ply history.</summary>
+    private const int MainHistorySize = 65536;
+
+    private readonly short[,] _mainHistory = new short[Colors.Nb, MainHistorySize];
 
     // ContinuationHistory, history.h:137-143 — ContinuationHistoryBlock::table[2][2] della fonte.
     // NON e' piu' nostra: vive in SharedHistories, condivisa da tutti i thread (search.h:356).
@@ -117,7 +121,7 @@ public sealed class MovePick
     // indicizzata [ply][move.raw()]; azzerata per ogni ricerca, non per ogni partita (vedi nota in
     // testa al file).
     private const int LowPlyHistorySize = 5;
-    private readonly short[,] _lowPlyHistory = new short[LowPlyHistorySize, 65536];
+    private readonly short[,] _lowPlyHistory = new short[LowPlyHistorySize, MainHistorySize];
 
     // TTMoveHistory, history.h:196 — StatsEntry<i16,8192> singolo, non indicizzato.
     private const int TtMoveHistoryLimit = 8192;
@@ -373,17 +377,37 @@ public sealed class MovePick
 
     /// <summary>Somma di contHist[0]+contHist[1]+pawn_entry per una mossa quieta — usata dallo
     /// Step 15 (potatura a profondità bassa, search.cpp:1200-1202) in Search.cs.</summary>
-    public int ComputeQuietPruningHistory(Position pos, Move m, ContinuationRef[] contRefs)
+    /// <summary><paramref name="basePawn"/> arriva da <see cref="BasePawnHistory"/>, calcolata una
+    /// volta per nodo: prima si rifaceva chiave+maschera+moltiplicazione per OGNI mossa quieta
+    /// esaminata dalla potatura, pur dipendendo solo dalla posizione.</summary>
+    public int ComputeQuietPruningHistory(Position pos, Move m, ContinuationRef[] contRefs, int basePawn)
     {
         Piece pc = pos.MovedPiece(m);
         Square to = m.ToSq;
-        int cont0 = ContinuationScore(contRefs[0], pc, to);
-        int cont1 = ContinuationScore(contRefs[1], pc, to);
-        int pawnScore = _shared.PawnHistory[SharedHistories.IndicePawn(pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, pc, to)];
+        int scarto = ((byte)pc * Squares.Nb) + (byte)to;
+        int cont0 = _continuationHistory[contRefs[0].Base + scarto];
+        int cont1 = _continuationHistory[contRefs[1].Base + scarto];
+        int pawnScore = _shared.PawnHistory[basePawn + scarto];
         return cont0 + cont1 + pawnScore;
     }
 
     public int GetMainHistoryRaw(Color us, Move m) => _mainHistory[(byte)us, m.Raw];
+
+    /// <summary>La riga della main history di un colore e quella della low-ply history di un ply —
+    /// <c>(*mainHistory)[us]</c> e <c>(*lowPlyHistory)[ply]</c> della fonte, che sono righe GIA'
+    /// scelte. Il colore e il ply sono costanti per tutto score&lt;QUIETS&gt;, quindi la riga si
+    /// risolve una volta invece di rifare l'indicizzazione a due dimensioni per ogni mossa.
+    ///
+    /// Un array multidimensionale in .NET e' un blocco contiguo in ordine di riga, quindi la riga
+    /// e' esattamente una fetta — lo stesso presupposto gia' usato da SharedHistories.Fill.</summary>
+    public ReadOnlySpan<short> RigaMainHistory(Color us) =>
+        System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(
+            ref _mainHistory[(byte)us, 0], MainHistorySize);
+
+    /// <inheritdoc cref="RigaMainHistory"/>
+    public ReadOnlySpan<short> RigaLowPlyHistory(int ply) =>
+        System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(
+            ref _lowPlyHistory[ply, 0], MainHistorySize);
 
     public int GetCaptureHistory(Piece movedPiece, Square to, PieceType captured) =>
         _captureHistory[IndiceCapture(movedPiece, to, captured)];
