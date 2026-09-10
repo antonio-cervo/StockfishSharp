@@ -8,13 +8,28 @@
 //   stesso RefreshPerspective/ComputeFromScratch già verificato bit-esatto contro l'oracolo N1-N8)
 //   solo più lento nei refresh stessi.
 // - update_accumulator_hybrid (nnue_accumulator.cpp:722-879) e backward_update_incremental
-//   (nnue_accumulator.cpp:177-193): quando manca un accumulatore "computed" più recente disponibile
-//   in avanti, la fonte ripiena "all'indietro" i frame intermedi non ancora calcolati (così un
-//   futuro forward-update li trovi pronti) invece di rifare subito un refresh completo. Qui, in
-//   quel caso, si fa sempre un refresh completo sull'ULTIMO frame — corretto, solo meno efficiente
-//   nei casi in cui la valutazione statica non viene richiesta per più ply consecutivi (es. sotto
-//   scacco): il caso comune (un ply alla volta, quasi ogni nodo valutato) resta comunque coperto
-//   dal forward-update incrementale "semplice" sotto.
+//   (nnue_accumulator.cpp:177-193): PORTATE E MISURATE il 2026-09-10, poi TOLTE. Non e' una
+//   rinuncia per pigrizia, ed e' il caso di leggere il perche' prima di ritentare.
+//
+//   Cosa fanno: backward_update_incremental, dopo un refresh, risale riempiendo all'indietro i
+//   frame intermedi; update_accumulator_hybrid intercetta la mossa di RE (la causa piu' frequente
+//   di refresh) ricostruendo la parte PSQ dalle Finny Tables delle due case coinvolte. Sono state
+//   scritte fedeli e VERIFICATE bit-esatte: 152/152 test, sei dei quali attraversano davvero il
+//   percorso ibrido, e un test dedicato che falliva col verso invertito.
+//
+//   MISURA: bench 5011 -> 5149 ms, quattro giri alternati su quattro a sfavore (~2,8% PIU' LENTI);
+//   ricerche profonde singole -8,2% e +2,3%. Nessun guadagno.
+//
+//   PERCHE', ed e' la cosa da ricordare: nella fonte queste tecniche vivono dentro un ciclo per
+//   TILE che carica un pezzo di accumulatore nei registri, ci applica sopra TUTTO (feature tolte,
+//   aggiunte, l'accumulatore precedente, la voce di cache, le minacce) e lo riscrive una volta
+//   sola. Qui ogni operazione e' una funzione separata che scorre l'intero accumulatore da 1024
+//   int16: l'ibrido diventa cinque passate di memoria dove la fonte ne fa una. L'aritmetica in piu'
+//   che queste tecniche introducono costa quindi molto di piu' da noi di quanto risparmi.
+//
+//   Diventano convenienti SOLO dopo aver fuso le passate in un ciclo per tile — che e' anche la
+//   strada per attaccare ApplyIncrementalDelta, il ~32% del tempo di ricerca. Ritentarle prima
+//   significa rimisurare lo stesso -3%.
 //
 // Verificato (NnueIncrementalTests.cs): per ogni mossa in perft su più posizioni, l'accumulatore
 // aggiornato incrementalmente è bit-esatto (accumulation, psqtAccumulation) contro
