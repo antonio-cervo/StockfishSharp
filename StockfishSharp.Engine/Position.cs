@@ -67,6 +67,11 @@ public sealed class Position
 
     public Piece PieceOn(Square s) => _board[(byte)s];
 
+    /// <summary><c>pos.piece_array()</c> — la scacchiera come sequenza di 64 byte. Serve a
+    /// <c>get_changed_pieces</c> (NNUE, Finny Tables), che confronta l'intera disposizione con
+    /// quella memorizzata in cache usando due soli confronti SIMD invece di 64 letture.</summary>
+    public ReadOnlySpan<Piece> ArrayPezzi => _board;
+
     public bool Empty(Square s) => PieceOn(s) == Piece.None;
 
     public Square EpSquare => _st.EpSquare;

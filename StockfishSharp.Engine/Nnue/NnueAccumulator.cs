@@ -54,6 +54,36 @@ public sealed class NnueAccumulator
     /// delle righe di peso (L1=1024 elementi per feature attiva) invece del ciclo scalare.</summary>
     public static bool UsingAvx512 { get; } = Avx512BW.IsSupported && Avx512F.IsSupported;
 
+    /// <summary><c>get_changed_pieces</c>, nnue_accumulator.cpp:617-640 — le case in cui la
+    /// disposizione memorizzata in cache differisce da quella attuale, come bitboard.
+    ///
+    /// La fonte fa due confronti da 32 byte e ne ricava la maschera con <c>movemask</c>: qui e'
+    /// identico, con Vector256 ed ExtractMostSignificantBits. Prima si scorrevano tutte e 64 le
+    /// case a ogni refresh, ed era il motivo per cui nei finali spogli la cache faceva perdere
+    /// tempo invece di guadagnarne (misurato: -2,2% a profondita' 26).</summary>
+    public static ulong PezziCambiati(ReadOnlySpan<Piece> memorizzati, ReadOnlySpan<Piece> attuali)
+    {
+        var a = System.Runtime.InteropServices.MemoryMarshal.Cast<Piece, byte>(memorizzati);
+        var b = System.Runtime.InteropServices.MemoryMarshal.Cast<Piece, byte>(attuali);
+
+        if (Vector256.IsHardwareAccelerated)
+        {
+            ulong uguali = 0;
+            for (int i = 0; i < Squares.Nb; i += 32)
+            {
+                var va = Vector256.Create(a.Slice(i, 32));
+                var vb = Vector256.Create(b.Slice(i, 32));
+                uguali |= (ulong)Vector256.Equals(va, vb).ExtractMostSignificantBits() << i;
+            }
+            return ~uguali;
+        }
+
+        ulong cambiati = 0;
+        for (int i = 0; i < Squares.Nb; i++)
+            if (a[i] != b[i]) cambiati |= 1UL << i;
+        return cambiati;
+    }
+
     /// <summary><c>update_accumulator_refresh_cache</c> applicata a una cache vuota (nessun pezzo
     /// "rimosso", tutti i pezzi presenti sono "aggiunti") — nnue_accumulator.cpp:880-949. Somma
     /// bias + riga di peso di ogni feature attiva dei tre insiemi (PSQ, minacce, coppie di
@@ -130,21 +160,27 @@ public sealed class NnueAccumulator
         // piu' per casa — trascurabile rispetto alle righe di peso che si risparmiano.
         var rimosse = _refreshRimosse; rimosse.Clear();
         var aggiunte = _refreshPsq; aggiunte.Clear();
-        for (int i = 0; i < Squares.Nb; i++)
+
+        ulong occupazione = pos.Pieces();
+        ulong cambiate = PezziCambiati(voce.Pezzi, pos.ArrayPezzi);
+        ulong rimosseBB = cambiate & voce.PezziBB;   // c'era un pezzo li' nella disposizione in cache
+        ulong aggiunteBB = cambiate & occupazione;   // ce n'e' uno adesso
+
+        while (rimosseBB != 0)
         {
-            Piece memorizzato = voce.Pezzi[i];
-            Piece attuale = pos.PieceOn((Square)i);
-            if (memorizzato == attuale) continue;
-
-            if (memorizzato != Piece.None)
-                rimosse.Add(HalfKAv2Hm.MakeIndex(perspective, (Square)i, memorizzato, ksq));
-            if (attuale != Piece.None)
-                aggiunte.Add(HalfKAv2Hm.MakeIndex(perspective, (Square)i, attuale, ksq));
-
-            voce.Pezzi[i] = attuale; // "entry.pieces = pos.piece_array()"
+            Square sq = Bitboards.PopLsb(ref rimosseBB);
+            rimosse.Add(HalfKAv2Hm.MakeIndex(perspective, sq, voce.Pezzi[(byte)sq], ksq));
         }
 
-        voce.PezziBB = pos.Pieces(); // "entry.pieceBB = pos.pieces()"
+        while (aggiunteBB != 0)
+        {
+            Square sq = Bitboards.PopLsb(ref aggiunteBB);
+            aggiunte.Add(HalfKAv2Hm.MakeIndex(perspective, sq, pos.PieceOn(sq), ksq));
+        }
+
+        // Solo DOPO aver letto i pezzi vecchi: "entry.pieces = pos.piece_array()".
+        pos.ArrayPezzi.CopyTo(voce.Pezzi);
+        voce.PezziBB = occupazione; // "entry.pieceBB = pos.pieces()"
 
         // La voce si aggiorna PRIMA di essere copiata: e' il "store_tile(j, &entry.accumulation[0])"
         // della fonte, che avviene prima di sommarci sopra le minacce.
