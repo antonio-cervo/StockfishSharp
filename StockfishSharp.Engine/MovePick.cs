@@ -58,10 +58,19 @@ namespace StockfishSharp.Engine;
 public readonly struct ContinuationRef(bool isOk, bool inCheck, bool captureStage, Piece piece, Square to)
 {
     public readonly bool IsOk = isOk;
-    public readonly bool InCheck = inCheck;
-    public readonly bool CaptureStage = captureStage;
-    public readonly Piece Piece = piece;
-    public readonly Square To = to;
+
+    /// <summary>Indice della casella <c>[inCheck][captureStage][piece][to][None][A1]</c>, cioe'
+    /// l'inizio della sottotabella <c>[pc][to]</c> di questo livello. E' l'equivalente esatto del
+    /// <c>(ss-i)-&gt;continuationHistory</c> della fonte, che e' un PUNTATORE gia' risolto a quella
+    /// sottotabella (search.cpp:668-669): leggere un livello costa base + pc*64 + to, e basta.
+    ///
+    /// Fino al 2026-09-10 questa struct portava invece i quattro campi grezzi e l'indice veniva
+    /// ricostruito da capo a OGNI mossa quieta e per TUTTI E CINQUE i livelli letti da
+    /// score&lt;QUIETS&gt; — venticinque moltiplicazioni per mossa al posto di cinque somme.
+    ///
+    /// <c>default(ContinuationRef)</c> vale 0, che e' proprio <c>[0][0][None][A1]</c>: la casella
+    /// su cui punta la fonte quando non c'e' una mossa reale (vedi la nota su ContinuationScore).</summary>
+    public readonly int Base = SharedHistories.IndiceContinuation(inCheck, captureStage, piece, to, Piece.None, Square.A1);
 }
 
 public sealed class MovePick
@@ -384,6 +393,19 @@ public sealed class MovePick
     public int GetPawnHistoryValue(Position pos, Piece pc, Square to) =>
         _shared.PawnHistory[SharedHistories.IndicePawn(pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, pc, to)];
 
+    /// <summary>Inizio della riga di pawn history della posizione data — <c>pawn_entry(pos)</c>,
+    /// history.h:220-222, che nella fonte e' un riferimento risolto una volta sola. Dipende solo
+    /// dalla posizione, quindi in score&lt;QUIETS&gt; si calcola PRIMA del ciclo sulle mosse.</summary>
+    public int BasePawnHistory(Position pos) =>
+        SharedHistories.IndicePawn(pos.PawnKey & (ulong)_shared.PawnHistSizeMinus1, Piece.None, Square.A1);
+
+    /// <summary>Letture con l'indice gia' pronto: chi le chiama ha risolto la base fuori dal ciclo
+    /// e lo scostamento [pc][to] una volta per mossa, invece di sei volte.</summary>
+    public int PawnHistoryDaBaseScarto(int indice) => _shared.PawnHistory[indice];
+
+    /// <inheritdoc cref="PawnHistoryDaBaseScarto"/>
+    public int ContinuationDaBaseScarto(int indice) => _continuationHistory[indice];
+
     /// <summary>Lettura pubblica di un livello di continuation history (0=ss-1..5=ss-6) — usata
     /// da <see cref="MovePicker"/> per lo score delle mosse quiete (movepick.cpp:233-237).</summary>
     public int GetContinuationHistory(ContinuationRef r, Piece pc, Square to) => ContinuationScore(r, pc, to);
@@ -400,7 +422,7 @@ public sealed class MovePick
     /// mosse. <c>default(ContinuationRef)</c> ha gia' esattamente i campi di quella casella
     /// (InCheck=false, CaptureStage=false, Piece=None, To=A1), quindi basta indicizzare sempre.</summary>
     private int ContinuationScore(ContinuationRef r, Piece pc, Square to) =>
-        _continuationHistory[SharedHistories.IndiceContinuation(r.InCheck, r.CaptureStage, r.Piece, r.To, pc, to)];
+        _continuationHistory[r.Base + ((byte)pc * Squares.Nb) + (byte)to];
 
     /// <summary><c>update_quiet_histories</c>, search.cpp:2045-2056 — main history, low-ply
     /// history (solo ply&lt;5) e continuation history (vedi nota in testa al file per pawn
@@ -437,7 +459,7 @@ public sealed class MovePick
             if (!r.IsOk) continue;
 
             ref short entry = ref _continuationHistory[
-                SharedHistories.IndiceContinuation(r.InCheck, r.CaptureStage, r.Piece, r.To, pc, to)];
+                r.Base + ((byte)pc * Squares.Nb) + (byte)to];
             if (entry > 0) positiveCount++;
 
             int multiplier = CmhcMultipliers[positiveCount];

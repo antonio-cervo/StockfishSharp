@@ -351,6 +351,12 @@ public sealed class MovePicker
         _genBuffer.Clear();
         MoveGen.Generate(GenType.Quiets, _pos, _genBuffer);
 
+        // Le basi delle tabelle NON dipendono dalla mossa: si risolvono una volta sola, come i
+        // puntatori che la fonte ha gia' pronti (continuationHistory[i], pawn_entry(pos)).
+        int basePawn = _hist.BasePawnHistory(_pos);
+        int base0 = _contRefs[0].Base, base1 = _contRefs[1].Base, base2 = _contRefs[2].Base;
+        int base3 = _contRefs[3].Base, base5 = _contRefs[5].Base;
+
         var lista = _lista;
         int it = _cur;
         foreach (var m in _genBuffer)
@@ -359,14 +365,15 @@ public sealed class MovePicker
             Square to = m.ToSq;
             Piece pc = _pos.MovedPiece(m);
             PieceType pt = Types.TypeOf(pc);
+            int scarto = ((byte)pc * Squares.Nb) + (byte)to;   // lo stesso [pc][to] per tutte e sei
 
             int value = 2 * _hist.GetMainHistoryRaw(us, m);
-            value += 2 * _hist.GetPawnHistoryValue(_pos, pc, to);
-            value += _hist.GetContinuationHistory(_contRefs[0], pc, to);
-            value += _hist.GetContinuationHistory(_contRefs[1], pc, to);
-            value += _hist.GetContinuationHistory(_contRefs[2], pc, to);
-            value += _hist.GetContinuationHistory(_contRefs[3], pc, to);
-            value += _hist.GetContinuationHistory(_contRefs[5], pc, to);
+            value += 2 * _hist.PawnHistoryDaBaseScarto(basePawn + scarto);
+            value += _hist.ContinuationDaBaseScarto(base0 + scarto);
+            value += _hist.ContinuationDaBaseScarto(base1 + scarto);
+            value += _hist.ContinuationDaBaseScarto(base2 + scarto);
+            value += _hist.ContinuationDaBaseScarto(base3 + scarto);
+            value += _hist.ContinuationDaBaseScarto(base5 + scarto);
 
             if ((_pos.CheckSquaresOf(pt) & Bitboards.SquareBB(to)) != 0 && _pos.SeeGe(m, -75))
                 value += 16384;
