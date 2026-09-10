@@ -147,15 +147,20 @@ public static class NnueLayers
                 var inVec = Vector512.LoadUnsafe(ref inRef, (nuint)i);
                 var wVec = Vector512.LoadUnsafe(ref weights[wBase + i]);
 
-                var inLo16 = Vector512.WidenLower(inVec);
-                var inHi16 = Vector512.WidenUpper(inVec);
-                var wLo16 = Vector512.WidenLower(wVec);
-                var wHi16 = Vector512.WidenUpper(wVec);
-
-                acc += Vector512.WidenLower(inLo16).AsInt32() * Vector512.WidenLower(wLo16);
-                acc += Vector512.WidenUpper(inLo16).AsInt32() * Vector512.WidenUpper(wLo16);
-                acc += Vector512.WidenLower(inHi16).AsInt32() * Vector512.WidenLower(wHi16);
-                acc += Vector512.WidenUpper(inHi16).AsInt32() * Vector512.WidenUpper(wHi16);
+                // Lo stesso prodotto scalare della fonte (simd.h, m512_add_dpbusd_epi32): due
+                // istruzioni, o UNA con la VNNI. Prima qui si allargava fino a int32 e si facevano
+                // QUATTRO moltiplicazioni a 32 bit per blocco — corretto ma molto piu' caro, e
+                // misurabile: fc1 (64->32) costava quanto fc0 (1024->32), sedici volte il lavoro.
+                //
+                // La saturazione dell'intermedio a i16, che e' il motivo per cui questa strada era
+                // stata evitata, qui non puo' avvenire: l'input e' uscita di ClippedRelu/
+                // SqrClippedRelu, quindi 0..127, e i pesi sono -128..127, percio' la somma di due
+                // prodotti adiacenti sta entro 2*127*128 = 32512 < 32767. E' lo stesso argomento
+                // gia' scritto per fc0.
+                if (AvxVnni.V512.IsSupported)
+                    acc = AvxVnni.V512.MultiplyWideningAndAdd(acc, inVec, wVec);
+                else
+                    acc += Avx512BW.MultiplyAddAdjacent(Avx512BW.MultiplyAddAdjacent(inVec, wVec), Vector512.Create((short)1));
             }
             output[j] += Vector512.Sum(acc);
         }
@@ -264,6 +269,13 @@ public static class NnueLayers
     /// (<c>fc_0_out[30] - fc_0_out[31]</c>) usa l'uscita GREZZA (i32) di fc_0, non quella
     /// attivata. Tutti i buffer intermedi sono <c>stackalloc</c> (~600 byte in totale), come gli
     /// array sullo stack della fonte: zero allocazioni sull'heap.</summary>
+    /// <remarks>SkipLocalsInit: i dieci "stackalloc" qui sotto vengono azzerati dal runtime a
+    /// OGNI chiamata, e Propagate gira per ogni valutazione. L'azzeramento e' inutile perche' ogni
+    /// buffer viene scritto PER INTERO prima di essere letto: fc0Out/fc1Out/fc2Out dalle affine
+    /// (che copiano i bias su tutto l'array), sqr0/clip0/sqr1/clip1 dalle ReLU, concat1 e concat2
+    /// dalle CopyTo che li riempiono esattamente (32+32 e 64+32+32). Misurato: la somma dei pezzi
+    /// veri di Propagate era il 39% del suo tempo, il resto era questo.</remarks>
+    [System.Runtime.CompilerServices.SkipLocalsInit]
     public static int Propagate(NnueLayerStack stack, ReadOnlySpan<byte> transformedFeatures)
     {
         Span<int> fc0Out = stackalloc int[L2];
