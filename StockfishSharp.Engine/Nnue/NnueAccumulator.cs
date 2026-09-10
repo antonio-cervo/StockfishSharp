@@ -54,6 +54,77 @@ public sealed class NnueAccumulator
     /// delle righe di peso (L1=1024 elementi per feature attiva) invece del ciclo scalare.</summary>
     public static bool UsingAvx512 { get; } = Avx512BW.IsSupported && Avx512F.IsSupported;
 
+
+    /// <summary>Applica in UNA SOLA passata sull'accumulatore tutte le feature tolte e aggiunte,
+    /// PSQ (pesi i16) e minacce/coppie (pesi i8) insieme.
+    ///
+    /// E' la struttura della fonte, che qui mancava: nnue_accumulator.cpp lavora per TILE
+    /// ("acc = load_tile(j); acc = apply_psq_features&lt;-1&gt;(...); acc = apply_psq_features&lt;+1&gt;(...);
+    /// acc = apply_threat_features&lt;...&gt;(...); store_tile(j, acc)") — carica un pezzo di
+    /// accumulatore nei registri, ci applica sopra TUTTO e lo riscrive una volta sola.
+    ///
+    /// Prima ogni feature era una funzione a se' che scorreva tutti i 1024 int16: con quattro
+    /// feature PSQ e una ventina di minacce si facevano ~24 passate di memoria sullo stesso array
+    /// da 2 KB. Il numero di righe di peso lette non cambia (quelle vanno lette comunque), cambia
+    /// quante volte si rilegge e riscrive l'ACCUMULATORE: da ~24 a 1.
+    ///
+    /// La misura che ha reso evidente il problema: update_accumulator_hybrid e
+    /// backward_update_incremental, portate fedelmente il 2026-09-10, risultavano PIU' LENTE
+    /// proprio perche' aggiungevano altre passate — vedi la nota in testa ad AccumulatorStack.cs.</summary>
+    private static void ApplicaFuso(short[] acc, NnueNetwork net,
+                                    List<int> psqTogliere, List<int> psqSommare,
+                                    List<int> thrTogliere, List<int> thrSommare)
+    {
+        // Span invece dell'enumeratore di List: questi cicli girano una volta per TILE, quindi
+        // sedici volte, e l'enumeratore si pagherebbe sedici volte.
+        var psqT = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(psqTogliere);
+        var psqS = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(psqSommare);
+        var thrT = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(thrTogliere);
+        var thrS = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(thrSommare);
+
+        short[] w16 = net.Weights;
+        sbyte[] w8 = net.ThreatAndPpWeights;
+
+        // Tile da 64 short = due registri: 64 e' anche il passo naturale dei pesi i8, che si
+        // caricano 64 byte alla volta e si allargano in due meta'.
+        for (int j = 0; j < L1; j += 64)
+        {
+            var lo = Vector512.LoadUnsafe(ref acc[j]);
+            var hi = Vector512.LoadUnsafe(ref acc[j + 32]);
+
+            foreach (int f in psqT)
+            {
+                int b = (f * L1) + j;
+                lo -= Vector512.LoadUnsafe(ref w16[b]);
+                hi -= Vector512.LoadUnsafe(ref w16[b + 32]);
+            }
+
+            foreach (int f in psqS)
+            {
+                int b = (f * L1) + j;
+                lo += Vector512.LoadUnsafe(ref w16[b]);
+                hi += Vector512.LoadUnsafe(ref w16[b + 32]);
+            }
+
+            foreach (int f in thrT)
+            {
+                var w = Vector512.LoadUnsafe(ref w8[(f * L1) + j]);
+                lo -= Vector512.WidenLower(w);
+                hi -= Vector512.WidenUpper(w);
+            }
+
+            foreach (int f in thrS)
+            {
+                var w = Vector512.LoadUnsafe(ref w8[(f * L1) + j]);
+                lo += Vector512.WidenLower(w);
+                hi += Vector512.WidenUpper(w);
+            }
+
+            lo.StoreUnsafe(ref acc[j]);
+            hi.StoreUnsafe(ref acc[j + 32]);
+        }
+    }
+
     /// <summary><c>get_changed_pieces</c>, nnue_accumulator.cpp:617-640 — le case in cui la
     /// disposizione memorizzata in cache differisce da quella attuale, come bitboard.
     ///
@@ -247,30 +318,40 @@ public sealed class NnueAccumulator
         FullThreats.AppendChangedIndices(perspective, ksq, DirtyThreats, removedThreat, addedThreat);
         Pp3Wide.AppendChangedIndices(perspective, ksq, DirtyPawnPairs, removedThreat, addedThreat);
 
+        // L'accumulatore: UNA passata sola con tutto dentro (vedi ApplicaFuso). Il ripiego
+        // scalare resta per l'hardware senza AVX-512.
+        if (UsingAvx512)
+            ApplicaFuso(acc, net, removedPsq, addedPsq, removedThreat, addedThreat);
+        else
+        {
+            foreach (int f in removedPsq) SubtractWeightRowI16(acc, net.Weights, f * L1);
+            foreach (int f in addedPsq) AddWeightRowI16(acc, net.Weights, f * L1);
+            foreach (int f in removedThreat) SubtractWeightRowI8(acc, net.ThreatAndPpWeights, f * L1);
+            foreach (int f in addedThreat) AddWeightRowI8(acc, net.ThreatAndPpWeights, f * L1);
+        }
+
+        // I PSQT sono otto interi in un array diverso: restano cicli a se', il loro costo e'
+        // trascurabile e fonderli non guadagnerebbe nulla.
         foreach (int f in removedPsq)
         {
-            SubtractWeightRowI16(acc, net.Weights, f * L1);
             int pBase = f * PsqtBuckets;
             for (int b = 0; b < PsqtBuckets; b++) psqt[b] -= net.PsqtWeights[pBase + b];
         }
 
         foreach (int f in addedPsq)
         {
-            AddWeightRowI16(acc, net.Weights, f * L1);
             int pBase = f * PsqtBuckets;
             for (int b = 0; b < PsqtBuckets; b++) psqt[b] += net.PsqtWeights[pBase + b];
         }
 
         foreach (int f in removedThreat)
         {
-            SubtractWeightRowI8(acc, net.ThreatAndPpWeights, f * L1);
             int pBase = f * PsqtBuckets;
             for (int b = 0; b < PsqtBuckets; b++) psqt[b] -= net.ThreatAndPpPsqtWeights[pBase + b];
         }
 
         foreach (int f in addedThreat)
         {
-            AddWeightRowI8(acc, net.ThreatAndPpWeights, f * L1);
             int pBase = f * PsqtBuckets;
             for (int b = 0; b < PsqtBuckets; b++) psqt[b] += net.ThreatAndPpPsqtWeights[pBase + b];
         }
