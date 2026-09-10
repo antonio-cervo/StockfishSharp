@@ -19,12 +19,15 @@ ricerca sana non puo' violare:
   5. "stop" a meta' ricerca fa arrivare il bestmove subito
   6. orologi limite (1 ms, incremento enorme, residuo quasi zero) non fanno saltare nulla
   7. niente eccezioni su stderr
+  8. PONDERING: durante "go ponder" il motore NON annuncia bestmove nemmeno se ha finito, e lo
+     annuncia subito a "ponderhit" o "stop"; dopo entrambi resta sano  <- percorso mai esercitato
 
 Le ricerche girano nello STESSO PROCESSO una dopo l'altra, come in partita: entrambi i piantamenti
 sono avvenuti a meta' partita, non alla prima ricerca.
 
 Uso:  python tools/invarianti_orologio.py [giri]
 """
+import queue
 import random
 import re
 import subprocess
@@ -52,12 +55,23 @@ class Motore:
         self.p = subprocess.Popen(MOTORE, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, text=True, bufsize=1)
         self.errori = []
+        self.ultima_ponder = None
+        # UN SOLO lettore di stdout, che riversa tutto in una coda. Due thread che fanno readline()
+        # sulla stessa pipe si rubano le righe a vicenda e si bloccano: e' successo davvero il
+        # 2026-09-10 provando il pondering, e sembrava un piantamento del motore.
+        self.righe = queue.Queue()
+        threading.Thread(target=self._leggi_stdout, daemon=True).start()
         threading.Thread(target=self._leggi_stderr, daemon=True).start()
         for c in ["uci", "setoption name Threads value %d" % threads,
                   "setoption name Hash value 64", "setoption name OwnBook value false",
                   "setoption name SyzygyPath value " + SYZYGY, "ucinewgame", "isready"]:
             self.manda(c)
         time.sleep(1.0)
+
+    def _leggi_stdout(self):
+        for riga in self.p.stdout:
+            self.righe.put(riga)
+        self.righe.put(None)   # pipe chiusa: il motore e' morto
 
     def _leggi_stderr(self):
         for riga in self.p.stderr:
@@ -68,20 +82,43 @@ class Motore:
         self.p.stdin.write(c + "\n")
         self.p.stdin.flush()
 
+    def _prossima_riga(self, scadenza):
+        """La prossima riga dalla coda, o None se scade il tempo (o il motore muore)."""
+        rimasto = scadenza - time.time()
+        if rimasto <= 0:
+            return None
+        try:
+            return self.righe.get(timeout=rimasto)
+        except queue.Empty:
+            return None
+
     def cerca(self, comando_go, limite):
         """Ritorna (bestmove, pv, secondi) oppure (None, ..., secondi) se non risponde entro limite."""
         t0 = time.time()
         self.manda(comando_go)
         pv = []
-        while time.time() - t0 < limite:
-            riga = self.p.stdout.readline()
-            if not riga:
+        while True:
+            riga = self._prossima_riga(t0 + limite)
+            if riga is None:
                 return None, pv, time.time() - t0
             if riga.startswith("info ") and " pv " in riga:
                 pv = riga.split(" pv ", 1)[1].split()
             if riga.startswith("bestmove"):
-                return riga.split()[1], pv, time.time() - t0
-        return None, pv, time.time() - t0
+                pezzi = riga.split()
+                self.ultima_ponder = pezzi[3] if len(pezzi) > 3 else None
+                return pezzi[1], pv, time.time() - t0
+
+    def bestmove_arrivato(self, entro):
+        """Ascolta per 'entro' secondi SENZA mandare nulla: serve a verificare che durante il
+        pondering il motore stia ZITTO. Ritorna il bestmove se ne arriva uno (violazione), None
+        se il motore tace come deve. Le righe "info" intanto si consumano regolarmente."""
+        scadenza = time.time() + entro
+        while True:
+            riga = self._prossima_riga(scadenza)
+            if riga is None:
+                return None
+            if riga.startswith("bestmove"):
+                return riga.split()[1]
 
     def chiudi(self):
         try:
@@ -231,6 +268,106 @@ def prova_orologi_limite(guasti):
     m.chiudi()
 
 
+def prova_pondering(guasti):
+    """Le tre sequenze che lichess-bot produce davvero quando "ponder: true".
+
+    Il pondering e' l'unico percorso dell'orologio che non era mai stato esercitato, e tocca
+    esattamente il meccanismo che ha causato i due piantamenti: la ricerca che deve fermarsi su
+    comando. In piu' ha una regola sua, che e' quella che si rompe piu' facilmente: durante
+    "go ponder" il motore NON deve annunciare bestmove NEMMENO SE HA GIA' FINITO DI CERCARE
+    (uci.cpp:116-119), ma deve aspettare "ponderhit" o "stop".
+    """
+    m = Motore(1)
+    b = chess.Board("r3r1k1/2p2ppp/p1p1bn2/8/1q2P3/2NPQN2/PPP3PP/R4RK1 b - - 2 15")
+
+    # --- si gioca una mossa normale, per avere una previsione vera da ponderare -----------------
+    m.manda("position fen " + b.fen())
+    bm, _, _ = m.cerca("go wtime 60000 btime 60000 winc 1000 binc 1000", 40)
+    controlla(guasti, bm is not None, "nessun bestmove nella mossa che precede il pondering")
+    if bm is None:
+        m.chiudi()
+        return
+    previsione = m.ultima_ponder
+    controlla(guasti, previsione is not None,
+              "nessuna mossa di ponder annunciata: senza previsione il pondering non parte mai")
+    if previsione is None:
+        m.chiudi()
+        return
+
+    b.push_uci(bm)
+    controlla(guasti, previsione in [x.uci() for x in b.legal_moves],
+              "la mossa di ponder '%s' NON e' legale nella posizione dopo '%s'" % (previsione, bm))
+    b.push_uci(previsione)
+    posizione_ponder = b.fen()
+    print("   mossa %s, previsione %s -> si pondera su %s" % (bm, previsione, posizione_ponder))
+
+    # --- 1. IL CASO SOSPETTO: la ricerca finisce PRIMA del ponderhit ---------------------------
+    # Con un tetto di profondita' bassa la ricerca si esaurisce in un attimo; il motore deve
+    # comunque restare zitto. Se qui esce un bestmove, in partita lichess-bot riceverebbe una
+    # risposta a una mossa che l'avversario non ha ancora giocato.
+    m.manda("position fen " + posizione_ponder)
+    m.manda("go ponder depth 6")
+    intruso = m.bestmove_arrivato(4)
+    controlla(guasti, intruso is None,
+              "bestmove '%s' annunciato DURANTE 'go ponder' (la ricerca era finita e non ha aspettato)" % intruso)
+    bm2, _, dt = m.cerca("ponderhit", 30)
+    print("   ricerca esaurita + ponderhit -> %s in %.2fs" % (bm2, dt))
+    controlla(guasti, bm2 is not None, "nessun bestmove dopo 'ponderhit' su ricerca gia' esaurita")
+    controlla(guasti, dt < 5, "'ponderhit' su ricerca esaurita ha impiegato %.1f s" % dt)
+    controlla(guasti, bm2 in [x.uci() for x in b.legal_moves] if bm2 else False,
+              "bestmove illegale '%s' dopo 'ponderhit'" % bm2)
+
+    # --- 2. IL CASO NORMALE: si pondera, poi l'avversario indovina ------------------------------
+    m.manda("position fen " + posizione_ponder)
+    m.manda("go ponder wtime 60000 btime 60000 winc 1000 binc 1000")
+    intruso = m.bestmove_arrivato(3)
+    controlla(guasti, intruso is None, "bestmove '%s' annunciato durante 'go ponder' normale" % intruso)
+    t0 = time.time()
+    bm3, pv, dt = m.cerca("ponderhit", 60)
+    print("   ponder 3s + ponderhit -> %s in %.2fs" % (bm3, dt))
+    controlla(guasti, bm3 is not None, "nessun bestmove dopo 'ponderhit'")
+    controlla(guasti, bm3 in [x.uci() for x in b.legal_moves] if bm3 else False,
+              "bestmove illegale '%s' dopo 'ponderhit'" % bm3)
+    # Il tempo gia' speso ponderando NON e' gratis: si somma al budget della mossa (engine.cpp:262).
+    # Con 60 s di residuo, tre secondi di pondering piu' la coda non devono sforare il tetto solito.
+    controlla(guasti, dt < 60 * FRAZIONE_MASSIMA,
+              "dopo 'ponderhit' la mossa e' costata %.1f s su 60 s di residuo" % dt)
+    if pv:
+        bb = chess.Board(posizione_ponder)
+        legale = True
+        for mossa in pv:
+            try:
+                bb.push_uci(mossa)
+            except ValueError:
+                legale = False
+                break
+        controlla(guasti, legale, "PV illegale dopo 'ponderhit': %s da %s" % (pv[:6], posizione_ponder))
+
+    # --- 3. IL CASO MANCATO: l'avversario gioca ALTRO, si butta via e si riparte ----------------
+    m.manda("position fen " + posizione_ponder)
+    m.manda("go ponder wtime 60000 btime 60000 winc 1000 binc 1000")
+    time.sleep(2)
+    bm4, _, dt = m.cerca("stop", 15)
+    print("   ponder 2s + stop -> %s in %.2fs" % (bm4, dt))
+    controlla(guasti, bm4 is not None, "nessun bestmove dopo 'stop' durante il pondering")
+    controlla(guasti, dt < 5, "'stop' durante il pondering ha impiegato %.1f s" % dt)
+
+    # E adesso il punto vero: il motore e' rimasto SANO? Una ricerca normale subito dopo, su una
+    # posizione diversa. E' qui che si vedrebbe una posizione lasciata corrotta dall'arresto —
+    # e' esattamente cosi' che si manifestavano i due piantamenti.
+    b2 = chess.Board("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+    m.manda("position fen " + b2.fen())
+    bm5, pv5, dt = m.cerca("go wtime 30000 btime 30000 winc 0 binc 0", 60)
+    print("   ricerca normale dopo lo stop -> %s in %.2fs" % (bm5, dt))
+    controlla(guasti, bm5 is not None, "nessun bestmove nella ricerca dopo uno stop di pondering")
+    controlla(guasti, bm5 in [x.uci() for x in b2.legal_moves] if bm5 else False,
+              "bestmove ILLEGALE '%s' dopo uno stop di pondering: posizione corrotta" % bm5)
+
+    controlla(guasti, not m.errori, "eccezioni su stderr durante il pondering: %s" % m.errori[:2])
+    controlla(guasti, m.p.poll() is None, "il motore e' MORTO durante le prove di pondering")
+    m.chiudi()
+
+
 def main():
     guasti = []
     print("INVARIANTI DEL PERCORSO A OROLOGIO\n")
@@ -238,6 +375,8 @@ def main():
     prova_orologi_limite(guasti)
     print("\n 'stop' a meta' ricerca:")
     prova_stop(guasti, 0)
+    print("\n pondering:")
+    prova_pondering(guasti)
     print("\n partite simulate:")
     for giro in range(GIRI):
         prova_partita(guasti, 1 if giro % 2 == 0 else 4, giro)
