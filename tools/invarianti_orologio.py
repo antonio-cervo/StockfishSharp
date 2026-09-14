@@ -25,6 +25,13 @@ ricerca sana non puo' violare:
 Le ricerche girano nello STESSO PROCESSO una dopo l'altra, come in partita: entrambi i piantamenti
 sono avvenuti a meta' partita, non alla prima ricerca.
 
+MULTI-THREAD (2026-09-14). Ogni prova si ripete a 1 e a 8 thread. Prima solo le partite simulate
+alternavano 1 e 4: "stop" a meta' ricerca, orologi limite e pondering giravano sempre a un thread
+solo - cioe' proprio i tre percorsi dove vive il rischio del multi-thread, perche' li' la ricerca
+deve FERMARSI su comando e gli helper hanno come unica uscita il flag condiviso threads.stop. Il
+blocco intermittente del bench multi-thread nasceva esattamente li' (docs/audit-multithread.md,
+divario 2). Questo banco e' il lasciapassare prima di rimettere il bot sopra 1 thread.
+
 Uso:  python tools/invarianti_orologio.py [giri]
 """
 import queue
@@ -207,9 +214,14 @@ def prova_partita(guasti, threads, giro):
     m.chiudi()
 
 
-def prova_stop(guasti, giro):
-    """"stop" a meta' ricerca: il bestmove deve arrivare subito."""
-    m = Motore(1)
+def prova_stop(guasti, giro, threads=1):
+    """"stop" a meta' ricerca: il bestmove deve arrivare subito.
+
+    A piu' thread e' la prova che conta di piu': gli helper non guardano l'orologio (CheckTime gira
+    sul solo principale, fedele a search.cpp) e si fermano SOLO sul flag condiviso. Se quel flag non
+    si alza, Task.WaitAll non torna e il motore resta vivo e muto.
+    """
+    m = Motore(threads)
     b = chess.Board("r3r1k1/2p2ppp/p1p1bn2/8/1q2P3/2NPQN2/PPP3PP/R4RK1 b - - 2 15")
     for attesa in (0.05, 0.5, 3.0):
         m.manda("position fen " + b.fen())
@@ -217,25 +229,31 @@ def prova_stop(guasti, giro):
         time.sleep(attesa)
         t0 = time.time()
         m.manda("stop")
+        # Sulla CODA, non con readline() diretta sulla pipe: il lettore di stdout gira gia' in un
+        # suo thread e due lettori sulla stessa pipe si rubano le righe - e' la trappola descritta
+        # in testa alla classe Motore, e qui ci si era caduti davvero.
         bm = None
-        while time.time() - t0 < 10:
-            riga = m.p.stdout.readline()
-            if not riga:
+        while True:
+            riga = m._prossima_riga(t0 + 10)
+            if riga is None:
                 break
             if riga.startswith("bestmove"):
                 bm = riga.split()[1]
                 break
         dt = time.time() - t0
-        print("   stop dopo %.2fs -> %s in %.2fs" % (attesa, bm, dt))
-        controlla(guasti, bm is not None, "nessun bestmove dopo 'stop' (attesa %.2fs)" % attesa)
-        controlla(guasti, dt < 5, "'stop' ha impiegato %.1f s a produrre bestmove" % dt)
-    controlla(guasti, not m.errori, "eccezioni su stderr durante 'stop': %s" % m.errori[:2])
+        print("   [%d thr] stop dopo %.2fs -> %s in %.2fs" % (threads, attesa, bm, dt))
+        controlla(guasti, bm is not None,
+                  "nessun bestmove dopo 'stop' (attesa %.2fs, threads=%d)" % (attesa, threads))
+        controlla(guasti, dt < 5,
+                  "'stop' ha impiegato %.1f s a produrre bestmove (threads=%d)" % (dt, threads))
+    controlla(guasti, not m.errori,
+              "eccezioni su stderr durante 'stop' (threads=%d): %s" % (threads, m.errori[:2]))
     m.chiudi()
 
 
-def prova_orologi_limite(guasti):
+def prova_orologi_limite(guasti, threads=1):
     """Orologi assurdi: gia' una volta un Math.Clamp e' esploso con l'orologio quasi a zero."""
-    m = Motore(1)
+    m = Motore(threads)
     b = chess.Board("r3r1k1/2p2ppp/p1p1bn2/8/1q2P3/2NPQN2/PPP3PP/R4RK1 b - - 2 15")
     # Orologio a ZERO: la fonte NON fa gestione del tempo (use_time_management() falso) e cerca
     # finche' la GUI non manda "stop" — verificato sull'oracolo, che dopo 6 s non aveva ancora
@@ -245,7 +263,8 @@ def prova_orologi_limite(guasti):
     m.manda("position fen " + b.fen())
     m.manda("go wtime 0 btime 0 winc 0 binc 0")
     time.sleep(3)
-    controlla(guasti, m.p.poll() is None, "il motore e' MORTO con l'orologio a zero")
+    controlla(guasti, m.p.poll() is None,
+              "il motore e' MORTO con l'orologio a zero (threads=%d)" % threads)
     if m.p.poll() is None:
         bm, _, dt = m.cerca("stop", 10)
         print("   %-46s -> %s in %.2fs (dopo stop)" % ("go wtime 0 btime 0", bm, dt))
@@ -260,15 +279,16 @@ def prova_orologi_limite(guasti):
     for c in casi:
         m.manda("position fen " + b.fen())
         bm, _, dt = m.cerca(c, 30)
-        print("   %-46s -> %s in %.2fs" % (c, bm, dt))
-        controlla(guasti, bm is not None, "nessun bestmove per '%s'" % c)
+        print("   [%d thr] %-38s -> %s in %.2fs" % (threads, c, bm, dt))
+        controlla(guasti, bm is not None, "nessun bestmove per '%s' (threads=%d)" % (c, threads))
         controlla(guasti, bm in [x.uci() for x in b.legal_moves] if bm else False,
                   "bestmove illegale '%s' per '%s'" % (bm, c))
-    controlla(guasti, not m.errori, "eccezioni su stderr sugli orologi limite: %s" % m.errori[:2])
+    controlla(guasti, not m.errori,
+              "eccezioni su stderr sugli orologi limite (threads=%d): %s" % (threads, m.errori[:2]))
     m.chiudi()
 
 
-def prova_pondering(guasti):
+def prova_pondering(guasti, threads=1):
     """Le tre sequenze che lichess-bot produce davvero quando "ponder: true".
 
     Il pondering e' l'unico percorso dell'orologio che non era mai stato esercitato, e tocca
@@ -277,7 +297,7 @@ def prova_pondering(guasti):
     "go ponder" il motore NON deve annunciare bestmove NEMMENO SE HA GIA' FINITO DI CERCARE
     (uci.cpp:116-119), ma deve aspettare "ponderhit" o "stop".
     """
-    m = Motore(1)
+    m = Motore(threads)
     b = chess.Board("r3r1k1/2p2ppp/p1p1bn2/8/1q2P3/2NPQN2/PPP3PP/R4RK1 b - - 2 15")
 
     # --- si gioca una mossa normale, per avere una previsione vera da ponderare -----------------
@@ -363,23 +383,29 @@ def prova_pondering(guasti):
     controlla(guasti, bm5 in [x.uci() for x in b2.legal_moves] if bm5 else False,
               "bestmove ILLEGALE '%s' dopo uno stop di pondering: posizione corrotta" % bm5)
 
-    controlla(guasti, not m.errori, "eccezioni su stderr durante il pondering: %s" % m.errori[:2])
-    controlla(guasti, m.p.poll() is None, "il motore e' MORTO durante le prove di pondering")
+    controlla(guasti, not m.errori,
+              "eccezioni su stderr durante il pondering (threads=%d): %s" % (threads, m.errori[:2]))
+    controlla(guasti, m.p.poll() is None,
+              "il motore e' MORTO durante le prove di pondering (threads=%d)" % threads)
     m.chiudi()
 
 
 def main():
     guasti = []
     print("INVARIANTI DEL PERCORSO A OROLOGIO\n")
-    print(" orologi limite:")
-    prova_orologi_limite(guasti)
-    print("\n 'stop' a meta' ricerca:")
-    prova_stop(guasti, 0)
-    print("\n pondering:")
-    prova_pondering(guasti)
+    # Ogni percorso due volte: a 1 thread (dove il motore e' deterministico) e a 8 (dove gli helper
+    # dipendono dal flag condiviso per fermarsi). Vedi la nota in testa al file.
+    for threads in (1, 8):
+        print(" orologi limite (threads=%d):" % threads)
+        prova_orologi_limite(guasti, threads)
+        print("\n 'stop' a meta' ricerca (threads=%d):" % threads)
+        prova_stop(guasti, 0, threads)
+        print("\n pondering (threads=%d):" % threads)
+        prova_pondering(guasti, threads)
+        print("")
     print("\n partite simulate:")
     for giro in range(GIRI):
-        prova_partita(guasti, 1 if giro % 2 == 0 else 4, giro)
+        prova_partita(guasti, [1, 4, 8][giro % 3], giro)
 
     print("\n" + "=" * 70)
     if guasti:
