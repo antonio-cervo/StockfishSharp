@@ -362,6 +362,33 @@ public sealed class Search
     // netta, non la normale crescita del fattore di ramificazione.
     private const double IterationCostSafetyMultiplier = 2.5;
 
+    /// <summary>Budget massimo, in millisecondi, per una mossa quando la RADICE e' in tablebase e la
+    /// posizione e' VINTA. <b>Deviazione pratica dichiarata, non presente nella fonte</b>
+    /// (2026-09-14, scelta esplicita dell'utente).
+    ///
+    /// <para><b>Il problema</b>, osservato in due partite rapid consecutive e poi misurato: appena si
+    /// scende a 5 pezzi il motore puo' spendere 67, 57 e 115 secondi su tre mosse di fila, arrivando
+    /// a giocare il resto della partita con pochi secondi. La causa non e' un nostro difetto: in un
+    /// finale vinto da tabella molte mosse di radice sono equivalenti, quindi la migliore cambia
+    /// davvero a ogni iterazione, <c>bestMoveChanges</c> (sommato su TUTTI i thread, search.cpp:562-566)
+    /// gonfia <c>bestMoveInstability</c> e il budget viene esteso quasi fino al tetto massimo.
+    /// <b>L'oracolo fa lo stesso e peggio</b>: sulla stessa posizione e lo stesso orologio spende
+    /// 122 s a 8 thread contro i nostri 50 (a 1 thread entrambi ~11 s, perche' li' il motore e'
+    /// deterministico, trova il matto e resta stabile).</para>
+    ///
+    /// <para><b>Perche' e' sicuro</b>, ed e' la condizione che l'utente ha posto — puo' allungare la
+    /// vittoria, non farcela perdere. Quando <c>rootInTB</c> e' vero, <c>rank_root_moves</c>
+    /// (tbprobe.cpp:1904) ha gia' ORDINATO le mosse di radice per DTZ tenendo conto della regola
+    /// delle 50 mosse (<c>Syzygy50MoveRule</c>), e <c>rootMoves[0]</c> e' quella che conserva la
+    /// vittoria. Cercare di PIU' serve a trovare il matto piu' corto, e puo' semmai allontanare la
+    /// scelta dall'ordine DTZ; cercare di MENO ci lascia piu' vicini a quell'ordine. Il costo atteso
+    /// e' quindi una vittoria piu' lunga, non una vittoria persa.</para>
+    ///
+    /// <para><b>Si applica solo alle posizioni VINTE</b> (<c>IsWin</c> sul punteggio di tabella), non
+    /// a quelle perse: li' una ricerca piu' lunga puo' ancora cercare una trappola pratica contro un
+    /// avversario fallibile, e non c'e' niente da risparmiare che valga quel rischio.</para></summary>
+    private const double TbWinBudgetMs = 3000.0;
+
     /// <summary>Tetto PRATICO (non di fonte) al budget adattivo: <c>totalTime</c> non può mai
     /// superare questo multiplo di <c>optimum</c>. Misurato dal vivo (2026-09-07, replay della
     /// partita persa a tempo scaduto): con optimum=20,1s il prodotto dei moltiplicatori della
@@ -1263,6 +1290,11 @@ public sealed class Search
 
                     if (_rootMoves.Count == 1)
                         totalTime = Math.Min(500.0, totalTime); // limita a 0.5s per una miglior esperienza visiva
+
+                    // DEVIAZIONE PRATICA DICHIARATA (2026-09-14, scelta esplicita dell'utente dopo
+                    // due partite rapid consecutive) — vedi TbWinBudgetMs.
+                    if (_tbConfig.RootInTb && _rootMoves.Count > 0 && Values.IsWin(_rootMoves[0].TbScore))
+                        totalTime = Math.Min(TbWinBudgetMs, totalTime);
 
                     double elapsedMs = elapsedStopwatch.Elapsed.TotalMilliseconds;
 

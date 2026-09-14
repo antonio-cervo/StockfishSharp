@@ -47,6 +47,7 @@ if not exist "%ESITI%" mkdir "%ESITI%"
   -draw movenumber=40 movecount=8 score=10 ^
   -resign movecount=4 score=700 ^
   -maxmoves 250 ^
+  -recover ^
   -ratinginterval 10 -report penta=true ^
   -pgnout file="%ESITI%\match.pgn" ^
   -log file="%ESITI%\fastchess.log" level=warn
