@@ -1362,8 +1362,11 @@ public sealed class Search
             uciPvSent = false;
         }
 
+        // La riga finale si COSTRUISCE sempre, anche su un helper: se il voto del pool sceglie
+        // lui, e' questa che il layer UCI ristampa (search.cpp:255-256). Emetterla resta compito
+        // del solo principale.
         result.InfoFinale = CostruisciInfoPv(_rootDepth);
-        if (!uciPvSent && result.InfoFinale != null)
+        if (_threadIdx == 0 && !uciPvSent && result.InfoFinale != null)
         {
             SuAggiornamentoPv?.Invoke(result.InfoFinale);
             uciPvSent = true;
@@ -1385,6 +1388,15 @@ public sealed class Search
     /// </summary>
     private bool EmettiPv(int depth)
     {
+        // search.cpp:495 — "if (mainThread)": e' l'EMISSIONE a essere riservata al principale, non
+        // il calcolo della riga. Il guard stava dentro CostruisciInfoPv e produceva un divario
+        // reale: quando il voto del pool sceglie un helper, la fonte ristampa la riga con i dati di
+        // QUEL thread (output_pv(*bestThread), search.cpp:255-256), mentre qui l'helper non l'aveva
+        // mai costruita e il layer UCI non aveva niente da stampare. Risultato: l'ultima riga "info"
+        // descriveva una mossa diversa dal "bestmove" che seguiva. Trovato il 2026-09-14 da un
+        // avviso di fastchess ("Bestmove does not match beginning of last PV"), riprodotto in circa
+        // 1 ricerca su 10 a 8 thread e in 0 su 36 a un thread.
+        if (_threadIdx != 0) return true;
         var info = CostruisciInfoPv(depth);
         if (info != null) SuAggiornamentoPv?.Invoke(info);
         return true; // la fonte assegna uciPvSent anche quando la GUI non ascolta
@@ -1395,7 +1407,10 @@ public sealed class Search
     /// <c>output_pv</c> e non da una formattazione a parte.</summary>
     private InfoIterazione? CostruisciInfoPv(int depth)
     {
-        if (_threadIdx != 0 || _rootMoves.Count == 0)
+        // Nessun filtro sul thread: nella fonte output_pv e' un metodo del SearchManager (il
+        // principale) che riceve il WORKER di cui stampare le rootMoves, e alla riga finale quel
+        // worker puo' essere un helper. Chi non deve parlare e' l'emissione, non il calcolo.
+        if (_rootMoves.Count == 0)
             return null;
 
         var rm = _rootMoves[0];

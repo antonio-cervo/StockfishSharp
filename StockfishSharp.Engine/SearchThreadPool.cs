@@ -296,7 +296,7 @@ public sealed class SearchThreadPool
 
         Task.WaitAll(tasks);
 
-        var best = GetBestResult(results!);
+        var best = GetBestResult(results!, out var vincitore);
 
         // search.cpp:247-248 — "main_manager()->bestPreviousScore = bestThread->rootMoves[0].score"
         // è SEMPRE il vincitore del voto, anche quando è un thread diverso da quello principale:
@@ -307,14 +307,19 @@ public sealed class SearchThreadPool
         // search.cpp:255 — "if (!uciPvSent || bestThread != this)": se il voto ha scelto un thread
         // diverso dal principale, le righe "info" emesse durante la ricerca (solo dal principale)
         // descrivono un'ALTRA linea, quindi la riga finale va comunque ristampata.
-        if (!ReferenceEquals(best, results[0])) best.UciPvSent = false;
+        // search.cpp:254-256 — "if (!uciPvSent || bestThread != this) output_pv(*bestThread, ...)":
+        // quando il voto sceglie un thread diverso dal principale, la riga "info" finale va
+        // RISTAMPATA con i dati di QUEL thread, altrimenti l'ultima riga emessa descrive una mossa
+        // diversa dal bestmove che la segue. Il confronto va fatto sul VINCITORE del voto, non sul
+        // risultato aggregato: quello e' un oggetto nuovo e ReferenceEquals sarebbe sempre falso.
+        if (!ReferenceEquals(vincitore, results[0])) best.UciPvSent = false;
 
         return best;
     }
 
     /// <summary><c>ThreadPool::get_best_thread</c>, thread.cpp:357-408 — vedi la nota in testa al
     /// file per le sostituzioni (BestMove/ScoreCp/Depth al posto di RootMove.pv/score/pv.size()).</summary>
-    private static SearchResult GetBestResult(SearchResult[] results)
+    private static SearchResult GetBestResult(SearchResult[] results, out SearchResult vincitore)
     {
         int minScore = results.Min(r => r.ScoreCp);
 
@@ -365,6 +370,15 @@ public sealed class SearchThreadPool
             }
         }
 
+        // Il risultato aggregato e' un oggetto NUOVO, non quello del vincitore: i contatori vanno
+        // sommati su tutto il pool. Percio' il vincitore esce a parte — serve a chi deve sapere se
+        // il voto ha scelto il principale (search.cpp:255) — e i campi che descrivono la RIGA gia'
+        // emessa vanno copiati da lui, altrimenti il layer UCI non ha niente da ristampare.
+        // Fino al 2026-09-14 UciPvSent, InfoFinale e IsInexact non venivano copiati: la ristampa
+        // era percio' IMPOSSIBILE a qualunque numero di thread, e l'ultima riga "info" poteva
+        // descrivere una mossa diversa dal bestmove (circa 1 ricerca su 10 a 8 thread; l'oracolo,
+        // sulla stessa prova, 0 su 36).
+        vincitore = best;
         return new SearchResult
         {
             BestMove = best.BestMove,
@@ -373,6 +387,9 @@ public sealed class SearchThreadPool
             ScoreCp = best.ScoreCp,
             AverageScore = best.AverageScore,
             Depth = best.Depth,
+            IsInexact = best.IsInexact,
+            UciPvSent = best.UciPvSent,
+            InfoFinale = best.InfoFinale,
             Nodes = results.Sum(r => r.Nodes), // Threads::nodes_searched, thread.cpp — somma su tutti i thread
             TbHits = results.Sum(r => r.TbHits), // Threads::tb_hits(), thread.cpp — idem
         };
