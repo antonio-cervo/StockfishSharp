@@ -254,6 +254,26 @@ public sealed class Search
         return v;
     }
 
+    /// <summary><c>Search::Worker::nodes</c> e <c>tbHits</c>, che nella fonte sono
+    /// <c>RelaxedAtomic&lt;u64&gt;</c> letti DAGLI ALTRI thread mentre questo li scrive
+    /// (<c>ThreadPool::accumulate</c>, thread.cpp:152-153). Un long su x64 non si spezza; il
+    /// Volatile.Read e' per la VISIBILITA', non per l'atomicita'. Corsa benigna dichiarata, come
+    /// nella fonte: il valore letto puo' essere vecchio di qualche nodo.</summary>
+    internal long NodiCercati => System.Threading.Volatile.Read(ref _nodes);
+
+    /// <inheritdoc cref="NodiCercati"/>
+    internal long TbHitsCercati => System.Threading.Volatile.Read(ref _tbHits);
+
+    /// <summary><c>threads.nodes_searched()</c> e <c>threads.tb_hits()</c> — le righe "info" della
+    /// fonte riportano i contatori di TUTTO IL POOL (output_pv, search.cpp:2278 e 2282), non quelli
+    /// del solo worker che le stampa. Il pool li aggancia al thread principale (l'unico che stampa)
+    /// passandoli a <see cref="Search_"/>; senza pool restano nulli e si usano i propri, che a
+    /// Threads=1 sono la stessa cosa.</summary>
+    private Func<long>? _nodiDelPool;
+
+    /// <inheritdoc cref="_nodiDelPool"/>
+    private Func<long>? _tbHitsDelPool;
+
     /// <summary><c>SearchManager::stopOnPonderhit</c>, search.h:313 — vero quando, durante il
     /// pondering, l'ultima iterazione completata ha già superato il tempo che avremmo usato in una
     /// ricerca normale. Letto da <see cref="SearchThreadPool.StopOnPonderhit"/> dal comando
@@ -283,12 +303,13 @@ public sealed class Search
 
     public void SetMoveOverhead(long ms) => _moveOverheadMs = ms;
 
-    /// <summary>Aggancia il segnale di stop CONDIVISO del pool (<c>threads.stop</c> e' uno solo per
-    /// tutti i worker, thread.h). Da qui in poi e' il pool ad azzerarlo.</summary>
-    public void SetSegnaleStop(SegnaleStop segnale)
+    /// <summary>Aggancia i segnali CONDIVISI del pool (<c>threads.stop</c> e
+    /// <c>threads.increaseDepth</c> sono uno solo per tutti i worker, thread.h:157). Da qui in poi
+    /// e' il pool ad azzerarli.</summary>
+    public void SetSegnaliPool(SegnaliPool segnali)
     {
-        _segnaleStop = segnale;
-        _segnaleStopEsterno = true;
+        _segnali = segnali;
+        _segnaliEsterni = true;
     }
 
     /// <summary><c>SearchManager::check_time</c>, search.cpp:2103-2130 — chiamata a ogni nodo dal
@@ -305,11 +326,11 @@ public sealed class Search
         if (--_callsCnt > 0) return;
         _callsCnt = 512; // search.cpp:2109
 
-        if (_ct.IsCancellationRequested) { _segnaleStop.Alza(); return; } // "stop"/"quit" dalla GUI, e il CancelAfter interno
+        if (_ct.IsCancellationRequested) { _segnali.AlzaStop(); return; } // "stop"/"quit" dalla GUI, e il CancelAfter interno
 
         double soft = _softDeadlineMs;
         if (soft > 0 && _elapsedStopwatch!.Elapsed.TotalMilliseconds > soft)
-            _segnaleStop.Alza();
+            _segnali.AlzaStop();
     }
 
     /// <summary>La posizione di RADICE della ricerca in corso (<c>worker.rootPos</c>) e se la
@@ -437,12 +458,12 @@ public sealed class Search
     /// crashare il processo: il motore restava vivo, non stampava mai "bestmove" e la partita si
     /// perdeva per tempo. E' successo due notti di fila sul bot (2026-09-08/09 e 2026-09-09/10);
     /// diagnosticato dal dump del processo piantato ancora vivo.</summary>
-    private SegnaleStop _segnaleStop = new();
+    private SegnaliPool _segnali = new();
 
     /// <summary>Vero quando il segnale arriva dal pool: in quel caso e' il pool ad azzerarlo una
     /// volta sola prima di lanciare i worker (<c>threads.stop = false</c> in start_thinking,
     /// thread.cpp), non ogni worker per conto suo.</summary>
-    private bool _segnaleStopEsterno;
+    private bool _segnaliEsterni;
 
     /// <summary><c>SearchManager::callsCnt</c>, search.cpp:2105 — quanti nodi mancano al prossimo
     /// controllo del tempo.</summary>
@@ -877,14 +898,17 @@ public sealed class Search
     // "maximumMsOverride" resta NoBound e si usa "timeLimit" come sempre, comportamento invariato.
     public SearchResult Search_(Position pos, int maxDepth, TimeSpan timeLimit, CancellationToken ct = default, bool callNewSearch = true, long optimumMs = NoBound,
         Func<ulong>? crossThreadBestMoveChanges = null, int threadCountForInstability = 1,
-        Func<bool>? isPondering = null, long maximumMsOverride = NoBound)
+        Func<bool>? isPondering = null, long maximumMsOverride = NoBound,
+        Func<long>? poolNodes = null, Func<long>? poolTbHits = null)
     {
+        _nodiDelPool = poolNodes;     // threads.nodes_searched(), solo per le righe "info"
+        _tbHitsDelPool = poolTbHits;  // threads.tb_hits(), idem
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeLimit);
         _ct = cts.Token;
         _nodes = 0;
         _callsCnt = 512; // search.cpp:2109
-        if (!_segnaleStopEsterno) _segnaleStop.Azzera(); // thread.cpp, start_thinking
+        if (!_segnaliEsterni) _segnali.AzzeraPerNuovaRicerca(); // thread.cpp, start_thinking
         _tbHits = 0;
         _stopOnPonderhit = false; // ThreadPool::start_thinking, thread.cpp:304
         _nmpMinPly = 0;           // Worker::clear, search.cpp:696
@@ -960,8 +984,10 @@ public sealed class Search
         // reale, verificata offline, di una mossa che ha impiegato l'intero MaximumTime (fino a
         // ~170s) su una posizione dove la mossa migliore cambiava spesso da un'iterazione
         // all'altra: senza questo freno ogni iterazione veniva comunque tentata a piena profondità.
+        // increaseDepth NON e' una variabile locale: e' un flag CONDIVISO del pool
+        // (thread.h:157), scritto solo dal principale e letto da tutti — vedi SegnaliPool.cs. Il
+        // valore iniziale "true" arriva da AzzeraPerNuovaRicerca (thread.cpp:307), non da qui.
         int searchAgainCounter = 0;
-        bool increaseDepth = true;
 
         // Mitigazione PRATICA, non di fonte (2026-09-07, richiesta esplicitamente dall'utente dopo
         // un'analisi diretta di una sconfitta reale a tempo scaduto — vedi
@@ -980,7 +1006,7 @@ public sealed class Search
 
         {
             // search.cpp:332-334 — "!threads.stop" fa parte della CONDIZIONE del ciclo.
-            for (int depth = 1; depth <= maxDepth && !_segnaleStop.Alzato; depth++)
+            for (int depth = 1; depth <= maxDepth && !_segnali.StopAlzato; depth++)
             {
                 _rootDepth = depth;
                 totBestMoveChanges /= 2; // search.cpp:341, invecchia la metrica di instabilità
@@ -989,7 +1015,7 @@ public sealed class Search
                 // search.cpp:356-357 — se l'iterazione precedente non ha lasciato margine
                 // (increaseDepth=false, impostato a fine iterazione precedente sotto), conta
                 // quanti passi di "recupero" servono prima di tornare a una profondità piena.
-                if (!increaseDepth) searchAgainCounter++;
+                if (!_segnali.AumentaProfondita) searchAgainCounter++;
 
                 _selDepth = 0; // search.cpp:373, dentro il ciclo pvIdx (qui multiPV=1, una volta)
 
@@ -1056,7 +1082,7 @@ public sealed class Search
                     // Sorting is safe because RootMoves is still valid, although it refers to the
                     // previous iteration." L'ordinamento sopra va fatto COMUNQUE, anche a ricerca
                     // interrotta: e' quello che tiene valida rootMoves[0].
-                    if (_segnaleStop.Alzato) break;
+                    if (_segnali.StopAlzato) break;
 
                     if (bestValue <= alpha)
                     {
@@ -1085,7 +1111,7 @@ public sealed class Search
                 // search.cpp:495 — la condizione della fonte include "!threads.stop": ora che
                 // un'iterazione interrotta arriva fin qui (prima lanciava un'eccezione e non ci
                 // arrivava mai), quel pezzo di condizione va scritto davvero.
-                if (!_segnaleStop.Alzato)
+                if (!_segnali.StopAlzato)
                     uciPvSent = EmettiPv(depth);
 
                 // Bestmove/punteggio/PV presi dalla vera rootMoves[0] dopo l'ordinamento — non più
@@ -1114,7 +1140,7 @@ public sealed class Search
                 // search.cpp:510-520. Il "if (!threads.stop)" della fonte NON e' piu' implicito:
                 // fino al 2026-09-10 un'iterazione interrotta lanciava un'eccezione e non arrivava
                 // mai qui, ora ci arriva — e i suoi risultati non vanno creduti.
-                if (!_segnaleStop.Alzato)
+                if (!_segnali.StopAlzato)
                 {
                 if (lastBestMovePv.Count == 0 || lastBestMovePv[0] != _rootMoves[0].Pv[0])
                     lastBestMoveDepth = depth;
@@ -1134,7 +1160,7 @@ public sealed class Search
                 // la sconfitta potrebbe essere solo rimandata, o confutata dalle mosse di radice
                 // non ancora esaminate. Anche questo ramo, dichiarato "non rappresentabile qui"
                 // finche' ci si fermava con un'eccezione, ora e' raggiungibile e va portato.
-                bool abortedLossSearch = _segnaleStop.Alzato && _rootMoves[0].IsExactLoss;
+                bool abortedLossSearch = _segnali.StopAlzato && _rootMoves[0].IsExactLoss;
 
                 // search.cpp:529-547 — ripristino: riporta in testa la vecchia mossa migliore col
                 // suo punteggio.
@@ -1183,7 +1209,7 @@ public sealed class Search
                 // un'iterazione interrotta a meta' (search.cpp:505-547) non servono qui", perche'
                 // un'iterazione interrotta lanciava un'eccezione e non arrivava mai a questo punto.
                 // Dal 2026-09-10 quel meccanismo NON ESISTE PIU' (ci si ferma su un flag,
-                // vedi SegnaleStop.cs): un'iterazione interrotta arriva eccome fin qui, ed e'
+                // vedi SegnaliPool.cs): un'iterazione interrotta arriva eccome fin qui, ed e'
                 // proprio quella la ragione per cui i rami sopra ora sono portati tutti.
                 // La motivazione e' vera ma copre solo il ramo "abortedLossSearch": forgottenMate
                 // e' indipendente da threads.stop e riguarda iterazioni COMPLETATE. Ora e' portato,
@@ -1204,7 +1230,7 @@ public sealed class Search
                 // all'inizio del prossimo "go"): innestare tutto qui dentro semplifica senza
                 // cambiare comportamento osservabile.
                 // search.cpp:569 — "!threads.stop" fa parte della condizione anche qui.
-                if (optimumMs < NoBound && !_segnaleStop.Alzato && !_stopOnPonderhit)
+                if (optimumMs < NoBound && !_segnali.StopAlzato && !_stopOnPonderhit)
                 {
                     // search.cpp:561-566 — accumula quante volte la mossa migliore è cambiata in
                     // questa iterazione, mediata su tutti i thread del pool (vedi
@@ -1266,7 +1292,7 @@ public sealed class Search
                         if (pondering)
                             _stopOnPonderhit = true;
                         else
-                            _segnaleStop.Alza(); // search.cpp:610 — "threads.stop = true", non un salto:
+                            _segnali.AlzaStop(); // search.cpp:610 — "threads.stop = true", non un salto:
                                                  // il resto del corpo (iterValue/iterIdx, search.cpp:615-616)
                                                  // viene eseguito comunque, ed e' la condizione del ciclo a
                                                  // chiuderlo. Prima qui c'era un "break" che quelle due righe
@@ -1278,7 +1304,7 @@ public sealed class Search
                         // meriti un incremento pieno di profondità: sempre sì mentre si sta pondering
                         // (mainThread->ponder), altrimenti solo se abbiamo usato meno di metà del
                         // tempo stimato finora.
-                        increaseDepth = pondering || elapsedMs <= totalTime * 0.50;
+                        _segnali.AumentaProfondita = pondering || elapsedMs <= totalTime * 0.50;
 
                         // Mitigazione pratica, non di fonte (vedi il commento su
                         // "previousIterationElapsedMs" sopra il ciclo): se l'iterazione APPENA
@@ -1395,7 +1421,7 @@ public sealed class Search
             Depth = d,
             SelDepth = rm.SelDepth,
             ScoreCp = v,
-            Nodes = _nodes,
+            Nodes = _nodiDelPool?.Invoke() ?? _nodes, // search.cpp:2278, i nodi di TUTTO il pool
             // search.cpp:2282 — "threads.tb_hits() + (worker.tbConfig.rootInTB ? rootMoves.size() : 0)".
             // Con la radice IN TABLEBASE la fonte somma le mosse di radice al contatore: li' la
             // classifica per DTZ ha gia' deciso la mossa e "Cardinality" viene azzerato, quindi
@@ -1405,7 +1431,7 @@ public sealed class Search
             // pezzi l'oracolo diceva 5, 7 e 3 tbhits e noi 0 — e 5, 7, 3 sono esattamente i numeri
             // di mosse legali di quelle tre posizioni. Contatore, non comportamento: la mossa e il
             // punteggio erano gia' identici.
-            TbHits = _tbHits + (_tbConfig.RootInTb ? _rootMoves.Count : 0),
+            TbHits = (_tbHitsDelPool?.Invoke() ?? _tbHits) + (_tbConfig.RootInTb ? _rootMoves.Count : 0),
             Pv = [.. usePreviousScore ? rm.PreviousPv : rm.Pv],
         };
 
@@ -1634,7 +1660,7 @@ public sealed class Search
         // e' la fonte a metterceli insieme.
         if (ply != 0)
         {
-            if (_segnaleStop.Alzato || pos.IsDraw(ply) || ply >= Ply.MaxPly)
+            if (_segnali.StopAlzato || pos.IsDraw(ply) || ply >= Ply.MaxPly)
             {
                 int vPatta = ply >= Ply.MaxPly && pos.Checkers() == 0
                     ? Evaluate.StaticEval(pos, _accumulatorStack, Optimism(pos.SideToMove)) : ValueDraw();
@@ -2548,7 +2574,7 @@ public sealed class Search
             // e' affidabile: si esce SUBITO, senza aggiornare mossa migliore, PV e transposition
             // table". Si arriva qui DOPO la UndoMove, quindi la posizione e' gia' tornata a posto:
             // e' esattamente questo che rende sicuro fermarsi a meta' albero.
-            if (_segnaleStop.Alzato) return Values.Zero;
+            if (_segnali.StopAlzato) return Values.Zero;
 
             if (Traccia && ply <= TracciaPlyMax)
             {

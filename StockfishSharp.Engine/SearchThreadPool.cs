@@ -57,11 +57,12 @@ public sealed class SearchThreadPool
     private readonly List<Search> _searches = [];
     private SharedHistories _sharedHistories = new(1);
 
-    /// <summary><c>ThreadPool::stop</c> (thread.h) — UNO SOLO per tutti i worker, ed e' il punto:
-    /// il thread principale lo alza e gli helper se ne accorgono nei loro nodi. Prima gli helper si
-    /// fermavano solo sul CancellationToken, che pero' viene guardato da check_time — che nella
-    /// fonte (e ora anche qui) gira SOLO sul thread principale.</summary>
-    private SegnaleStop _segnaleStop = new();
+    /// <summary><c>ThreadPool::stop</c> e <c>ThreadPool::increaseDepth</c> (thread.h:157) — UNO
+    /// SOLO per tutti i worker, ed e' il punto: il thread principale li scrive e gli helper se ne
+    /// accorgono nei loro nodi. Prima gli helper si fermavano solo sul CancellationToken, che pero'
+    /// viene guardato da check_time — che nella fonte (e ora anche qui) gira SOLO sul thread
+    /// principale.</summary>
+    private SegnaliPool _segnali = new();
     private (bool useRule50, int probeDepth, int probeLimit) _syzygyOptions = (true, 1, 7);
 
     public int ThreadCount => _searches.Count;
@@ -98,7 +99,7 @@ public sealed class SearchThreadPool
         for (int i = 0; i < n; i++)
         {
             var s = new Search(_tt, _searches.Count, _sharedHistories); // threadIdx, search.cpp:173
-            s.SetSegnaleStop(_segnaleStop); // threads.stop e' condiviso: uno per il pool, non uno per worker
+            s.SetSegnaliPool(_segnali); // threads.stop/increaseDepth sono condivisi: uno per il pool, non per worker
             s.SetSyzygyOptions(_syzygyOptions.useRule50, _syzygyOptions.probeDepth, _syzygyOptions.probeLimit);
             if (i == 0) s.SuAggiornamentoPv = _suAggiornamentoPv; // solo mainThread, search.cpp:495
             s.SetMoveOverhead(_moveOverheadMs);
@@ -175,10 +176,10 @@ public sealed class SearchThreadPool
     {
         if (_searches.Count == 0) SetThreadCount(1);
 
-        // thread.cpp, start_thinking: "threads.stop = false" UNA VOLTA SOLA prima di avviare i
-        // worker. Da qui in poi i Search non lo azzerano piu' da soli (SetSegnaleStop), cosi' un
+        // thread.cpp:304-307, start_thinking: "threads.stop = false" e "increaseDepth = true"
+        // UNA VOLTA SOLA prima di avviare i worker. Da qui in poi i Search non lo azzerano piu' da soli (SetSegnaliPool), cosi' un
         // worker che parte tardi non puo' cancellare uno stop gia' chiesto.
-        _segnaleStop.Azzera();
+        _segnali.AzzeraPerNuovaRicerca();
 
         if (_searches.Count == 1)
             return _searches[0].Search_(rootPos, maxDepth, timeLimit, ct, optimumMs: optimumMs,
@@ -235,6 +236,24 @@ public sealed class SearchThreadPool
             return total;
         }
 
+        // ThreadPool::nodes_searched()/tb_hits(), thread.cpp:152-153 — le righe "info" della fonte
+        // riportano i contatori di TUTTO il pool (output_pv, search.cpp:2278 e 2282). Le stampa il
+        // solo thread principale, quindi bastano a lui. Il RISULTATO finale invece si somma gia'
+        // per conto suo in GetBestResult: qui si corregge solo cio' che si vede durante la ricerca.
+        long NodiDelPool()
+        {
+            long total = 0;
+            foreach (var s in _searches) total += s.NodiCercati;
+            return total;
+        }
+
+        long TbHitsDelPool()
+        {
+            long total = 0;
+            foreach (var s in _searches) total += s.TbHitsCercati;
+            return total;
+        }
+
         var results = new SearchResult?[_searches.Count];
         var tasks = new Task[_searches.Count];
         for (int i = 0; i < _searches.Count; i++)
@@ -245,11 +264,26 @@ public sealed class SearchThreadPool
                 // Il thread principale rispetta il limite di profondità richiesto da UCI.
                 tasks[idx] = Task.Factory.StartNew(() =>
                 {
-                    results[idx] = _searches[idx].Search_(positions[idx], maxDepth, timeLimit, stopCt, callNewSearch: false, optimumMs: optimumMs,
-                        crossThreadBestMoveChanges: SumAndResetBestMoveChangesAcrossPool, threadCountForInstability: _searches.Count,
-                        isPondering: isPondering, maximumMsOverride: maximumMsOverride);
-                    _segnaleStop.Alza(); // il principale ha finito: gli helper si fermano sul FLAG...
-                    stopCts.Cancel();     // ...e il token resta per chi aspetta fuori
+                    // try/finally, non due righe in coda alla chiamata: gli helper hanno UNA SOLA
+                    // uscita, il flag _segnali (il loro stopCt non lo guarda nessuno, perché
+                    // CheckTime() è chiamato solo dal principale — fedele a search.cpp). Se
+                    // Search_ del principale esce per ECCEZIONE, senza il finally il flag non si
+                    // alza, gli helper non hanno altre scadenze e Task.WaitAll non torna mai:
+                    // processo vivo, motore muto. È la firma del blocco intermittente del bench
+                    // multi-thread annotato in docs/audit-multithread.md. L'eccezione continua a
+                    // propagarsi (la rilancia Task.WaitAll), ma il pool si smonta comunque.
+                    try
+                    {
+                        results[idx] = _searches[idx].Search_(positions[idx], maxDepth, timeLimit, stopCt, callNewSearch: false, optimumMs: optimumMs,
+                            crossThreadBestMoveChanges: SumAndResetBestMoveChangesAcrossPool, threadCountForInstability: _searches.Count,
+                            isPondering: isPondering, maximumMsOverride: maximumMsOverride,
+                            poolNodes: NodiDelPool, poolTbHits: TbHitsDelPool);
+                    }
+                    finally
+                    {
+                        _segnali.AlzaStop(); // il principale ha finito: gli helper si fermano sul FLAG...
+                        stopCts.Cancel();     // ...e il token resta per chi aspetta fuori
+                    }
                 }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             }
             else
